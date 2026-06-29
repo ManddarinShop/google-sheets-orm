@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   ConflictError,
+  GoogleSheetsAdapter,
   ParseError,
   SchemaDriftError,
   boolean,
@@ -19,5 +20,6 @@ describe("public API", () => {
     expect(SchemaDriftError).toBeTypeOf("function");
     expect(ParseError).toBeTypeOf("function");
     expect(ConflictError).toBeTypeOf("function");
+    expect(GoogleSheetsAdapter).toBeTypeOf("function");
   });
 });
