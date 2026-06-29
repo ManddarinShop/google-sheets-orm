@@ -322,6 +322,7 @@ concurrency control과 transaction semantics는 후순위입니다. 우선순위
 
 ```sh
 npm test
+npm run test:integration
 npm run typecheck
 npm run build
 ```
@@ -335,3 +336,53 @@ Current test coverage focuses on:
 - insert behavior
 - update behavior
 - public API exports
+
+## Integration Smoke Test
+
+Google Sheets integration tests are opt-in. They are not part of the default `npm test` command because they require credentials, spreadsheet access, and Google API quota.
+
+Prepare a test sheet with this header row:
+
+| id | email | age | active | _version |
+| --- | --- | --- | --- | --- |
+
+For service account authentication:
+
+1. Create or choose a Google Cloud service account.
+2. Download its JSON key.
+3. Share the target spreadsheet with the service account email.
+4. Run:
+
+```sh
+GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json \
+GOOGLE_SPREADSHEET_ID=your-spreadsheet-id \
+GOOGLE_SHEET_NAME=Users \
+npm run test:integration
+```
+
+The smoke test inserts a timestamp-based row and then updates it. It does not delete the row because the MVP adapter does not implement row deletion.
+
+### 한국어
+
+Google Sheets integration test는 opt-in입니다. credentials, spreadsheet access, Google API quota가 필요하므로 기본 `npm test`에는 포함하지 않습니다.
+
+테스트용 sheet에는 다음 header row가 필요합니다.
+
+| id | email | age | active | _version |
+| --- | --- | --- | --- | --- |
+
+service account 인증 기준:
+
+1. Google Cloud service account를 만들거나 선택합니다.
+2. JSON key를 다운로드합니다.
+3. 대상 spreadsheet를 service account email에 공유합니다.
+4. 아래 명령을 실행합니다.
+
+```sh
+GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json \
+GOOGLE_SPREADSHEET_ID=your-spreadsheet-id \
+GOOGLE_SHEET_NAME=Users \
+npm run test:integration
+```
+
+smoke test는 timestamp 기반 row를 insert한 뒤 update합니다. MVP adapter에는 row deletion이 없으므로 테스트 row를 삭제하지 않습니다.
