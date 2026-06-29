@@ -2,6 +2,9 @@ export { boolean, number, text } from "./Columns.js";
 export { createSheetRepository } from "./Repository.js";
 export { ConflictError, ParseError, SchemaDriftError } from "./Errors.js";
 
+export { GoogleSheetsAdapter } from "./GoogleSheetsAdapter.js";
+export type { GoogleSheetsAdapterOptions } from "./GoogleSheetsAdapter.js";
+
 export type { SheetAdapter, SheetCell, SheetSnapshot } from "./Adapter.js";
 export type { Column } from "./Columns.js";
 export type {
