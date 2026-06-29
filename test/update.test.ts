@@ -1,3 +1,144 @@
-import { describe } from "vitest";
+import { describe, expect, it } from "vitest";
 
-describe.todo("repository updates and optimistic locking");
+import { boolean, number, text } from "../src/Columns.js";
+import { ConflictError } from "../src/Errors.js";
+import { createSheetRepository } from "../src/Repository.js";
+import { FakeSheetAdapter } from "./fake-adapter.js";
+
+interface User {
+  id: string;
+  email: string;
+  age: number | undefined;
+  active: boolean;
+  _version: number;
+}
+
+describe("repository updates and optimistic locking", () => {
+  const columns = {
+    id: text(),
+    email: text(),
+    age: number().optional(),
+    active: boolean(),
+    _version: number(),
+  };
+
+  it("passes the current row to updater and writes the updated row", async () => {
+    const adapter = new FakeSheetAdapter({
+      Users: {
+        headers: ["id", "email", "age", "active", "_version"],
+        rows: [{ rowNumber: 2, cells: ["u1", "a@test.com", 20, true, 1] }],
+      },
+    });
+
+    const users = createSheetRepository<User>({
+      adapter,
+      sheetName: "Users",
+      key: "id",
+      columns,
+    });
+
+    const result = await users.update("u1", current => ({
+      ...current,
+      age: current.age === undefined ? 1 : current.age + 1,
+    }));
+
+    expect(result).toEqual({
+      id: "u1",
+      email: "a@test.com",
+      age: 21,
+      active: true,
+      _version: 2,
+    });
+
+    expect(adapter.updatedRows).toEqual([
+      {
+        sheetName: "Users",
+        rowNumber: 2,
+        row: ["u1", "a@test.com", 21, true, 2],
+      },
+    ]);
+  });
+
+  it("uses sheet header order when writing the updated row", async () => {
+    const adapter = new FakeSheetAdapter({
+      Users: {
+        headers: ["_version", "active", "age", "email", "id"],
+        rows: [{ rowNumber: 2, cells: [1, true, 20, "a@test.com", "u1"] }],
+      },
+    });
+
+    const users = createSheetRepository<User>({
+      adapter,
+      sheetName: "Users",
+      key: "id",
+      columns,
+    });
+
+    await users.update("u1", current => ({
+      ...current,
+      active: false,
+    }));
+
+    expect(adapter.updatedRows[0]).toEqual({
+      sheetName: "Users",
+      rowNumber: 2,
+      row: [2, false, 20, "a@test.com", "u1"],
+    });
+  });
+
+  it("returns null when the target row does not exist", async () => {
+    const adapter = new FakeSheetAdapter({
+      Users: {
+        headers: ["id", "email", "age", "active", "_version"],
+        rows: [{ rowNumber: 2, cells: ["u1", "a@test.com", 20, true, 1] }],
+      },
+    });
+
+    const users = createSheetRepository<User>({
+      adapter,
+      sheetName: "Users",
+      key: "id",
+      columns,
+    });
+
+    await expect(
+      users.update("missing", current => ({
+        ...current,
+        active: false,
+      })),
+    ).resolves.toBeNull();
+
+    expect(adapter.updatedRows).toEqual([]);
+  });
+
+  it("rejects stale writes when version changes before write", async () => {
+    const adapter = new FakeSheetAdapter({
+      Users: [
+        {
+          headers: ["id", "email", "age", "active", "_version"],
+          rows: [{ rowNumber: 2, cells: ["u1", "a@test.com", 20, true, 1] }],
+        },
+        {
+          headers: ["id", "email", "age", "active", "_version"],
+          rows: [{ rowNumber: 2, cells: ["u1", "a@test.com", 20, true, 2] }],
+        },
+      ],
+    });
+
+    const users = createSheetRepository<User>({
+      adapter,
+      sheetName: "Users",
+      key: "id",
+      columns,
+    });
+
+    await expect(
+      users.update("u1", current => ({
+        ...current,
+        age: 21,
+      })),
+    ).rejects.toThrow(ConflictError);
+
+    expect(adapter.updatedRows).toEqual([]);
+  });
+});
