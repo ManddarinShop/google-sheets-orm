@@ -17,7 +17,8 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run"
+    "test": "vitest run test/*.test.ts",
+    "test:integration": "vitest run test/integration/google-sheets-smoke.test.ts"
   },
   "keywords": [
     "google-sheets",
