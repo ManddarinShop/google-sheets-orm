@@ -1,0 +1,7 @@
+# Local planning notes
+typed-sheets-plan*.md
+typed-sheets-mvp-scope*.md
+
+# Dependencies and build output
+node_modules/
+dist/
