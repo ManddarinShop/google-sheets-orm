@@ -5,3 +5,8 @@ typed-sheets-mvp-scope*.md
 # Dependencies and build output
 node_modules/
 dist/
+
+# Local environment
+.env
+.env.*
+!.env.example
