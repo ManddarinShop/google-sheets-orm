@@ -23,9 +23,9 @@ describe("Google Sheets adapter helpers", () => {
     expect(() => toA1ColumnName(-1)).toThrow(RangeError);
   });
 
-  it("leaves simple sheet names unquoted", () => {
-    expect(quoteSheetName("Users")).toBe("Users");
-    expect(quoteSheetName("Users_2026")).toBe("Users_2026");
+  it("quotes simple sheet names", () => {
+    expect(quoteSheetName("Users")).toBe("'Users'");
+    expect(quoteSheetName("Users_2026")).toBe("'Users_2026'");
   });
 
   it("quotes sheet names with spaces or special characters", () => {
@@ -38,7 +38,7 @@ describe("Google Sheets adapter helpers", () => {
   });
 
   it("creates a row range using A1 notation", () => {
-    expect(toRowRange("Users", 2, 5)).toBe("Users!A2:E2");
+    expect(toRowRange("Users", 2, 5)).toBe("'Users'!A2:E2");
     expect(toRowRange("My Sheet", 10, 3)).toBe("'My Sheet'!A10:C10");
   });
 
@@ -91,7 +91,7 @@ describe("GoogleSheetsAdapter.readSheet", () => {
 
     expect(get).toHaveBeenCalledWith({
       spreadsheetId: "spreadsheet-id",
-      range: "Users",
+      range: "'Users'!A:ZZ",
       valueRenderOption: "UNFORMATTED_VALUE",
     });
   });
@@ -179,7 +179,7 @@ describe("GoogleSheetsAdapter.updateRow", () => {
 
     expect(update).toHaveBeenCalledWith({
       spreadsheetId: "spreadsheet-id",
-      range: "Users!A2:E2",
+      range: "'Users'!A2:E2",
       valueInputOption: "RAW",
       requestBody: {
         values: [["u1", "a@test.com", 20, true, 1]],

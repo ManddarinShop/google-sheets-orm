@@ -1,9 +1,11 @@
-import { sheets, type sheets_v4 } from "@googleapis/sheets";
+import { auth as googleAuth, sheets, type sheets_v4 } from "@googleapis/sheets";
 import type { SheetAdapter, SheetCell, SheetSnapshot } from "./Adapter.js";
+
+type GoogleSheetsAuth = NonNullable<sheets_v4.Options["auth"]>
 
 export interface GoogleSheetsAdapterOptions {
   spreadsheetId: string;
-  auth: unknown;
+  auth?: GoogleSheetsAuth;
   sheetsClient?: sheets_v4.Sheets;
 }
 
@@ -13,14 +15,21 @@ export class GoogleSheetsAdapter implements SheetAdapter {
   private readonly spreadsheetId: string;
 
   constructor(options: GoogleSheetsAdapterOptions) {
+    const auth =
+      options.auth ??
+      new googleAuth.GoogleAuth({
+        scopes: ["https://www.googleapis.com/auth/spreadsheets"],
+      });
+
     this.spreadsheetId = options.spreadsheetId;
-    this.sheetsClient = options.sheetsClient ?? sheets({ version: "v4", auth: options.auth as any });
+    this.sheetsClient = options.sheetsClient ?? sheets({ version: "v4", auth});
+    
   }
 
   async readSheet(sheetName: string): Promise<SheetSnapshot> {
     const response = await this.sheetsClient.spreadsheets.values.get({
       spreadsheetId: this.spreadsheetId,
-      range: sheetName,
+      range: `${quoteSheetName(sheetName)}!A:ZZ`,
       valueRenderOption: "UNFORMATTED_VALUE",
     });
 
@@ -83,9 +92,9 @@ export function toA1ColumnName(index: number): string {
 }
 
 export function quoteSheetName(sheetName: string): string {
-  if (/^[A-Za-z0-9_]+$/.test(sheetName)) {
-    return sheetName;
-  }
+  // if (/^[A-Za-z0-9_]+$/.test(sheetName)) {
+  //   return sheetName;
+  // }
 
   return `'${sheetName.replaceAll("'", "''")}'`;
 }
