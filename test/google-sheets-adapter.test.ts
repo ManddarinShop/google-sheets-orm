@@ -2,11 +2,17 @@ import { describe, expect, it, vi } from "vitest";
 import type { sheets_v4 } from "@googleapis/sheets";
 
 import {
+  extractSpreadsheetId,
   GoogleSheetsAdapter,
   quoteSheetName,
   toA1ColumnName,
   toRowRange,
 } from "../src/GoogleSheetsAdapter.js";
+
+type InitializableGoogleSheetsAdapter = GoogleSheetsAdapter & {
+  ensureSheet(sheetName: string): Promise<void>;
+  writeHeader(sheetName: string, headers: string[]): Promise<void>;
+};
 
 describe("Google Sheets adapter helpers", () => {
   it("converts zero-based column indexes to A1 column names", () => {
@@ -47,9 +53,65 @@ describe("Google Sheets adapter helpers", () => {
     expect(() => toRowRange("Users", 2, 0)).toThrow(RangeError);
     expect(() => toRowRange("Users", 2, -1)).toThrow(RangeError);
   });
+
+  it("extracts a spreadsheet id from a Google Sheets URL", () => {
+    expect(
+      extractSpreadsheetId(
+        "https://docs.google.com/spreadsheets/d/spreadsheet-id/edit?gid=0#gid=0",
+      ),
+    ).toBe("spreadsheet-id");
+  });
+
+  it("rejects non-Google-Sheets URLs when extracting spreadsheet ids", () => {
+    expect(() => extractSpreadsheetId("https://example.com/not-a-sheet")).toThrow(
+      /Invalid Google Sheets URL/,
+    );
+  });
 });
 
 describe("GoogleSheetsAdapter.readSheet", () => {
+  it("accepts a Google Sheets URL instead of a raw spreadsheet id", async () => {
+    const get = vi.fn().mockResolvedValue({
+      data: {
+        values: [["id"]],
+      },
+    });
+
+    const sheetsClient = {
+      spreadsheets: {
+        values: {
+          get,
+        },
+      },
+    } as unknown as sheets_v4.Sheets;
+
+    const adapter = new GoogleSheetsAdapter({
+      spreadsheetUrl:
+        "https://docs.google.com/spreadsheets/d/spreadsheet-id/edit?gid=0#gid=0",
+      auth: "unused",
+      sheetsClient,
+    });
+
+    await adapter.readSheet("Users");
+
+    expect(get).toHaveBeenCalledWith({
+      spreadsheetId: "spreadsheet-id",
+      range: "'Users'!A:ZZ",
+      valueRenderOption: "UNFORMATTED_VALUE",
+    });
+  });
+
+  it("rejects invalid Google Sheets URLs", () => {
+    expect(
+      () =>
+        new GoogleSheetsAdapter({
+          spreadsheetUrl: "https://example.com/not-a-google-sheet",
+          auth: "unused",
+          sheetsClient: {} as sheets_v4.Sheets,
+        }),
+    ).toThrow(/Invalid Google Sheets URL/);
+  });
+
   it("reads headers and rows from Google Sheets values", async () => {
     const get = vi.fn().mockResolvedValue({
       data: {
@@ -70,7 +132,7 @@ describe("GoogleSheetsAdapter.readSheet", () => {
     } as unknown as sheets_v4.Sheets;
 
     const adapter = new GoogleSheetsAdapter({
-      spreadsheetId: "spreadsheet-id",
+      spreadsheetUrl: "https://docs.google.com/spreadsheets/d/spreadsheet-id/edit",
       auth: "unused",
       sheetsClient,
     });
@@ -110,7 +172,7 @@ describe("GoogleSheetsAdapter.readSheet", () => {
     } as unknown as sheets_v4.Sheets;
 
     const adapter = new GoogleSheetsAdapter({
-      spreadsheetId: "spreadsheet-id",
+      spreadsheetUrl: "https://docs.google.com/spreadsheets/d/spreadsheet-id/edit",
       auth: "unused",
       sheetsClient,
     });
@@ -137,7 +199,7 @@ describe("GoogleSheetsAdapter.appendRow", () => {
     } as unknown as sheets_v4.Sheets;
 
     const adapter = new GoogleSheetsAdapter({
-      spreadsheetId: "spreadsheet-id",
+      spreadsheetUrl: "https://docs.google.com/spreadsheets/d/spreadsheet-id/edit",
       auth: "unused",
       sheetsClient,
     });
@@ -170,7 +232,7 @@ describe("GoogleSheetsAdapter.updateRow", () => {
     } as unknown as sheets_v4.Sheets;
 
     const adapter = new GoogleSheetsAdapter({
-      spreadsheetId: "spreadsheet-id",
+      spreadsheetUrl: "https://docs.google.com/spreadsheets/d/spreadsheet-id/edit",
       auth: "unused",
       sheetsClient,
     });
@@ -201,7 +263,7 @@ describe("GoogleSheetsAdapter.updateRow", () => {
     } as unknown as sheets_v4.Sheets;
 
     const adapter = new GoogleSheetsAdapter({
-      spreadsheetId: "spreadsheet-id",
+      spreadsheetUrl: "https://docs.google.com/spreadsheets/d/spreadsheet-id/edit",
       auth: "unused",
       sheetsClient,
     });
@@ -214,6 +276,137 @@ describe("GoogleSheetsAdapter.updateRow", () => {
       valueInputOption: "RAW",
       requestBody: {
         values: [["u1", "a@test.com", 1]],
+      },
+    });
+  });
+});
+
+describe("GoogleSheetsAdapter.ensureSheet", () => {
+  it("does not create a sheet tab when the tab already exists", async () => {
+    const get = vi.fn().mockResolvedValue({
+      data: {
+        sheets: [{ properties: { title: "Users" } }],
+      },
+    });
+    const batchUpdate = vi.fn().mockResolvedValue({ data: {} });
+
+    const sheetsClient = {
+      spreadsheets: {
+        get,
+        batchUpdate,
+      },
+    } as unknown as sheets_v4.Sheets;
+
+    const adapter = new GoogleSheetsAdapter({
+      spreadsheetUrl: "https://docs.google.com/spreadsheets/d/spreadsheet-id/edit",
+      auth: "unused",
+      sheetsClient,
+    }) as InitializableGoogleSheetsAdapter;
+
+    await adapter.ensureSheet("Users");
+
+    expect(get).toHaveBeenCalledWith({
+      spreadsheetId: "spreadsheet-id",
+      fields: "sheets.properties.title",
+    });
+    expect(batchUpdate).not.toHaveBeenCalled();
+  });
+
+  it("creates a sheet tab when the tab is missing", async () => {
+    const get = vi.fn().mockResolvedValue({
+      data: {
+        sheets: [{ properties: { title: "Orders" } }],
+      },
+    });
+    const batchUpdate = vi.fn().mockResolvedValue({ data: {} });
+
+    const sheetsClient = {
+      spreadsheets: {
+        get,
+        batchUpdate,
+      },
+    } as unknown as sheets_v4.Sheets;
+
+    const adapter = new GoogleSheetsAdapter({
+      spreadsheetUrl: "https://docs.google.com/spreadsheets/d/spreadsheet-id/edit",
+      auth: "unused",
+      sheetsClient,
+    }) as InitializableGoogleSheetsAdapter;
+
+    await adapter.ensureSheet("Users");
+
+    expect(batchUpdate).toHaveBeenCalledWith({
+      spreadsheetId: "spreadsheet-id",
+      requestBody: {
+        requests: [
+          {
+            addSheet: {
+              properties: {
+                title: "Users",
+              },
+            },
+          },
+        ],
+      },
+    });
+  });
+});
+
+describe("GoogleSheetsAdapter.writeHeader", () => {
+  it("writes headers to the first row using raw value input", async () => {
+    const update = vi.fn().mockResolvedValue({ data: {} });
+
+    const sheetsClient = {
+      spreadsheets: {
+        values: {
+          update,
+        },
+      },
+    } as unknown as sheets_v4.Sheets;
+
+    const adapter = new GoogleSheetsAdapter({
+      spreadsheetUrl: "https://docs.google.com/spreadsheets/d/spreadsheet-id/edit",
+      auth: "unused",
+      sheetsClient,
+    }) as InitializableGoogleSheetsAdapter;
+
+    await adapter.writeHeader("Users", ["id", "email", "age", "active", "_version"]);
+
+    expect(update).toHaveBeenCalledWith({
+      spreadsheetId: "spreadsheet-id",
+      range: "'Users'!A1:E1",
+      valueInputOption: "RAW",
+      requestBody: {
+        values: [["id", "email", "age", "active", "_version"]],
+      },
+    });
+  });
+
+  it("quotes sheet names when writing headers", async () => {
+    const update = vi.fn().mockResolvedValue({ data: {} });
+
+    const sheetsClient = {
+      spreadsheets: {
+        values: {
+          update,
+        },
+      },
+    } as unknown as sheets_v4.Sheets;
+
+    const adapter = new GoogleSheetsAdapter({
+      spreadsheetUrl: "https://docs.google.com/spreadsheets/d/spreadsheet-id/edit",
+      auth: "unused",
+      sheetsClient,
+    }) as InitializableGoogleSheetsAdapter;
+
+    await adapter.writeHeader("My Sheet", ["id", "email"]);
+
+    expect(update).toHaveBeenCalledWith({
+      spreadsheetId: "spreadsheet-id",
+      range: "'My Sheet'!A1:B1",
+      valueInputOption: "RAW",
+      requestBody: {
+        values: [["id", "email"]],
       },
     });
   });
