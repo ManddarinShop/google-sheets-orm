@@ -4,6 +4,8 @@ export class FakeSheetAdapter implements SheetAdapter {
   private readIndex = 0;
 
   readonly appendedRows: Array<{ sheetName: string; row: SheetCell[] }> = [];
+  readonly ensuredSheets: string[] = [];
+  readonly writtenHeaders: Array<{ sheetName: string; headers: string[] }> = [];
   readonly updatedRows: Array<{
     sheetName: string;
     rowNumber: number;
@@ -35,6 +37,14 @@ export class FakeSheetAdapter implements SheetAdapter {
         cells: [...row.cells],
       })),
     };
+  }
+
+  async ensureSheet(sheetName: string): Promise<void> {
+    this.ensuredSheets.push(sheetName);
+  }
+
+  async writeHeader(sheetName: string, headers: string[]): Promise<void> {
+    this.writtenHeaders.push({ sheetName, headers: [...headers] });
   }
 
   async appendRow(sheetName: string, row: SheetCell[]): Promise<void> {

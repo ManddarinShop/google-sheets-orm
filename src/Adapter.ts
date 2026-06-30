@@ -18,4 +18,6 @@ export interface SheetAdapter {
     rowNumber: number,
     row: SheetCell[],
   ): Promise<void>;
+  ensureSheet?(sheetName: string): Promise<void>;
+  writeHeader?(sheetName: string, headers: string[]): Promise<void>;
 }
