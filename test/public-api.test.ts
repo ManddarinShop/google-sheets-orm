@@ -12,7 +12,7 @@ import {
 } from "../src/index.js";
 
 describe("public API", () => {
-  it("exports repository factory, column factories, and public errors", () => {
+  it("exports repository factory, column factories, adapter, and public errors", () => {
     expect(createSheetRepository).toBeTypeOf("function");
     expect(text).toBeTypeOf("function");
     expect(number).toBeTypeOf("function");
@@ -21,5 +21,10 @@ describe("public API", () => {
     expect(ParseError).toBeTypeOf("function");
     expect(ConflictError).toBeTypeOf("function");
     expect(GoogleSheetsAdapter).toBeTypeOf("function");
+  });
+
+  it("exposes sheet initialization methods on the Google Sheets adapter", () => {
+    expect(GoogleSheetsAdapter.prototype.ensureSheet).toBeTypeOf("function");
+    expect(GoogleSheetsAdapter.prototype.writeHeader).toBeTypeOf("function");
   });
 });
