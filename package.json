@@ -18,7 +18,7 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run test/*.test.ts",
-    "test:integration": "vitest run test/integration/google-sheets-smoke.test.ts"
+    "test:integration": "node --env-file-if-exists=.env ./node_modules/vitest/vitest.mjs run test/integration/google-sheets-smoke.test.ts"
   },
   "keywords": [
     "google-sheets",

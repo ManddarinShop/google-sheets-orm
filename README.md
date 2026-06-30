@@ -148,10 +148,12 @@ export interface SheetAdapter {
   readSheet(sheetName: string): Promise<SheetSnapshot>;
   appendRow(sheetName: string, row: SheetCell[]): Promise<void>;
   updateRow(sheetName: string, rowNumber: number, row: SheetCell[]): Promise<void>;
+  ensureSheet?(sheetName: string): Promise<void>;
+  writeHeader?(sheetName: string, headers: string[]): Promise<void>;
 }
 ```
 
-The adapter owns authentication, Google API calls, range mapping, append, and row update mechanics.
+The adapter owns authentication, Google API calls, range mapping, append, row update mechanics, and optional sheet initialization.
 
 The core owns schema validation, parsing, duplicate key detection, repository methods, and optimistic locking.
 
@@ -159,7 +161,7 @@ The core owns schema validation, parsing, duplicate key detection, repository me
 
 `typed-sheets` core는 Google SDK에 직접 의존하지 않습니다.
 
-adapter는 인증, Google API 호출, range mapping, append, row update를 담당합니다.
+adapter는 인증, Google API 호출, range mapping, append, row update, optional sheet initialization을 담당합니다.
 
 core는 schema validation, parsing, duplicate key detection, repository method, optimistic locking을 담당합니다.
 
@@ -171,16 +173,20 @@ core는 schema validation, parsing, duplicate key detection, repository method, 
 import { GoogleSheetsAdapter } from "typed-sheets";
 
 const adapter = new GoogleSheetsAdapter({
-  spreadsheetId: process.env.GOOGLE_SPREADSHEET_ID!,
+  spreadsheetUrl: process.env.GOOGLE_SPREADSHEET_URL!,
   auth,
 });
 ```
 
 The adapter currently implements:
 
+- `ensureSheet(sheetName)`
+- `writeHeader(sheetName, headers)`
 - `readSheet(sheetName)`
 - `appendRow(sheetName, row)`
 - `updateRow(sheetName, rowNumber, row)`
+
+`ensureSheet` creates a missing sheet tab. Repository-level `ensureSheet()` writes schema headers only when the header row is empty. If headers already exist, it checks schema drift and does not auto-rewrite them.
 
 It uses raw values where possible:
 
@@ -193,9 +199,13 @@ It uses raw values where possible:
 
 현재 구현된 메서드:
 
+- `ensureSheet(sheetName)`
+- `writeHeader(sheetName, headers)`
 - `readSheet(sheetName)`
 - `appendRow(sheetName, row)`
 - `updateRow(sheetName, rowNumber, row)`
+
+`ensureSheet`는 sheet tab이 없으면 생성합니다. repository-level `ensureSheet()`는 header row가 비어 있을 때만 schema 기준 header를 작성합니다. 이미 header가 있으면 schema drift만 검사하고 자동 수정하지 않습니다.
 
 가능한 raw value 기준으로 동작합니다.
 
@@ -341,10 +351,12 @@ Current test coverage focuses on:
 
 Google Sheets integration tests are opt-in. They are not part of the default `npm test` command because they require credentials, spreadsheet access, and Google API quota.
 
-Prepare a test sheet with this header row:
+The smoke test calls repository-level `ensureSheet()` before CRUD. If the configured sheet tab is missing, the adapter creates it. If the header row is empty, the repository writes this schema header:
 
 | id | email | age | active | _version |
 | --- | --- | --- | --- | --- |
+
+If headers already exist, the test does not rewrite them. Schema drift still fails.
 
 For service account authentication:
 
@@ -355,10 +367,12 @@ For service account authentication:
 
 ```sh
 GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json \
-GOOGLE_SPREADSHEET_ID=your-spreadsheet-id \
+GOOGLE_SPREADSHEET_URL=https://docs.google.com/spreadsheets/d/your-spreadsheet-id/edit \
 GOOGLE_SHEET_NAME=Users \
 npm run test:integration
 ```
+
+You can also put these values in `.env`; `npm run test:integration` loads `.env` automatically when it exists.
 
 The smoke test inserts a timestamp-based row and then updates it. It does not delete the row because the MVP adapter does not implement row deletion.
 
@@ -366,10 +380,12 @@ The smoke test inserts a timestamp-based row and then updates it. It does not de
 
 Google Sheets integration test는 opt-in입니다. credentials, spreadsheet access, Google API quota가 필요하므로 기본 `npm test`에는 포함하지 않습니다.
 
-테스트용 sheet에는 다음 header row가 필요합니다.
+smoke test는 CRUD 전에 repository-level `ensureSheet()`를 호출합니다. 설정한 sheet tab이 없으면 adapter가 생성합니다. header row가 비어 있으면 repository가 아래 schema header를 작성합니다.
 
 | id | email | age | active | _version |
 | --- | --- | --- | --- | --- |
+
+이미 header가 있으면 자동 수정하지 않습니다. schema drift는 여전히 실패합니다.
 
 service account 인증 기준:
 
@@ -380,9 +396,11 @@ service account 인증 기준:
 
 ```sh
 GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json \
-GOOGLE_SPREADSHEET_ID=your-spreadsheet-id \
+GOOGLE_SPREADSHEET_URL=https://docs.google.com/spreadsheets/d/your-spreadsheet-id/edit \
 GOOGLE_SHEET_NAME=Users \
 npm run test:integration
 ```
+
+`.env`에 값을 넣어도 됩니다. `npm run test:integration`은 `.env`가 있으면 자동으로 읽습니다.
 
 smoke test는 timestamp 기반 row를 insert한 뒤 update합니다. MVP adapter에는 row deletion이 없으므로 테스트 row를 삭제하지 않습니다.

@@ -16,6 +16,7 @@ export interface CreateSheetRepositoryInput<T extends Record<string, unknown>> {
 }
 
 export interface SheetRepository<T extends Record<string, unknown>> {
+  ensureSheet(): Promise<void>;
   findAll(): Promise<T[]>;
   findById(id: string): Promise<T | null>;
   insert(row: T): Promise<void>;
@@ -26,6 +27,29 @@ export function createSheetRepository<T extends Record<string, unknown>>(
   input: CreateSheetRepositoryInput<T>,
 ): SheetRepository<T> {
   const { adapter, sheetName, key, columns } = input;
+
+  async function ensureSheet(): Promise<void> {
+    if (!adapter.ensureSheet || !adapter.writeHeader) {
+      throw new SchemaDriftError(
+        "Adapter does not support automatic sheet initialization",
+      );
+    }
+
+    await adapter.ensureSheet(sheetName);
+
+    const snapshot = await adapter.readSheet(sheetName);
+
+    if (snapshot.headers.length === 0) {
+      await adapter.writeHeader(sheetName, Object.keys(columns));
+      return;
+    }
+
+    assertSchema({
+      headers: snapshot.headers,
+      key,
+      columns,
+    });
+  }
 
   async function findAll(): Promise<T[]> {
     const snapshot = await adapter.readSheet(sheetName);
@@ -171,7 +195,7 @@ export function createSheetRepository<T extends Record<string, unknown>>(
     return updateRow;
   }
 
-  return { findAll, findById, insert, update };
+  return { ensureSheet, findAll, findById, insert, update };
 }
 
 function assertUniqueKeys<T extends Record<string, unknown>>(
