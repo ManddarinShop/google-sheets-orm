@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 
-import { boolean, number, text } from "../src/Columns.js";
-import { ParseError } from "../src/Errors.js";
-import { parseRow } from "../src/RowParser.js";
+import { boolean, number, text } from "../src/core/Columns.js";
+import { ParseError } from "../src/core/Errors.js";
+import { parseRow } from "../src/core/RowParser.js";
 
 describe("row parser", () => {
   const columns = {

@@ -74,6 +74,8 @@ Use bilingual PR bodies:
 
 ## Before Opening A PR
 
+When a coherent work unit is finished, open a PR instead of leaving the work only as local commits.
+
 Run the relevant checks:
 
 - `npm test`
