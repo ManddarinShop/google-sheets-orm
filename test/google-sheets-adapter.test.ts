@@ -7,7 +7,7 @@ import {
   quoteSheetName,
   toA1ColumnName,
   toRowRange,
-} from "../src/GoogleSheetsAdapter.js";
+} from "../src/adapter/GoogleSheetsAdapter.js";
 
 type InitializableGoogleSheetsAdapter = GoogleSheetsAdapter & {
   ensureSheet(sheetName: string): Promise<void>;

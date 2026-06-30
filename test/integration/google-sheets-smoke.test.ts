@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { boolean, createSheetRepository, number, text } from "../../src/index.js";
-import { GoogleSheetsAdapter } from "../../src/GoogleSheetsAdapter.js";
+import { GoogleSheetsAdapter } from "../../src/adapter/GoogleSheetsAdapter.js";
 
 interface SmokeUser {
   id: string;

@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 
-import { boolean, number, text } from "../src/Columns.js";
-import { ConflictError } from "../src/Errors.js";
-import { createSheetRepository } from "../src/Repository.js";
+import { boolean, number, text } from "../src/core/Columns.js";
+import { ConflictError } from "../src/core/Errors.js";
+import { createSheetRepository } from "../src/core/Repository.js";
 import { FakeSheetAdapter } from "./fake-adapter.js";
 
 interface User {
