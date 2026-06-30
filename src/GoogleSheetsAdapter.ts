@@ -1,14 +1,13 @@
 import { auth as googleAuth, sheets, type sheets_v4 } from "@googleapis/sheets";
 import type { SheetAdapter, SheetCell, SheetSnapshot } from "./Adapter.js";
 
-type GoogleSheetsAuth = NonNullable<sheets_v4.Options["auth"]>
+type GoogleSheetsAuth = NonNullable<sheets_v4.Options["auth"]>;
 
 export interface GoogleSheetsAdapterOptions {
-  spreadsheetId: string;
+  spreadsheetUrl: string;
   auth?: GoogleSheetsAuth;
   sheetsClient?: sheets_v4.Sheets;
 }
-
 
 export class GoogleSheetsAdapter implements SheetAdapter {
   private readonly sheetsClient: sheets_v4.Sheets;
@@ -21,9 +20,48 @@ export class GoogleSheetsAdapter implements SheetAdapter {
         scopes: ["https://www.googleapis.com/auth/spreadsheets"],
       });
 
-    this.spreadsheetId = options.spreadsheetId;
-    this.sheetsClient = options.sheetsClient ?? sheets({ version: "v4", auth});
-    
+    this.spreadsheetId = extractSpreadsheetId(options.spreadsheetUrl);
+    this.sheetsClient = options.sheetsClient ?? sheets({ version: "v4", auth });
+  }
+
+  async ensureSheet(sheetName: string): Promise<void> {
+    const response = await this.sheetsClient.spreadsheets.get({
+      spreadsheetId: this.spreadsheetId,
+      fields: "sheets.properties.title",
+    });
+
+    const sheets = response.data.sheets ?? [];
+    const exists = sheets.some(
+      (sheet) => sheet.properties?.title === sheetName,
+    );
+
+    if (exists) return;
+
+    await this.sheetsClient.spreadsheets.batchUpdate({
+      spreadsheetId: this.spreadsheetId,
+      requestBody: {
+        requests: [
+          {
+            addSheet: {
+              properties: {
+                title: sheetName,
+              },
+            },
+          },
+        ],
+      },
+    });
+  }
+
+  async writeHeader(sheetName: string, headers: string[]): Promise<void> {
+    await this.sheetsClient.spreadsheets.values.update({
+      spreadsheetId: this.spreadsheetId,
+      range: toRowRange(sheetName, 1, headers.length),
+      valueInputOption: "RAW",
+      requestBody: {
+        values: [headers],
+      },
+    });
   }
 
   async readSheet(sheetName: string): Promise<SheetSnapshot> {
@@ -38,14 +76,12 @@ export class GoogleSheetsAdapter implements SheetAdapter {
     const dataRows = values.slice(1);
 
     return {
-      headers: headerRow.map(value => String(value)),
+      headers: headerRow.map((value) => String(value)),
       rows: dataRows.map((cells, index) => ({
         rowNumber: index + 2,
-        cells: cells.map(toSheetCell)
-      }))
+        cells: cells.map(toSheetCell),
+      })),
     };
-
-
   }
   async appendRow(sheetName: string, row: SheetCell[]): Promise<void> {
     await this.sheetsClient.spreadsheets.values.append({
@@ -54,10 +90,10 @@ export class GoogleSheetsAdapter implements SheetAdapter {
       valueInputOption: "RAW",
       requestBody: {
         values: [row],
-      }
+      },
     });
   }
-  
+
   async updateRow(
     sheetName: string,
     rowNumber: number,
@@ -92,10 +128,6 @@ export function toA1ColumnName(index: number): string {
 }
 
 export function quoteSheetName(sheetName: string): string {
-  // if (/^[A-Za-z0-9_]+$/.test(sheetName)) {
-  //   return sheetName;
-  // }
-
   return `'${sheetName.replaceAll("'", "''")}'`;
 }
 
@@ -119,18 +151,30 @@ export function toRowRange(
   return `${quotedSheetName}!${startColumn}${rowNumber}:${endColumn}${rowNumber}`;
 }
 
-function toSheetCell(value: unknown): SheetCell { 
+export function extractSpreadsheetId(url: string): string {
+  const match = url.match(
+    /^https:\/\/docs\.google\.com\/spreadsheets\/d\/([^/]+)(?:\/|$)/,
+  );
+
+  if (!match?.[1]) {
+    throw new Error("Invalid Google Sheets URL");
+  }
+
+  return match[1];
+}
+
+function toSheetCell(value: unknown): SheetCell {
   if (
     typeof value === "string" ||
-      typeof value === "number" ||
-      typeof value === "boolean"
-  ) { 
+    typeof value === "number" ||
+    typeof value === "boolean"
+  ) {
     return value;
   }
 
   if (value === null || value === undefined) {
-      return null;
-    }
+    return null;
+  }
 
-    return String(value);
+  return String(value);
 }

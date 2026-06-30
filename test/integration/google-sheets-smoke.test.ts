@@ -11,15 +11,15 @@ interface SmokeUser {
   _version: number;
 }
 
-const spreadsheetId = process.env.GOOGLE_SPREADSHEET_ID;
+const spreadsheetUrl = process.env.GOOGLE_SPREADSHEET_URL;
 const sheetName = process.env.GOOGLE_SHEET_NAME ?? "Users";
-const shouldRun = Boolean(spreadsheetId);
+const shouldRun = Boolean(spreadsheetUrl);
 const describeIntegration = shouldRun ? describe : describe.skip;
 
 describeIntegration("Google Sheets smoke test", () => {
   it("reads, inserts, finds, and updates a row through the repository", async () => {
     const adapter = new GoogleSheetsAdapter({
-      spreadsheetId: spreadsheetId!,
+      spreadsheetUrl: spreadsheetUrl!,
     });
 
     const users = createSheetRepository<SmokeUser>({
@@ -36,6 +36,8 @@ describeIntegration("Google Sheets smoke test", () => {
     });
 
     const id = `smoke-${Date.now()}`;
+
+    await users.ensureSheet();
 
     await users.insert({
       id,
