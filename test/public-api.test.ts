@@ -7,8 +7,12 @@ import {
   SchemaDriftError,
   boolean,
   createSheetRepository,
+  loadTypedSheetsConfig,
   number,
+  parseTypedSheetsConfig,
+  runSetup,
   text,
+  writeTypedSheetsConfig,
 } from "../src/index.js";
 
 describe("public API", () => {
@@ -21,6 +25,10 @@ describe("public API", () => {
     expect(ParseError).toBeTypeOf("function");
     expect(ConflictError).toBeTypeOf("function");
     expect(GoogleSheetsAdapter).toBeTypeOf("function");
+    expect(parseTypedSheetsConfig).toBeTypeOf("function");
+    expect(loadTypedSheetsConfig).toBeTypeOf("function");
+    expect(writeTypedSheetsConfig).toBeTypeOf("function");
+    expect(runSetup).toBeTypeOf("function");
   });
 
   it("exposes sheet initialization methods on the Google Sheets adapter", () => {

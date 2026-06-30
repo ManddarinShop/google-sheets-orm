@@ -1,4 +1,4 @@
-import { SheetAdapter } from "./Adapter.js";
+import { SheetAdapter } from "../adapter/Adapter.js";
 import { Column } from "./Columns.js";
 import { ConflictError, SchemaDriftError } from "./Errors.js";
 import { parseRow } from "./RowParser.js";

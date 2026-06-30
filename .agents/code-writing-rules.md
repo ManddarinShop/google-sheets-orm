@@ -10,6 +10,35 @@ No inference is allowed. Even if the next step seems obvious, even if tests fail
 
 Writing tests is never permission to modify production source.
 
+## Mandatory Pre-Work Rule Check
+
+Before starting any new task, read these agent rule files again:
+
+- `.agents/code-writing-rules.md`
+- `.agents/project-rules.md`
+- `.agents/git-rules.md`
+
+Do this before interpreting the user's request, before editing files, and before running implementation commands.
+
+If the request is ambiguous after reading the rules, choose the safer interpretation:
+
+- explain the next step
+- edit tests/docs/config only when directly requested
+- do not edit `src/**`
+
+## Dependency Requests Are Not Production Permission
+
+When the user asks to install or add a dependency, that request authorizes dependency/config changes only.
+
+It does not authorize:
+
+- editing `src/**`
+- wiring the dependency into runtime code
+- changing CLI behavior
+- implementing the feature that will eventually use the dependency
+
+After adding a dependency, stop and report the result unless the user separately and explicitly asks for production implementation.
+
 ## What Counts As Production Source
 
 Production source includes:
