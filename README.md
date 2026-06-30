@@ -59,11 +59,11 @@ npm run build
 
 ```ts
 import {
+  GoogleSheetsAdapter,
   boolean,
   createSheetRepository,
   number,
   text,
-  type SheetAdapter,
 } from "typed-sheets";
 
 interface User {
@@ -74,7 +74,9 @@ interface User {
   _version: number;
 }
 
-const adapter: SheetAdapter = createYourGoogleSheetsAdapter();
+const adapter = new GoogleSheetsAdapter({
+  spreadsheetUrl: process.env.GOOGLE_SPREADSHEET_URL!,
+});
 
 const users = createSheetRepository<User>({
   adapter,
@@ -88,6 +90,8 @@ const users = createSheetRepository<User>({
     _version: number(),
   },
 });
+
+await users.ensureSheet();
 
 const allUsers = await users.findAll();
 const user = await users.findById("u1");
@@ -105,6 +109,12 @@ const updated = await users.update("u2", current => ({
   age: 30,
 }));
 ```
+
+`ensureSheet()` creates the `Users` tab when it is missing and writes the schema header only when the header row is empty. Existing headers are validated, not automatically rewritten.
+
+### 한국어
+
+`ensureSheet()`는 `Users` tab이 없으면 생성하고, header row가 비어 있을 때만 schema 기준 header를 작성합니다. 이미 존재하는 header는 자동 수정하지 않고 검증합니다.
 
 ## Sheet Shape
 
@@ -322,11 +332,31 @@ The long-term direction is a lightweight SQL layer backed by Google Sheets, clos
 
 Concurrency control and transaction semantics are later-stage work. The first priority is a typed table/storage model that can safely support repository operations and eventually a small SQL subset.
 
+Before the SQL layer, the next priority is a setup layer that improves first-run accessibility:
+
+- install the library
+- run a setup command
+- sign in with Google
+- paste or enter a Google Sheets URL
+- write a local JSON configuration file for the application to use
+
+The setup layer should make the first successful connection easier without changing the repository safety model.
+
 ### 한국어
 
 장기 방향은 Google Sheets를 storage로 사용하는 lightweight SQL layer입니다. MVP와 내부툴을 위한 online H2-like database 경험에 가깝습니다.
 
 concurrency control과 transaction semantics는 후순위입니다. 우선순위는 repository operation과 향후 작은 SQL subset을 안전하게 지원할 수 있는 typed table/storage model입니다.
+
+SQL layer 전에 우선할 작업은 first-run accessibility를 위한 setup layer입니다.
+
+- library 설치
+- setup command 실행
+- Google login
+- Google Sheets URL 입력
+- application이 사용할 local JSON config 생성
+
+setup layer는 repository safety model을 바꾸지 않고 첫 연결 성공까지의 과정을 쉽게 만드는 것이 목표입니다.
 
 ## Development
 
