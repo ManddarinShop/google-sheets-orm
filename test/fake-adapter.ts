@@ -1,4 +1,4 @@
-import type { SheetAdapter, SheetCell, SheetSnapshot } from "../src/Adapter.js";
+import type { SheetAdapter, SheetCell, SheetSnapshot } from "../src/adapter/Adapter.js";
 
 export class FakeSheetAdapter implements SheetAdapter {
   private readIndex = 0;

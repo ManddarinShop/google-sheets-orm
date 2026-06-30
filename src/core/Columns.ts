@@ -1,4 +1,4 @@
-import { SheetCell } from "./Adapter.js";
+import { SheetCell } from "../adapter/Adapter.js";
 import { ParseError } from "./Errors.js";
 
 export interface Column<T> {
@@ -93,4 +93,3 @@ export function boolean(): Column<boolean> {
     (value) => value,
   );
 }
-

@@ -130,8 +130,10 @@ README and PR bodies should mention limitations clearly:
 
 When in doubt:
 
+0. Before starting any task, re-read `.agents/code-writing-rules.md`, `.agents/project-rules.md`, and `.agents/git-rules.md`.
 1. Prefer tests, docs, or explanation over production edits.
 2. Do not edit `src/**` without explicit implementation permission.
-3. Keep changes small.
-4. Preserve the core/adapter/SQL layering.
-5. Report exact commands run and test results.
+3. Treat dependency installation as dependency/config permission only, not runtime implementation permission.
+4. Keep changes small.
+5. Preserve the core/adapter/SQL layering.
+6. Report exact commands run and test results.
