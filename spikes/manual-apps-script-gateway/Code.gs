@@ -31,28 +31,116 @@ function doPost(e) {
     });
   }
 
-  if (request.operation !== "ping") {
-    return json_({
-      ok: false,
-      error: "unknown_operation",
-    });
-  }
-
   const lock = LockService.getDocumentLock();
   lock.waitLock(30000);
 
   try {
     const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
 
+    if (request.operation === "ping") {
+      return json_({
+        ok: true,
+        locked: true,
+        spreadsheetId: spreadsheet.getId(),
+        sheetName: spreadsheet.getActiveSheet().getName(),
+      });
+    }
+
+    if (request.operation === "readSheet") {
+      return json_(readSheet_(spreadsheet, request));
+    }
+
+    if (request.operation === "appendRow") {
+      appendRow_(spreadsheet, request);
+      return json_({ ok: true });
+    }
+
+    if (request.operation === "updateRow") {
+      updateRow_(spreadsheet, request);
+      return json_({ ok: true });
+    }
+
     return json_({
-      ok: true,
-      locked: true,
-      spreadsheetId: spreadsheet.getId(),
-      sheetName: spreadsheet.getActiveSheet().getName(),
+      ok: false,
+      error: "unknown_operation",
+    });
+  } catch (error) {
+    return json_({
+      ok: false,
+      error: error && error.message ? error.message : String(error),
     });
   } finally {
     lock.releaseLock();
   }
+}
+
+function readSheet_(spreadsheet, request) {
+  const sheet = getSheet_(spreadsheet, request.sheetName);
+  const values = sheet.getDataRange().getValues();
+  const headers = (values[0] || []).map(function(value) {
+    return String(value);
+  });
+  const rows = values.slice(1).map(function(cells, index) {
+    return {
+      rowNumber: index + 2,
+      cells: cells.map(toSheetCell_),
+    };
+  });
+
+  return {
+    ok: true,
+    headers: headers,
+    rows: rows,
+  };
+}
+
+function appendRow_(spreadsheet, request) {
+  const sheet = getSheet_(spreadsheet, request.sheetName);
+  const row = requireArray_(request.row, "row");
+
+  sheet.appendRow(row);
+}
+
+function updateRow_(spreadsheet, request) {
+  const sheet = getSheet_(spreadsheet, request.sheetName);
+  const row = requireArray_(request.row, "row");
+  const rowNumber = Number(request.rowNumber);
+
+  if (!Number.isInteger(rowNumber) || rowNumber < 1) {
+    throw new Error("rowNumber must be a positive integer");
+  }
+
+  sheet.getRange(rowNumber, 1, 1, row.length).setValues([row]);
+}
+
+function getSheet_(spreadsheet, sheetName) {
+  if (typeof sheetName !== "string" || sheetName.trim() === "") {
+    throw new Error("sheetName must be a non-empty string");
+  }
+
+  const sheet = spreadsheet.getSheetByName(sheetName);
+
+  if (!sheet) {
+    throw new Error("sheet not found: " + sheetName);
+  }
+
+  return sheet;
+}
+
+function requireArray_(value, name) {
+  if (!Array.isArray(value)) {
+    throw new Error(name + " must be an array");
+  }
+
+  return value;
+}
+
+function toSheetCell_(value) {
+  if (value === "") {
+    return null;
+  }
+
+  return value;
 }
 
 function createTypedSheetsConfig_() {

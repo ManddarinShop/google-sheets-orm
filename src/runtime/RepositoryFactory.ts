@@ -1,4 +1,5 @@
 import { auth as googleAuth } from "@googleapis/sheets";
+import { AppsScriptGatewayAdapter } from "../adapter/AppsScriptGatewayAdapter.js";
 import type { SheetAdapter } from "../adapter/Adapter.js";
 import { GoogleSheetsAdapter } from "../adapter/GoogleSheetsAdapter.js";
 import {
@@ -23,21 +24,11 @@ export interface CreateRepositoryFromConfigOptions<
 
 export async function createRepositoryFromConfig<
   T extends Record<string, unknown>,
-    >(options: CreateRepositoryFromConfigOptions<T>): Promise<SheetRepository<T>> {
-  let config: TypedSheetsConfig;
-
-  if (options.cwd !== undefined && options.configPath !== undefined) {
-    config = await loadTypedSheetsConfig({
-      cwd: options.cwd,
-      configPath: options.configPath,
-    });
-  } else if (options.cwd !== undefined) {
-    config = await loadTypedSheetsConfig({ cwd: options.cwd });
-  } else if (options.configPath !== undefined) {
-    config = await loadTypedSheetsConfig({ configPath: options.configPath });
-  } else {
-    config = await loadTypedSheetsConfig();
-  }
+>(options: CreateRepositoryFromConfigOptions<T>): Promise<SheetRepository<T>> {
+  const config = await loadTypedSheetsConfig({
+    cwd: options.cwd,
+    configPath: options.configPath,
+  });
 
   const adapter = options.createAdapter
     ? await options.createAdapter(config)
@@ -53,9 +44,10 @@ export async function createRepositoryFromConfig<
 
 function createAdapterFromConfig(config: TypedSheetsConfig): SheetAdapter {
   if (config.auth.type === "apps-script-gateway") {
-    throw new Error(
-      "Apps Script gateway runtime adapter is not implemented yet",
-    );
+    return new AppsScriptGatewayAdapter({
+      gatewayUrl: config.auth.gatewayUrl,
+      gatewaySecret: config.auth.gatewaySecret,
+    });
   }
 
   const auth = new googleAuth.GoogleAuth({
