@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { boolean, number, text } from "../src/core/Columns.js";
 import { SchemaDriftError } from "../src/core/Errors.js";
 import { createSheetRepository } from "../src/core/Repository.js";
+import type { SheetAdapter, SheetSnapshot } from "../src/adapter/Adapter.js";
 import { FakeSheetAdapter } from "./fake-adapter.js";
 
 interface User {
@@ -45,6 +46,47 @@ describe("repository sheet initialization", () => {
 
     expect(adapter.ensuredSheets).toEqual(["Users"]);
     expect(adapter.writtenHeaders).toEqual([
+      {
+        sheetName: "Users",
+        headers: ["id", "email", "age", "active", "_version"],
+      },
+    ]);
+  });
+
+  it("uses atomic adapter initialization when available", async () => {
+    const initializedSheets: Array<{ sheetName: string; headers: string[] }> =
+      [];
+    const snapshot: SheetSnapshot = {
+      headers: ["id", "email", "age", "active", "_version"],
+      rows: [],
+    };
+    const adapter: SheetAdapter = {
+      async initializeSheet(sheetName, headers) {
+        initializedSheets.push({ sheetName, headers: [...headers] });
+      },
+      async readSheet() {
+        return snapshot;
+      },
+      async appendRow() {},
+      async updateRow() {},
+      async ensureSheet() {
+        throw new Error("ensureSheet should not be called");
+      },
+      async writeHeader() {
+        throw new Error("writeHeader should not be called");
+      },
+    };
+
+    const users = createSheetRepository<User>({
+      adapter,
+      sheetName: "Users",
+      key: "id",
+      columns,
+    }) as unknown as InitializableRepository;
+
+    await users.ensureSheet();
+
+    expect(initializedSheets).toEqual([
       {
         sheetName: "Users",
         headers: ["id", "email", "age", "active", "_version"],

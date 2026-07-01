@@ -29,6 +29,20 @@ export function createSheetRepository<T extends Record<string, unknown>>(
   const { adapter, sheetName, key, columns } = input;
 
   async function ensureSheet(): Promise<void> {
+    if (adapter.initializeSheet) {
+      await adapter.initializeSheet(sheetName, Object.keys(columns));
+
+      const snapshot = await adapter.readSheet(sheetName);
+
+      assertSchema({
+        headers: snapshot.headers,
+        key,
+        columns,
+      });
+
+      return;
+    }
+
     if (!adapter.ensureSheet || !adapter.writeHeader) {
       throw new SchemaDriftError(
         "Adapter does not support automatic sheet initialization",
