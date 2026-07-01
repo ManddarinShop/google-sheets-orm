@@ -12,6 +12,7 @@ export interface GoogleSheetsAdapterOptions {
 export class GoogleSheetsAdapter implements SheetAdapter {
   private readonly sheetsClient: sheets_v4.Sheets;
   private readonly spreadsheetId: string;
+  private readonly sheetIdCache = new Map<string, number>();
 
   constructor(options: GoogleSheetsAdapterOptions) {
     const auth =
@@ -27,17 +28,23 @@ export class GoogleSheetsAdapter implements SheetAdapter {
   async ensureSheet(sheetName: string): Promise<void> {
     const response = await this.sheetsClient.spreadsheets.get({
       spreadsheetId: this.spreadsheetId,
-      fields: "sheets.properties.title",
+      fields: "sheets.properties.sheetId,sheets.properties.title",
     });
 
     const sheets = response.data.sheets ?? [];
-    const exists = sheets.some(
+    const existingSheet = sheets.find(
       (sheet) => sheet.properties?.title === sheetName,
     );
+    const existingSheetId = existingSheet?.properties?.sheetId;
 
-    if (exists) return;
+    if (existingSheet) {
+      if (typeof existingSheetId === "number") {
+        this.sheetIdCache.set(sheetName, existingSheetId);
+      }
+      return;
+    }
 
-    await this.sheetsClient.spreadsheets.batchUpdate({
+    const responseAfterCreate = await this.sheetsClient.spreadsheets.batchUpdate({
       spreadsheetId: this.spreadsheetId,
       requestBody: {
         requests: [
@@ -51,6 +58,12 @@ export class GoogleSheetsAdapter implements SheetAdapter {
         ],
       },
     });
+    const createdSheetId =
+      responseAfterCreate.data.replies?.[0]?.addSheet?.properties?.sheetId;
+
+    if (typeof createdSheetId === "number") {
+      this.sheetIdCache.set(sheetName, createdSheetId);
+    }
   }
 
   async writeHeader(sheetName: string, headers: string[]): Promise<void> {
@@ -107,6 +120,62 @@ export class GoogleSheetsAdapter implements SheetAdapter {
         values: [row],
       },
     });
+  }
+
+  // Deletes a physical Google Sheets row; repository-level locking happens
+  // before this adapter method is called.
+  async deleteRow(sheetName: string, rowNumber: number): Promise<void> {
+    if (!Number.isInteger(rowNumber) || rowNumber < 2) {
+      throw new RangeError(`Invalid data row number "${rowNumber}"`);
+    }
+
+    const sheetId = await this.getSheetId(sheetName);
+
+    await this.sheetsClient.spreadsheets.batchUpdate({
+      spreadsheetId: this.spreadsheetId,
+      requestBody: {
+        requests: [
+          {
+            deleteDimension: {
+              range: {
+                sheetId,
+                dimension: "ROWS",
+                startIndex: rowNumber - 1,
+                endIndex: rowNumber,
+              },
+            },
+          },
+        ],
+      },
+    });
+  }
+
+  // Google batchUpdate needs a numeric sheetId, so cache the lookup by tab name
+  // for the adapter lifetime to avoid an extra API call on repeated deletes.
+  private async getSheetId(sheetName: string): Promise<number> {
+    const cached = this.sheetIdCache.get(sheetName);
+
+    if (cached !== undefined) {
+      return cached;
+    }
+
+    const response = await this.sheetsClient.spreadsheets.get({
+      spreadsheetId: this.spreadsheetId,
+      fields: "sheets.properties.sheetId,sheets.properties.title",
+    });
+
+    const sheet = (response.data.sheets ?? []).find(
+      (candidate) => candidate.properties?.title === sheetName,
+    );
+    const sheetId = sheet?.properties?.sheetId;
+
+    if (typeof sheetId !== "number") {
+      throw new Error(`Sheet not found: ${sheetName}`);
+    }
+
+    this.sheetIdCache.set(sheetName, sheetId);
+
+    return sheetId;
   }
 }
 
