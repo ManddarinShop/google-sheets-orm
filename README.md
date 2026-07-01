@@ -23,8 +23,6 @@ The current MVP focuses on repository safety:
 
 ## Installation
 
-This package is not published yet.
-
 For local development:
 
 ```sh
@@ -35,6 +33,134 @@ npm run build
 ```
 
 ## Quick Start
+
+Create a local config first. After the package is published, run:
+
+```sh
+npx typed-sheets setup
+```
+
+For local development, run the CLI from a linked package or add a temporary
+package script that points at `dist/cli/Cli.js` after `npm run build`.
+
+The setup command writes `.typed-sheets.json`. Choose one connection path:
+
+- service account: best for servers, CI, and deployed apps that can use a
+  Google Cloud service account
+- Apps Script gateway: best when the spreadsheet owner wants to connect without
+  a service account or Google Cloud setup
+
+Example service-account config:
+
+```json
+{
+  "spreadsheetUrl": "https://docs.google.com/spreadsheets/d/your-spreadsheet-id/edit",
+  "defaultSheetName": "Users",
+  "auth": {
+    "type": "service-account",
+    "credentialsFile": "/absolute/path/to/service-account.json"
+  }
+}
+```
+
+Example Apps Script gateway config:
+
+```json
+{
+  "spreadsheetUrl": "https://docs.google.com/spreadsheets/d/your-spreadsheet-id/edit",
+  "defaultSheetName": "Users",
+  "auth": {
+    "type": "apps-script-gateway",
+    "gatewayUrl": "https://script.google.com/macros/s/your-deployment-id/exec",
+    "gatewaySecret": "your-gateway-secret"
+  }
+}
+```
+
+For the Apps Script gateway path, deploy the shipped `Code.gs` script as a Web
+App before using the generated config. See the manual gateway guide in
+[`spikes/manual-apps-script-gateway/README.md`](spikes/manual-apps-script-gateway/README.md).
+
+Then create repositories from that config:
+
+```ts
+import {
+  boolean,
+  createRepositoryFromConfig,
+  number,
+  text,
+} from "typed-sheets";
+
+interface User {
+  id: string;
+  email: string;
+  age: number | undefined;
+  active: boolean;
+  _version: number;
+}
+
+const users = await createRepositoryFromConfig<User>({
+  key: "id",
+  columns: {
+    id: text(),
+    email: text(),
+    age: number().optional(),
+    active: boolean(),
+    _version: number(),
+  },
+});
+
+await users.ensureSheet();
+
+const allUsers = await users.findAll();
+const user = await users.findById("u1");
+
+await users.insert({
+  id: "u2",
+  email: "b@test.com",
+  age: undefined,
+  active: true,
+  _version: 1,
+});
+
+const updated = await users.update("u2", current => ({
+  ...current,
+  age: 30,
+}));
+```
+
+`ensureSheet()` creates the configured sheet tab when it is missing and writes
+the schema header only when the header row is empty. Existing headers are
+validated, not automatically rewritten.
+
+## Config-Based Runtime
+
+After running `typed-sheets setup`, `createRepositoryFromConfig()` reads
+`.typed-sheets.json` from the current working directory by default. Pass `cwd`
+or `configPath` to point at a different config file.
+
+```ts
+const users = await createRepositoryFromConfig<User>({
+  cwd: "/app",
+  configPath: "/app/.typed-sheets.json",
+  key: "id",
+  columns,
+});
+```
+
+Service account configs create a `GoogleSheetsAdapter` and call the Google
+Sheets API directly. The target Sheet must be shared with the service account
+`client_email`.
+
+Apps Script gateway configs create an `AppsScriptGatewayAdapter` and send
+repository operations to the deployed Web App with `gatewayUrl` and
+`gatewaySecret`. The gateway script must be the `Code.gs` generated or shipped
+with the same package version.
+
+## Advanced Direct Adapter Usage
+
+Use direct adapter construction when you want to manage authentication and
+adapter wiring yourself instead of loading `.typed-sheets.json`.
 
 ```ts
 import {
@@ -69,90 +195,7 @@ const users = createSheetRepository<User>({
     _version: number(),
   },
 });
-
-await users.ensureSheet();
-
-const allUsers = await users.findAll();
-const user = await users.findById("u1");
-
-await users.insert({
-  id: "u2",
-  email: "b@test.com",
-  age: undefined,
-  active: true,
-  _version: 1,
-});
-
-const updated = await users.update("u2", current => ({
-  ...current,
-  age: 30,
-}));
 ```
-
-`ensureSheet()` creates the `Users` tab when it is missing and writes the schema header only when the header row is empty. Existing headers are validated, not automatically rewritten.
-
-## Config-Based Runtime
-
-After running `typed-sheets setup`, applications can load `.typed-sheets.json`
-and create a repository directly from the generated config.
-
-```ts
-import {
-  boolean,
-  createRepositoryFromConfig,
-  number,
-  text,
-} from "typed-sheets";
-
-interface User {
-  id: string;
-  email: string;
-  age: number | undefined;
-  active: boolean;
-  _version: number;
-}
-
-const users = await createRepositoryFromConfig<User>({
-  key: "id",
-  columns: {
-    id: text(),
-    email: text(),
-    age: number().optional(),
-    active: boolean(),
-    _version: number(),
-  },
-});
-
-await users.ensureSheet();
-await users.insert({
-  id: "u1",
-  email: "a@test.com",
-  age: undefined,
-  active: true,
-  _version: 1,
-});
-```
-
-By default, the factory reads `.typed-sheets.json` from the current working
-directory. Pass `cwd` or `configPath` to point at a different config file.
-
-```ts
-const users = await createRepositoryFromConfig<User>({
-  cwd: "/app",
-  configPath: "/app/.typed-sheets.json",
-  key: "id",
-  columns,
-});
-```
-
-Service account configs create a `GoogleSheetsAdapter` and call the Google
-Sheets API directly. The target Sheet must be shared with the service account
-`client_email`.
-
-Apps Script gateway configs create an `AppsScriptGatewayAdapter` and send
-repository operations to the deployed Web App with `gatewayUrl` and
-`gatewaySecret`. The gateway script must be the `Code.gs` generated or shipped
-with the same package version.
 
 ## Sheet Shape
 
@@ -192,6 +235,7 @@ export interface SheetAdapter {
   updateRow(sheetName: string, rowNumber: number, row: SheetCell[]): Promise<void>;
   ensureSheet?(sheetName: string): Promise<void>;
   writeHeader?(sheetName: string, headers: string[]): Promise<void>;
+  initializeSheet?(sheetName: string, headers: string[]): Promise<void>;
 }
 ```
 
@@ -279,6 +323,7 @@ This project currently does not support:
 - migrations
 - transactions
 - multi-row atomic updates
+- row deletion
 - cache or request collapse
 - retry/backoff
 - browser support
