@@ -116,6 +116,13 @@ async function expectRepositoryCrud(input: {
     age: 42,
     _version: 2,
   });
+
+  await expect(input.users.deleteById(id)).resolves.toMatchObject({
+    id,
+    age: 42,
+    _version: 2,
+  });
+  await expect(input.users.findById(id)).resolves.toBeNull();
 }
 
 describeServiceAccountIntegration("Google Sheets service-account smoke test", () => {

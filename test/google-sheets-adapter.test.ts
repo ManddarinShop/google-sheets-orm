@@ -281,6 +281,92 @@ describe("GoogleSheetsAdapter.updateRow", () => {
   });
 });
 
+describe("GoogleSheetsAdapter.deleteRow", () => {
+  it("deletes a data row using a dimension request", async () => {
+    const get = vi.fn().mockResolvedValue({
+      data: {
+        sheets: [{ properties: { title: "Users", sheetId: 123 } }],
+      },
+    });
+    const batchUpdate = vi.fn().mockResolvedValue({ data: {} });
+
+    const sheetsClient = {
+      spreadsheets: {
+        get,
+        batchUpdate,
+      },
+    } as unknown as sheets_v4.Sheets;
+
+    const adapter = new GoogleSheetsAdapter({
+      spreadsheetUrl: "https://docs.google.com/spreadsheets/d/spreadsheet-id/edit",
+      auth: "unused",
+      sheetsClient,
+    });
+
+    await adapter.deleteRow("Users", 3);
+
+    expect(get).toHaveBeenCalledWith({
+      spreadsheetId: "spreadsheet-id",
+      fields: "sheets.properties.sheetId,sheets.properties.title",
+    });
+    expect(batchUpdate).toHaveBeenCalledWith({
+      spreadsheetId: "spreadsheet-id",
+      requestBody: {
+        requests: [
+          {
+            deleteDimension: {
+              range: {
+                sheetId: 123,
+                dimension: "ROWS",
+                startIndex: 2,
+                endIndex: 3,
+              },
+            },
+          },
+        ],
+      },
+    });
+  });
+
+  it("caches sheet ids for repeated row deletes", async () => {
+    const get = vi.fn().mockResolvedValue({
+      data: {
+        sheets: [{ properties: { title: "Users", sheetId: 123 } }],
+      },
+    });
+    const batchUpdate = vi.fn().mockResolvedValue({ data: {} });
+
+    const sheetsClient = {
+      spreadsheets: {
+        get,
+        batchUpdate,
+      },
+    } as unknown as sheets_v4.Sheets;
+
+    const adapter = new GoogleSheetsAdapter({
+      spreadsheetUrl: "https://docs.google.com/spreadsheets/d/spreadsheet-id/edit",
+      auth: "unused",
+      sheetsClient,
+    });
+
+    await adapter.deleteRow("Users", 3);
+    await adapter.deleteRow("Users", 4);
+
+    expect(get).toHaveBeenCalledTimes(1);
+    expect(batchUpdate).toHaveBeenCalledTimes(2);
+  });
+
+  it("rejects header row deletion", async () => {
+    const adapter = new GoogleSheetsAdapter({
+      spreadsheetUrl: "https://docs.google.com/spreadsheets/d/spreadsheet-id/edit",
+      auth: "unused",
+      sheetsClient: {} as sheets_v4.Sheets,
+    });
+
+    await expect(adapter.deleteRow("Users", 1)).rejects.toThrow(RangeError);
+  });
+});
+
 describe("GoogleSheetsAdapter.ensureSheet", () => {
   it("does not create a sheet tab when the tab already exists", async () => {
     const get = vi.fn().mockResolvedValue({
@@ -307,7 +393,7 @@ describe("GoogleSheetsAdapter.ensureSheet", () => {
 
     expect(get).toHaveBeenCalledWith({
       spreadsheetId: "spreadsheet-id",
-      fields: "sheets.properties.title",
+      fields: "sheets.properties.sheetId,sheets.properties.title",
     });
     expect(batchUpdate).not.toHaveBeenCalled();
   });
