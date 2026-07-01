@@ -15,7 +15,10 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "spikes/manual-apps-script-gateway/SheetInfo.gs",
+    "spikes/manual-apps-script-gateway/Code.gs",
+    "spikes/manual-apps-script-gateway/README.md"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",

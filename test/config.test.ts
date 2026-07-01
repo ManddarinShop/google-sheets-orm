@@ -6,15 +6,16 @@ import {
 } from "../src/setup/Config.js";
 
 describe("typed sheets config", () => {
-  it("parses an OAuth config with a spreadsheet URL and default sheet name", () => {
+  it("parses an Apps Script gateway config", () => {
     expect(
       parseTypedSheetsConfig({
         spreadsheetUrl:
           "https://docs.google.com/spreadsheets/d/spreadsheet-id/edit?gid=0#gid=0",
         defaultSheetName: "Users",
         auth: {
-          type: "oauth",
-          tokenFile: ".typed-sheets/token.json",
+          type: "apps-script-gateway",
+          gatewayUrl: "https://script.google.com/macros/s/deployment-id/exec",
+          gatewaySecret: "gateway-secret",
         },
       }),
     ).toEqual({
@@ -22,8 +23,9 @@ describe("typed sheets config", () => {
         "https://docs.google.com/spreadsheets/d/spreadsheet-id/edit?gid=0#gid=0",
       defaultSheetName: "Users",
       auth: {
-        type: "oauth",
-        tokenFile: ".typed-sheets/token.json",
+        type: "apps-script-gateway",
+        gatewayUrl: "https://script.google.com/macros/s/deployment-id/exec",
+        gatewaySecret: "gateway-secret",
       },
     } satisfies TypedSheetsConfig);
   });
@@ -61,8 +63,9 @@ describe("typed sheets config", () => {
         spreadsheetUrl: "https://example.com/not-a-sheet",
         defaultSheetName: "Users",
         auth: {
-          type: "oauth",
-          tokenFile: ".typed-sheets/token.json",
+          type: "apps-script-gateway",
+          gatewayUrl: "https://script.google.com/macros/s/deployment-id/exec",
+          gatewaySecret: "gateway-secret",
         },
       }),
     ).toThrow(/spreadsheetUrl must be a Google Sheets URL/);
@@ -74,8 +77,9 @@ describe("typed sheets config", () => {
         spreadsheetUrl: "https://docs.google.com/spreadsheets/d/spreadsheet-id/edit",
         defaultSheetName: " ",
         auth: {
-          type: "oauth",
-          tokenFile: ".typed-sheets/token.json",
+          type: "apps-script-gateway",
+          gatewayUrl: "https://script.google.com/macros/s/deployment-id/exec",
+          gatewaySecret: "gateway-secret",
         },
       }),
     ).toThrow(/defaultSheetName must be a non-empty string/);
@@ -90,7 +94,7 @@ describe("typed sheets config", () => {
           type: "api-key",
         },
       }),
-    ).toThrow(/auth.type must be "oauth" or "service-account"/);
+    ).toThrow(/auth.type must be "apps-script-gateway" or "service-account"/);
   });
 
   it("rejects service account config without a credentials file", () => {
@@ -105,15 +109,29 @@ describe("typed sheets config", () => {
     ).toThrow(/auth.credentialsFile must be a non-empty string/);
   });
 
-  it("rejects OAuth config without a token file", () => {
+  it("rejects an Apps Script gateway config without a gateway URL", () => {
     expect(() =>
       parseTypedSheetsConfig({
         spreadsheetUrl: "https://docs.google.com/spreadsheets/d/spreadsheet-id/edit",
         defaultSheetName: "Users",
         auth: {
-          type: "oauth",
+          type: "apps-script-gateway",
+          gatewaySecret: "gateway-secret",
         },
       }),
-    ).toThrow(/auth.tokenFile must be a non-empty string/);
+    ).toThrow(/auth.gatewayUrl must be a non-empty string/);
+  });
+
+  it("rejects an Apps Script gateway config without a gateway secret", () => {
+    expect(() =>
+      parseTypedSheetsConfig({
+        spreadsheetUrl: "https://docs.google.com/spreadsheets/d/spreadsheet-id/edit",
+        defaultSheetName: "Users",
+        auth: {
+          type: "apps-script-gateway",
+          gatewayUrl: "https://script.google.com/macros/s/deployment-id/exec",
+        },
+      }),
+    ).toThrow(/auth.gatewaySecret must be a non-empty string/);
   });
 });
