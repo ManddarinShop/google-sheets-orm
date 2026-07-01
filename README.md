@@ -330,7 +330,7 @@ Both config paths are supported:
 - service-account direct Google Sheets API access
 - Apps Script gateway access
 
-The service-account smoke test calls repository-level `ensureSheet()` before CRUD. If the configured sheet tab is missing, the adapter creates it. If the header row is empty, the repository writes this schema header:
+The smoke test calls repository-level `ensureSheet()` before CRUD. If the configured sheet tab is missing, the adapter creates it. If the header row is empty, the repository writes this schema header. Apps Script gateway configs perform sheet creation and header initialization in one locked gateway operation.
 
 | id | email | age | active | _version |
 | --- | --- | --- | --- | --- |
@@ -351,16 +351,20 @@ GOOGLE_SHEET_NAME=Users \
 npm run test:integration
 ```
 
-For Apps Script gateway authentication, deploy the gateway script and run:
+For Apps Script gateway authentication, deploy the gateway script and add the
+secret to `.env`:
+
+```sh
+GOOGLE_APPS_SCRIPT_GATEWAY_SECRET=your-gateway-secret
+```
+
+Then run:
 
 ```sh
 GOOGLE_SPREADSHEET_URL=https://docs.google.com/spreadsheets/d/your-spreadsheet-id/edit \
 GOOGLE_APPS_SCRIPT_GATEWAY_URL=https://script.google.com/macros/s/your-deployment-id/exec \
-GOOGLE_APPS_SCRIPT_GATEWAY_SECRET=your-gateway-secret \
 GOOGLE_APPS_SCRIPT_GATEWAY_SHEET_NAME=Users \
 npm run test:integration
 ```
-
-The gateway smoke test does not call `ensureSheet()` because the current gateway adapter does not expose automatic sheet initialization. The target gateway sheet must already exist with the expected header row.
 
 You can also put these values in `.env`; `npm run test:integration` loads `.env` automatically when it exists. `GOOGLE_SERVICE_ACCOUNT_SHEET_NAME` and `GOOGLE_APPS_SCRIPT_GATEWAY_SHEET_NAME` can be used to target different sheets; both fall back to `GOOGLE_SHEET_NAME` and then `Users`.
