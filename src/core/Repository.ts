@@ -21,6 +21,7 @@ export interface SheetRepository<T extends Record<string, unknown>> {
   findById(id: string): Promise<T | null>;
   insert(row: T): Promise<void>;
   update(id: string, updater: (current: T) => T): Promise<T | null>;
+  deleteById(id: string): Promise<T | null>;
 }
 
 export function createSheetRepository<T extends Record<string, unknown>>(
@@ -209,7 +210,75 @@ export function createSheetRepository<T extends Record<string, unknown>>(
     return updateRow;
   }
 
-  return { ensureSheet, findAll, findById, insert, update };
+  // Deletes a row only after re-reading the same sheet row, so stale callers do
+  // not remove data that was updated or moved after their first snapshot.
+  async function deleteById(id: string): Promise<T | null> {
+    const snapshot = await adapter.readSheet(sheetName);
+
+    assertSchema({
+      headers: snapshot.headers,
+      key,
+      columns,
+    });
+
+    const parsedRows = snapshot.rows.map((sheetRow) => ({
+      rowNumber: sheetRow.rowNumber,
+      row: parseRow<T>({
+        headers: snapshot.headers,
+        cells: sheetRow.cells,
+        columns,
+      }),
+    }));
+
+    assertUniqueKeys(
+      parsedRows.map((parsedRow) => parsedRow.row),
+      key,
+    );
+
+    const target = parsedRows.find(
+      (parsedRow) => String(parsedRow.row[key]) === id,
+    );
+
+    if (!target) {
+      return null;
+    }
+
+    const currentVersion = Number(target.row["_version"]);
+    const latestSnapshot = await adapter.readSheet(sheetName);
+
+    assertSchema({
+      headers: latestSnapshot.headers,
+      key,
+      columns,
+    });
+
+    const latestSheetRow = latestSnapshot.rows.find(
+      (sheetRow) => sheetRow.rowNumber === target.rowNumber,
+    );
+
+    if (!latestSheetRow) {
+      throw new ConflictError(`Row "${id}" changed before delete`);
+    }
+
+    const latestRow = parseRow<T>({
+      headers: latestSnapshot.headers,
+      cells: latestSheetRow.cells,
+      columns,
+    });
+
+    if (
+      String(latestRow[key]) !== id ||
+      Number(latestRow["_version"]) !== currentVersion
+    ) {
+      throw new ConflictError(`Stale delete for key "${id}"`);
+    }
+
+    await adapter.deleteRow(sheetName, target.rowNumber);
+
+    return target.row;
+  }
+
+  return { ensureSheet, findAll, findById, insert, update, deleteById };
 }
 
 function assertUniqueKeys<T extends Record<string, unknown>>(

@@ -38,5 +38,7 @@ describe("public API", () => {
   it("exposes sheet initialization methods on the Google Sheets adapter", () => {
     expect(GoogleSheetsAdapter.prototype.ensureSheet).toBeTypeOf("function");
     expect(GoogleSheetsAdapter.prototype.writeHeader).toBeTypeOf("function");
+    expect(GoogleSheetsAdapter.prototype.deleteRow).toBeTypeOf("function");
+    expect(AppsScriptGatewayAdapter.prototype.deleteRow).toBeTypeOf("function");
   });
 });

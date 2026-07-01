@@ -78,6 +78,24 @@ describe("AppsScriptGatewayAdapter", () => {
     });
   });
 
+  it("deletes a row through the Apps Script gateway", async () => {
+    const fetch = vi.fn().mockResolvedValue(createJsonResponse({ ok: true }));
+    const adapter = new AppsScriptGatewayAdapter({
+      gatewayUrl: "https://script.google.com/macros/s/deployment-id/exec",
+      gatewaySecret: "gateway-secret",
+      fetch,
+    });
+
+    await adapter.deleteRow("Users", 3);
+
+    expectGatewayRequest(fetch, {
+      operation: "deleteRow",
+      secret: "gateway-secret",
+      sheetName: "Users",
+      rowNumber: 3,
+    });
+  });
+
   it("ensures a sheet through the Apps Script gateway", async () => {
     const fetch = vi.fn().mockResolvedValue(createJsonResponse({ ok: true }));
     const adapter = new AppsScriptGatewayAdapter({
