@@ -323,14 +323,21 @@ Current test coverage focuses on:
 
 Google Sheets integration tests are opt-in. They are not part of the default `npm test` command because they require credentials, spreadsheet access, and Google API quota.
 
-The smoke test calls repository-level `ensureSheet()` before CRUD. If the configured sheet tab is missing, the adapter creates it. If the header row is empty, the repository writes this schema header:
+The smoke test writes a temporary `.typed-sheets.json`, creates repositories with `createRepositoryFromConfig()`, then inserts, reads, lists, and updates timestamp-based rows. It does not delete rows because the MVP adapter does not implement row deletion.
+
+Both config paths are supported:
+
+- service-account direct Google Sheets API access
+- Apps Script gateway access
+
+The service-account smoke test calls repository-level `ensureSheet()` before CRUD. If the configured sheet tab is missing, the adapter creates it. If the header row is empty, the repository writes this schema header:
 
 | id | email | age | active | _version |
 | --- | --- | --- | --- | --- |
 
 If headers already exist, the test does not rewrite them. Schema drift still fails.
 
-For service account authentication:
+For service-account authentication:
 
 1. Create or choose a Google Cloud service account.
 2. Download its JSON key.
@@ -344,6 +351,16 @@ GOOGLE_SHEET_NAME=Users \
 npm run test:integration
 ```
 
-You can also put these values in `.env`; `npm run test:integration` loads `.env` automatically when it exists.
+For Apps Script gateway authentication, deploy the gateway script and run:
 
-The smoke test inserts a timestamp-based row and then updates it. It does not delete the row because the MVP adapter does not implement row deletion.
+```sh
+GOOGLE_SPREADSHEET_URL=https://docs.google.com/spreadsheets/d/your-spreadsheet-id/edit \
+GOOGLE_APPS_SCRIPT_GATEWAY_URL=https://script.google.com/macros/s/your-deployment-id/exec \
+GOOGLE_APPS_SCRIPT_GATEWAY_SECRET=your-gateway-secret \
+GOOGLE_APPS_SCRIPT_GATEWAY_SHEET_NAME=Users \
+npm run test:integration
+```
+
+The gateway smoke test does not call `ensureSheet()` because the current gateway adapter does not expose automatic sheet initialization. The target gateway sheet must already exist with the expected header row.
+
+You can also put these values in `.env`; `npm run test:integration` loads `.env` automatically when it exists. `GOOGLE_SERVICE_ACCOUNT_SHEET_NAME` and `GOOGLE_APPS_SCRIPT_GATEWAY_SHEET_NAME` can be used to target different sheets; both fall back to `GOOGLE_SHEET_NAME` and then `Users`.
