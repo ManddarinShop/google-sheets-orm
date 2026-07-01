@@ -174,9 +174,10 @@ Service account configs create a `GoogleSheetsAdapter` and call the Google
 Sheets API directly. The target Sheet must be shared with the service account
 `client_email`.
 
-Apps Script gateway configs are accepted by setup, but the runtime gateway
-adapter is not implemented yet. Calling `createRepositoryFromConfig()` with an
-Apps Script gateway config currently throws a clear unsupported-adapter error.
+Apps Script gateway configs create an `AppsScriptGatewayAdapter` and send
+repository operations to the deployed Web App with `gatewayUrl` and
+`gatewaySecret`. The gateway script must be the `Code.gs` generated or shipped
+with the same package version.
 
 ### 한국어
 
@@ -190,8 +191,9 @@ service account config는 `GoogleSheetsAdapter`를 생성하고 Google Sheets AP
 직접 호출합니다. 대상 Sheet는 service account `client_email`에 공유되어 있어야
 합니다.
 
-Apps Script gateway config는 setup에서 생성할 수 있지만, runtime gateway adapter는
-아직 구현되지 않았습니다. 현재는 명확한 unsupported-adapter error를 던집니다.
+Apps Script gateway config는 `AppsScriptGatewayAdapter`를 생성하고 `gatewayUrl`과
+`gatewaySecret`으로 배포된 Web App에 repository operation을 보냅니다. gateway
+script는 같은 package version에서 생성되거나 제공된 `Code.gs`를 사용해야 합니다.
 
 ## Sheet Shape
 
@@ -386,7 +388,7 @@ This project currently does not support:
 - cache or request collapse
 - retry/backoff
 - browser support
-- Apps Script write gateway
+- automatic Apps Script gateway installation
 
 ### 한국어
 
@@ -401,7 +403,7 @@ This project currently does not support:
 - cache / request collapse
 - retry / backoff
 - browser support
-- Apps Script write gateway
+- Apps Script gateway 자동 설치
 
 ## Long-Term Direction
 
