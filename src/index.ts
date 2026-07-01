@@ -8,7 +8,9 @@ export { runSetup } from "./setup/Setup.js";
 export { createRepositoryFromConfig } from "./runtime/RepositoryFactory.js";
 
 export { GoogleSheetsAdapter } from "./adapter/GoogleSheetsAdapter.js";
+export { AppsScriptGatewayAdapter } from "./adapter/AppsScriptGatewayAdapter.js";
 export type { GoogleSheetsAdapterOptions } from "./adapter/GoogleSheetsAdapter.js";
+export type { AppsScriptGatewayAdapterOptions } from "./adapter/AppsScriptGatewayAdapter.js";
 
 export type { SheetAdapter, SheetCell, SheetSnapshot } from "./adapter/Adapter.js";
 export type { Column } from "./core/Columns.js";

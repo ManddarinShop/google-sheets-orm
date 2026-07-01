@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   ConflictError,
   GoogleSheetsAdapter,
+  AppsScriptGatewayAdapter,
   ParseError,
   SchemaDriftError,
   boolean,
@@ -27,6 +28,7 @@ describe("public API", () => {
     expect(ParseError).toBeTypeOf("function");
     expect(ConflictError).toBeTypeOf("function");
     expect(GoogleSheetsAdapter).toBeTypeOf("function");
+    expect(AppsScriptGatewayAdapter).toBeTypeOf("function");
     expect(parseTypedSheetsConfig).toBeTypeOf("function");
     expect(loadTypedSheetsConfig).toBeTypeOf("function");
     expect(writeTypedSheetsConfig).toBeTypeOf("function");

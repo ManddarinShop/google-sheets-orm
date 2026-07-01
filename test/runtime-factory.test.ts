@@ -2,7 +2,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { boolean, number, text } from "../src/core/Columns.js";
 import { createRepositoryFromConfig } from "../src/index.js";
@@ -26,6 +26,7 @@ describe("runtime repository factory", () => {
   };
 
   afterEach(async () => {
+    vi.unstubAllGlobals();
     await Promise.all(
       tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })),
     );
@@ -129,8 +130,16 @@ describe("runtime repository factory", () => {
     });
   });
 
-  it("fails clearly for Apps Script gateway configs until the gateway runtime adapter exists", async () => {
+  it("creates a repository backed by an Apps Script gateway config", async () => {
     const cwd = await createTempDir();
+    const fetch = vi.fn().mockResolvedValue({
+      json: vi.fn().mockResolvedValue({
+        ok: true,
+        headers: ["id", "email", "active", "_version"],
+        rows: [{ rowNumber: 2, cells: ["u1", "gateway@test.com", true, 1] }],
+      }),
+    } as unknown as Response);
+    vi.stubGlobal("fetch", fetch);
 
     await writeTypedSheetsConfig({
       cwd,
@@ -146,12 +155,35 @@ describe("runtime repository factory", () => {
       },
     });
 
-    await expect(
-      createRepositoryFromConfig<User>({
-        cwd,
-        key: "id",
-        columns,
-      }),
-    ).rejects.toThrow(/Apps Script gateway runtime adapter is not implemented/);
+    const users = await createRepositoryFromConfig<User>({
+      cwd,
+      key: "id",
+      columns,
+    });
+
+    await expect(users.findAll()).resolves.toEqual([
+      {
+        id: "u1",
+        email: "gateway@test.com",
+        active: true,
+        _version: 1,
+      },
+    ]);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    const [url, request] = fetch.mock.calls[0] as [
+      string,
+      RequestInit & { body: string },
+    ];
+
+    expect(url).toBe("https://script.google.com/macros/s/deployment-id/exec");
+    expect(request.method).toBe("POST");
+    expect(request.headers).toEqual({
+      "content-type": "application/json",
+    });
+    expect(JSON.parse(request.body)).toEqual({
+      operation: "readSheet",
+      secret: "gateway-secret",
+      sheetName: "Users",
+    });
   });
 });
