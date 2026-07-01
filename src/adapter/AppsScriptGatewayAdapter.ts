@@ -51,6 +51,29 @@ export class AppsScriptGatewayAdapter implements SheetAdapter {
     });
   }
 
+  async ensureSheet(sheetName: string): Promise<void> {
+    await this.request({
+      operation: "ensureSheet",
+      sheetName,
+    });
+  }
+
+  async writeHeader(sheetName: string, headers: string[]): Promise<void> {
+    await this.request({
+      operation: "writeHeader",
+      sheetName,
+      headers,
+    });
+  }
+
+  async initializeSheet(sheetName: string, headers: string[]): Promise<void> {
+    await this.request({
+      operation: "initializeSheet",
+      sheetName,
+      headers,
+    });
+  }
+
   private async request<T>(payload: Record<string, unknown>): Promise<T> {
     const response = await this.fetch(this.options.gatewayUrl, {
       method: "POST",
@@ -70,8 +93,11 @@ export class AppsScriptGatewayAdapter implements SheetAdapter {
     }
 
     if (!body.ok) {
+      const code = typeof body.code === "string" ? body.code : body.error;
+      const message = typeof body.message === "string" ? body.message : code;
+
       throw new Error(
-        `Apps Script gateway failed: ${body.error ?? "unknown_error"}`,
+        `Apps Script gateway failed: ${message ?? "unknown_error"}`,
       );
     }
 
@@ -81,7 +107,12 @@ export class AppsScriptGatewayAdapter implements SheetAdapter {
 
 function isGatewayResponse(
   value: unknown,
-): value is { ok: boolean; error?: string } & Record<string, unknown> {
+): value is {
+  ok: boolean;
+  code?: string;
+  error?: string;
+  message?: string;
+} & Record<string, unknown> {
   return (
     typeof value === "object" &&
     value !== null &&
