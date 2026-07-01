@@ -21,25 +21,41 @@ describe("interactive setup flow", () => {
     return dir;
   }
 
-  it("asks setup questions and writes an OAuth config", async () => {
+  it("asks gateway questions and writes an Apps Script gateway config", async () => {
     const cwd = await createTempDir();
     const promptCalls: string[] = [];
+    const messages: string[] = [];
     const prompt: SetupPrompt = {
       selectAuthType: async () => {
         promptCalls.push("selectAuthType");
-        return "oauth";
+        return "apps-script-gateway";
+      },
+      showMessage: async (message) => {
+        promptCalls.push("showMessage");
+        messages.push(message);
+      },
+      selectAppsScriptCodePrintMode: async () => {
+        promptCalls.push("selectAppsScriptCodePrintMode");
+        return "none";
       },
       inputSpreadsheetUrl: async () => {
-        promptCalls.push("inputSpreadsheetUrl");
-        return "https://docs.google.com/spreadsheets/d/spreadsheet-id/edit";
+        throw new Error("should not ask for spreadsheet URL");
       },
       inputDefaultSheetName: async () => {
-        promptCalls.push("inputDefaultSheetName");
-        return "Users";
+        throw new Error("should not ask for default sheet name");
       },
-      inputOAuthTokenFile: async () => {
-        promptCalls.push("inputOAuthTokenFile");
-        return ".typed-sheets/token.json";
+      inputAppsScriptGatewayConfig: async () => {
+        promptCalls.push("inputAppsScriptGatewayConfig");
+        return JSON.stringify({
+          spreadsheetUrl:
+            "https://docs.google.com/spreadsheets/d/spreadsheet-id/edit",
+          defaultSheetName: "Users",
+          auth: {
+            type: "apps-script-gateway",
+            gatewayUrl: "https://script.google.com/macros/s/deployment-id/exec",
+            gatewaySecret: "gateway-secret",
+          },
+        });
       },
       inputConfigPath: async () => {
         promptCalls.push("inputConfigPath");
@@ -50,20 +66,30 @@ describe("interactive setup flow", () => {
     await runSetup({ cwd, prompt });
 
     expect(promptCalls).toEqual([
+      "showMessage",
       "selectAuthType",
-      "inputSpreadsheetUrl",
-      "inputDefaultSheetName",
-      "inputOAuthTokenFile",
+      "showMessage",
+      "selectAppsScriptCodePrintMode",
+      "inputAppsScriptGatewayConfig",
       "inputConfigPath",
+      "showMessage",
     ]);
+    expect(messages[0]).toContain("typed-sheets setup");
+    expect(messages[1]).toContain("spikes/manual-apps-script-gateway/Code.gs");
+    expect(messages[1]).toContain("spikes/manual-apps-script-gateway/SheetInfo.gs");
+    expect(messages[1]).toContain("Run only. No Web App deployment.");
+    expect(messages[1]).toContain("Deploy > New deployment > Web app");
+    expect(messages[1]).not.toContain("function setupTypedSheets()");
+    expect(messages[2]).toBe("Created .typed-sheets.json");
     await expect(readFile(join(cwd, ".typed-sheets.json"), "utf8")).resolves.toBe(
       [
         "{",
         '  "spreadsheetUrl": "https://docs.google.com/spreadsheets/d/spreadsheet-id/edit",',
         '  "defaultSheetName": "Users",',
         '  "auth": {',
-        '    "type": "oauth",',
-        '    "tokenFile": ".typed-sheets/token.json"',
+        '    "type": "apps-script-gateway",',
+        '    "gatewayUrl": "https://script.google.com/macros/s/deployment-id/exec",',
+        '    "gatewaySecret": "gateway-secret"',
         "  }",
         "}",
         "",
@@ -71,13 +97,136 @@ describe("interactive setup flow", () => {
     );
   });
 
+  it("prints Apps Script code only when requested", async () => {
+    const cwd = await createTempDir();
+    const messages: string[] = [];
+    const prompt: SetupPrompt = {
+      selectAuthType: async () => "apps-script-gateway",
+      showMessage: async (message) => {
+        messages.push(message);
+      },
+      selectAppsScriptCodePrintMode: async () => "gateway",
+      inputSpreadsheetUrl: async () => {
+        throw new Error("should not ask for spreadsheet URL");
+      },
+      inputDefaultSheetName: async () => {
+        throw new Error("should not ask for default sheet name");
+      },
+      inputAppsScriptGatewayConfig: async () =>
+        JSON.stringify({
+          spreadsheetUrl:
+            "https://docs.google.com/spreadsheets/d/spreadsheet-id/edit",
+          defaultSheetName: "Users",
+          auth: {
+            type: "apps-script-gateway",
+            gatewayUrl: "https://script.google.com/macros/s/deployment-id/exec",
+            gatewaySecret: "gateway-secret",
+          },
+        }),
+      inputConfigPath: async () => ".typed-sheets.json",
+    };
+
+    await runSetup({ cwd, prompt });
+
+    expect(messages.some((message) => message.includes("Code.gs"))).toBe(true);
+    expect(
+      messages.some((message) => message.includes("function setupTypedSheets()")),
+    ).toBe(true);
+  });
+
+  it("prints the small sheet info helper when requested", async () => {
+    const cwd = await createTempDir();
+    const messages: string[] = [];
+    const prompt: SetupPrompt = {
+      selectAuthType: async () => "apps-script-gateway",
+      showMessage: async (message) => {
+        messages.push(message);
+      },
+      selectAppsScriptCodePrintMode: async () => "sheet-info",
+      inputSpreadsheetUrl: async () => {
+        throw new Error("should not ask for spreadsheet URL");
+      },
+      inputDefaultSheetName: async () => {
+        throw new Error("should not ask for default sheet name");
+      },
+      inputAppsScriptGatewayConfig: async () =>
+        JSON.stringify({
+          spreadsheetUrl:
+            "https://docs.google.com/spreadsheets/d/spreadsheet-id/edit",
+          defaultSheetName: "Users",
+          auth: {
+            type: "apps-script-gateway",
+            gatewayUrl: "https://script.google.com/macros/s/deployment-id/exec",
+            gatewaySecret: "gateway-secret",
+          },
+        }),
+      inputConfigPath: async () => ".typed-sheets.json",
+    };
+
+    await runSetup({ cwd, prompt });
+
+    expect(messages.some((message) => message.includes("SheetInfo.gs"))).toBe(
+      true,
+    );
+    expect(
+      messages.some((message) =>
+        message.includes("function setupTypedSheetsSheetInfo()"),
+      ),
+    ).toBe(true);
+    expect(
+      messages.some((message) => message.includes("Deployment is not needed")),
+    ).toBe(true);
+  });
+
+  it("requires gateway prompt methods when Apps Script gateway auth is selected", async () => {
+    const cwd = await createTempDir();
+    const prompt: SetupPrompt = {
+      selectAuthType: async () => "apps-script-gateway",
+      showMessage: async () => undefined,
+      inputSpreadsheetUrl: async () =>
+        "https://docs.google.com/spreadsheets/d/spreadsheet-id/edit",
+      inputDefaultSheetName: async () => "Users",
+      inputConfigPath: async () => ".typed-sheets.json",
+    };
+
+    await expect(runSetup({ cwd, prompt })).rejects.toThrow(
+      /inputAppsScriptGatewayConfig is required for apps-script-gateway auth/,
+    );
+  });
+
+  it("rejects invalid Apps Script gateway config JSON", async () => {
+    const cwd = await createTempDir();
+    const prompt: SetupPrompt = {
+      selectAuthType: async () => "apps-script-gateway",
+      showMessage: async () => undefined,
+      selectAppsScriptCodePrintMode: async () => "none",
+      inputSpreadsheetUrl: async () => {
+        throw new Error("should not ask for spreadsheet URL");
+      },
+      inputDefaultSheetName: async () => {
+        throw new Error("should not ask for default sheet name");
+      },
+      inputAppsScriptGatewayConfig: async () => "{ invalid json",
+      inputConfigPath: async () => ".typed-sheets.json",
+    };
+
+    await expect(runSetup({ cwd, prompt })).rejects.toThrow(
+      /Apps Script gateway config must be valid JSON/,
+    );
+  });
+
   it("asks for service account credentials when service account auth is selected", async () => {
     const cwd = await createTempDir();
     const promptCalls: string[] = [];
+    const messages: string[] = [];
     const prompt: SetupPrompt = {
       selectAuthType: async () => {
         promptCalls.push("selectAuthType");
         return "service-account";
+      },
+      showMessage: async (message) => {
+        promptCalls.push("showMessage");
+        messages.push(message);
       },
       inputSpreadsheetUrl: async () => {
         promptCalls.push("inputSpreadsheetUrl");
@@ -86,9 +235,6 @@ describe("interactive setup flow", () => {
       inputDefaultSheetName: async () => {
         promptCalls.push("inputDefaultSheetName");
         return "Users";
-      },
-      inputOAuthTokenFile: async () => {
-        throw new Error("should not ask for OAuth token file");
       },
       inputServiceAccountCredentialsFile: async () => {
         promptCalls.push("inputServiceAccountCredentialsFile");
@@ -103,12 +249,17 @@ describe("interactive setup flow", () => {
     await runSetup({ cwd, prompt });
 
     expect(promptCalls).toEqual([
+      "showMessage",
       "selectAuthType",
+      "showMessage",
       "inputSpreadsheetUrl",
       "inputDefaultSheetName",
       "inputServiceAccountCredentialsFile",
       "inputConfigPath",
+      "showMessage",
     ]);
+    expect(messages[1]).toContain("Service account setup");
+    expect(messages[1]).toContain("client_email");
     await expect(readFile(join(cwd, ".typed-sheets.json"), "utf8")).resolves.toBe(
       [
         "{",
@@ -124,14 +275,26 @@ describe("interactive setup flow", () => {
     );
   });
 
-  it("does not ask for service account credentials when OAuth auth is selected", async () => {
+  it("does not ask for service account credentials when Apps Script gateway auth is selected", async () => {
     const cwd = await createTempDir();
     const prompt: SetupPrompt = {
-      selectAuthType: async () => "oauth",
+      selectAuthType: async () => "apps-script-gateway",
+      showMessage: async () => undefined,
+      selectAppsScriptCodePrintMode: async () => "none",
       inputSpreadsheetUrl: async () =>
         "https://docs.google.com/spreadsheets/d/spreadsheet-id/edit",
       inputDefaultSheetName: async () => "Users",
-      inputOAuthTokenFile: async () => ".typed-sheets/token.json",
+      inputAppsScriptGatewayConfig: async () =>
+        JSON.stringify({
+          spreadsheetUrl:
+            "https://docs.google.com/spreadsheets/d/spreadsheet-id/edit",
+          defaultSheetName: "Users",
+          auth: {
+            type: "apps-script-gateway",
+            gatewayUrl: "https://script.google.com/macros/s/deployment-id/exec",
+            gatewaySecret: "gateway-secret",
+          },
+        }),
       inputServiceAccountCredentialsFile: async () => {
         throw new Error("should not ask for service account credentials");
       },

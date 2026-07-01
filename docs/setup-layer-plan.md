@@ -2,121 +2,146 @@
 
 ## Goal
 
-Make the first successful Google Sheets connection easy after installing `typed-sheets`.
+Make the first successful Google Sheets connection possible without requiring a
+`typed-sheets` managed OAuth client ID, Google Workspace Add-on installation, or
+Google Cloud Console setup for the default path.
 
-The setup layer is not part of the repository core. It should generate local configuration that an application can pass into the Google Sheets adapter.
+The setup layer is not repository core. It creates local configuration that an
+application can pass into runtime adapter factories.
 
-## Target Flow
+## Supported Connection Paths
 
-```sh
-npx typed-sheets setup
-```
+### 1. Service Account
+
+This is the recommended server/CI path.
 
 Expected flow:
 
-1. Start Google login.
-2. Ask for a Google Sheets URL.
-3. Validate that the signed-in account can access the spreadsheet.
-4. Ask for a default sheet tab name.
-5. Store an OAuth refresh token in a local token file.
-6. Write a local JSON config file that points to that token file.
+1. User creates or receives a service account JSON file.
+2. User shares the Google Sheet with the service account `client_email`.
+3. `typed-sheets setup` asks for:
+   - spreadsheet URL
+   - default sheet tab
+   - service account JSON key path
+4. `typed-sheets setup` writes `.typed-sheets.json`.
 
-Example output:
+Config example:
 
 ```json
 {
   "spreadsheetUrl": "https://docs.google.com/spreadsheets/d/...",
   "defaultSheetName": "Users",
   "auth": {
-    "type": "oauth",
-    "tokenFile": ".typed-sheets/token.json"
+    "type": "service-account",
+    "credentialsFile": "/absolute/path/to/service-account.json"
   }
 }
 ```
 
-Token file example:
+Runtime direction:
+
+```txt
+Node app
+-> typed-sheets library
+-> Google Sheets API
+-> Google Sheet
+```
+
+### 2. Manual Apps Script Gateway
+
+This is the open-source-friendly path for users who want to avoid Google Cloud
+OAuth setup.
+
+Expected flow:
+
+1. User opens the target Google Sheet.
+2. User opens `Extensions > Apps Script`.
+3. `typed-sheets setup` prints:
+   - a short step-by-step guide
+   - the small `SheetInfo.gs` reference path
+   - the full `Code.gs` gateway reference path
+4. User can choose what to print in the terminal:
+   - nothing
+   - the small sheet info helper
+   - the full gateway script
+5. For the small helper, user only runs `setupTypedSheetsSheetInfo()`.
+   No Web App deployment is needed. This prints sheet identity values only.
+6. For the gateway setup, user pastes the provided `Code.gs` gateway script.
+7. User deploys the gateway script as a Web App.
+8. User runs `setupTypedSheets()`.
+9. Apps Script logs the generated config JSON.
+10. User pastes the JSON into the setup prompt.
+11. `typed-sheets setup` writes `.typed-sheets.json`.
+
+Config example:
 
 ```json
 {
-  "type": "authorized_user",
-  "client_id": "...",
-  "client_secret": "...",
-  "refresh_token": "..."
+  "spreadsheetUrl": "https://docs.google.com/spreadsheets/d/...",
+  "defaultSheetName": "Users",
+  "auth": {
+    "type": "apps-script-gateway",
+    "gatewayUrl": "https://script.google.com/macros/s/.../exec",
+    "gatewaySecret": "..."
+  }
 }
 ```
 
-## MVP Scope
+Runtime direction:
 
-- Node.js CLI only.
-- OAuth login as the default setup path.
-- A `typed-sheets` managed OAuth client for the CLI flow.
-- Offline access using a refresh token.
-- Token file based runtime access so an app does not need to log in again on every server start.
-- Spreadsheet URL parsing and validation.
-- Config JSON generation.
-- Clear failure when the user cannot access the spreadsheet.
-
-## Authentication Decision
-
-The MVP should optimize for the installed-library experience:
-
-```sh
-npx typed-sheets setup
+```txt
+Node app
+-> typed-sheets library
+-> Apps Script gateway URL
+-> Google Sheet
 ```
 
-The user should not have to create their own Google Cloud OAuth client just to try the library. The CLI should provide the OAuth client flow, ask for Google login once, request Google Sheets access, and save a refresh token locally.
+The Apps Script gateway can later own storage-side coordination such as
+`LockService`, basic gateway authentication, and atomic read-check-write
+primitives.
 
-At runtime, the application reads the generated config and token file. A deployed Node.js server should receive the token file contents through deployment secrets or a mounted secret file. It should not require an interactive Google login on every deploy or process restart.
+## Explicitly Not Default
 
-Service account support remains useful, but it is an advanced or fallback path, not the default MVP onboarding path.
+- Managed OAuth client ID
+- OAuth Device Flow
+- Google Workspace Marketplace Add-on
+- Hosted gateway service
 
-## OAuth Risks To Validate
+These may be revisited later, but they create project identity, marketplace
+review, client secret, or hosted-service responsibility that does not fit the
+current open-source release direction.
 
-- Google OAuth consent screen status may affect external users.
-- Google may require verification for sensitive scopes.
-- The CLI must request offline access and may need consent prompting to receive a refresh token.
-- A public/open-source CLI cannot treat an embedded client secret as a real secret.
-- Refresh tokens can be revoked by the user or blocked by Workspace policy.
-- Token files are credentials and must never be committed.
+## Risks To Validate
 
-## Out of Scope
-
-- Browser runtime support.
-- Transaction support.
-- SQL execution.
-- Apps Script gateway installation.
-- Workspace admin policy automation.
-- Secret storage abstraction.
-
-## Design Notes
-
-The repository layer should keep accepting explicit adapter options. The setup layer should only help users create those options more easily.
-
-The default setup path should be OAuth because the target experience is a user installing the library, logging in once, pasting a spreadsheet URL, and receiving a usable config. Service account support should remain documented for teams that prefer server-to-server credentials, but it should not be the main MVP path.
+- Manual Web App deployment is still a setup burden.
+- `gatewaySecret` is a credential and must never be committed.
+- Apps Script quota and runtime limits apply.
+- Service account setup remains difficult for non-developers.
 
 ## 한국어
 
-목표는 `typed-sheets` 설치 이후 첫 Google Sheets 연결 성공까지의 과정을 쉽게 만드는 것입니다.
+지원하는 초기 연결 방식은 service account와 수동 Apps Script gateway입니다.
 
-setup layer는 repository core가 아닙니다. application이 Google Sheets adapter에 넘길 local configuration을 만들어주는 역할입니다.
+Service account는 서버, CI, 회사 인프라에서 credential을 직접 관리하는 경로입니다.
+사용자는 대상 Google Sheet를 service account `client_email`에 공유하고,
+`typed-sheets setup`에서 spreadsheet URL, 기본 sheet tab, JSON key 경로를 입력합니다.
 
-초기 MVP는 Node.js CLI, Google login, spreadsheet URL 입력, 접근 권한 검증, OAuth refresh token 저장, local JSON config 생성에 집중합니다.
+Apps Script 방식은 두 파일을 분리합니다.
 
-기본 경로는 service account가 아니라 `typed-sheets`가 제공하는 OAuth client 기반 로그인입니다. 사용자는 직접 Google Cloud OAuth client를 만들지 않고 `npx typed-sheets setup`을 실행해 로그인하고, spreadsheet URL과 기본 sheet tab 이름을 입력하면 됩니다.
+- `SheetInfo.gs`: 작은 helper입니다. 웹 앱 배포 없이 Run만 실행하면
+  `spreadsheetId`, `spreadsheetUrl`, `defaultSheetName`을 로그에 출력합니다.
+- `Code.gs`: 전체 gateway입니다. 대상 Google Sheet의 Apps Script에 붙여넣고,
+  웹 앱으로 배포한 뒤 `setupTypedSheets()`를 실행합니다. 이 스크립트가 gateway
+  URL과 secret을 포함한 config JSON을 Apps Script 실행 로그에 출력합니다.
 
-생성되는 config는 token file을 가리킵니다.
+`typed-sheets setup`은 두 파일 경로를 모두 보여주고, 필요한 경우에만 터미널에
+작은 helper 또는 전체 gateway 코드를 출력합니다. gateway config JSON은 setup
+프롬프트에 붙여넣습니다.
 
-```json
-{
-  "spreadsheetUrl": "https://docs.google.com/spreadsheets/d/...",
-  "defaultSheetName": "Users",
-  "auth": {
-    "type": "oauth",
-    "tokenFile": ".typed-sheets/token.json"
-  }
-}
-```
+이 방식은 다음을 피합니다.
 
-배포된 Node.js 서버는 매번 Google login을 다시 하는 방식이 아니라, token file 내용을 배포 secret 또는 mounted secret file로 받아 사용해야 합니다.
-
-service account는 여전히 유용하지만 MVP 기본 onboarding 경로가 아니라 advanced/fallback 경로로 둡니다.
+- `typed-sheets` 공식 OAuth client ID
+- 사용자의 Google Cloud OAuth client 생성
+- Service Account 기본 강제
+- Google Workspace Add-on 설치
+- Marketplace 심사
