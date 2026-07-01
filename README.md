@@ -318,6 +318,15 @@ The update flow:
 
 This is stale-write protection, not a full database transaction.
 
+`deleteById(id)` follows the same safety model. It returns the deleted row when
+the key exists, returns `null` when no row matches the key, and throws
+`ConflictError` when the target row moved or its `_version` changed before the
+delete is sent to the adapter.
+
+Deletes remove the physical Google Sheets row. Rows below the deleted row shift
+up, so application code should treat sheet row numbers as adapter internals and
+use repository keys for follow-up operations.
+
 ## Current Limitations
 
 This project currently does not support:
