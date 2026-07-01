@@ -88,6 +88,23 @@ App gateway.
 
 The CLI validates that JSON and writes `.typed-sheets.json`.
 
+The gateway supports these operations:
+
+- `ping`
+- `ensureSheet`
+- `initializeSheet`
+- `writeHeader`
+- `readSheet`
+- `appendRow`
+- `updateRow`
+
+`initializeSheet` creates the sheet when missing and writes headers when the
+header row is empty while holding the document lock. `writeHeader` refuses to
+overwrite a non-empty header row.
+
+Invalid requests return a JSON response with `ok: false`, an error `code`, and
+a human-readable `message`.
+
 ## Gateway Ping
 
 After `.typed-sheets.json` is generated, test the gateway:

@@ -174,7 +174,7 @@ describeGatewayIntegration("Google Sheets Apps Script gateway smoke test", () =>
     await expectRepositoryCrud({
       users,
       idPrefix: "gateway-smoke",
-      ensureSheet: false,
+      ensureSheet: true,
     });
   }, 60_000);
 });

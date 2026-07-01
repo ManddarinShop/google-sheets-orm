@@ -20,4 +20,5 @@ export interface SheetAdapter {
   ): Promise<void>;
   ensureSheet?(sheetName: string): Promise<void>;
   writeHeader?(sheetName: string, headers: string[]): Promise<void>;
+  initializeSheet?(sheetName: string, headers: string[]): Promise<void>;
 }

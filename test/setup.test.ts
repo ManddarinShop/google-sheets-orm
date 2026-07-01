@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 
 import { afterEach, describe, expect, it } from "vitest";
 
+import { manualAppsScriptGatewayCode } from "../src/setup/ManualAppsScriptGateway.js";
 import { runSetup, type SetupPrompt } from "../src/setup/Setup.js";
 
 describe("interactive setup flow", () => {
@@ -20,6 +21,12 @@ describe("interactive setup flow", () => {
     tempDirs.push(dir);
     return dir;
   }
+
+  it("keeps the shipped gateway template in sync with Code.gs", async () => {
+    await expect(
+      readFile("spikes/manual-apps-script-gateway/Code.gs", "utf8"),
+    ).resolves.toBe(manualAppsScriptGatewayCode);
+  });
 
   it("asks gateway questions and writes an Apps Script gateway config", async () => {
     const cwd = await createTempDir();

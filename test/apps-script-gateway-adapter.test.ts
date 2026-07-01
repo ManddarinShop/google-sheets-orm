@@ -78,6 +78,59 @@ describe("AppsScriptGatewayAdapter", () => {
     });
   });
 
+  it("ensures a sheet through the Apps Script gateway", async () => {
+    const fetch = vi.fn().mockResolvedValue(createJsonResponse({ ok: true }));
+    const adapter = new AppsScriptGatewayAdapter({
+      gatewayUrl: "https://script.google.com/macros/s/deployment-id/exec",
+      gatewaySecret: "gateway-secret",
+      fetch,
+    });
+
+    await adapter.ensureSheet("Users");
+
+    expectGatewayRequest(fetch, {
+      operation: "ensureSheet",
+      secret: "gateway-secret",
+      sheetName: "Users",
+    });
+  });
+
+  it("writes headers through the Apps Script gateway", async () => {
+    const fetch = vi.fn().mockResolvedValue(createJsonResponse({ ok: true }));
+    const adapter = new AppsScriptGatewayAdapter({
+      gatewayUrl: "https://script.google.com/macros/s/deployment-id/exec",
+      gatewaySecret: "gateway-secret",
+      fetch,
+    });
+
+    await adapter.writeHeader("Users", ["id", "email", "_version"]);
+
+    expectGatewayRequest(fetch, {
+      operation: "writeHeader",
+      secret: "gateway-secret",
+      sheetName: "Users",
+      headers: ["id", "email", "_version"],
+    });
+  });
+
+  it("initializes a sheet with headers through one Apps Script gateway request", async () => {
+    const fetch = vi.fn().mockResolvedValue(createJsonResponse({ ok: true }));
+    const adapter = new AppsScriptGatewayAdapter({
+      gatewayUrl: "https://script.google.com/macros/s/deployment-id/exec",
+      gatewaySecret: "gateway-secret",
+      fetch,
+    });
+
+    await adapter.initializeSheet("Users", ["id", "email", "_version"]);
+
+    expectGatewayRequest(fetch, {
+      operation: "initializeSheet",
+      secret: "gateway-secret",
+      sheetName: "Users",
+      headers: ["id", "email", "_version"],
+    });
+  });
+
   it("throws the gateway error when the gateway returns ok false", async () => {
     const fetch = vi.fn().mockResolvedValue(
       createJsonResponse({
@@ -93,6 +146,26 @@ describe("AppsScriptGatewayAdapter", () => {
 
     await expect(adapter.readSheet("Users")).rejects.toThrow(
       /Apps Script gateway failed: unauthorized/,
+    );
+  });
+
+  it("prefers the gateway error message when present", async () => {
+    const fetch = vi.fn().mockResolvedValue(
+      createJsonResponse({
+        ok: false,
+        code: "invalid_request",
+        error: "invalid_request",
+        message: "sheetName must be a non-empty string",
+      }),
+    );
+    const adapter = new AppsScriptGatewayAdapter({
+      gatewayUrl: "https://script.google.com/macros/s/deployment-id/exec",
+      gatewaySecret: "gateway-secret",
+      fetch,
+    });
+
+    await expect(adapter.readSheet("")).rejects.toThrow(
+      /Apps Script gateway failed: sheetName must be a non-empty string/,
     );
   });
 });
