@@ -116,6 +116,83 @@ const updated = await users.update("u2", current => ({
 
 `ensureSheet()`는 `Users` tab이 없으면 생성하고, header row가 비어 있을 때만 schema 기준 header를 작성합니다. 이미 존재하는 header는 자동 수정하지 않고 검증합니다.
 
+## Config-Based Runtime
+
+After running `typed-sheets setup`, applications can load `.typed-sheets.json`
+and create a repository directly from the generated config.
+
+```ts
+import {
+  boolean,
+  createRepositoryFromConfig,
+  number,
+  text,
+} from "typed-sheets";
+
+interface User {
+  id: string;
+  email: string;
+  age: number | undefined;
+  active: boolean;
+  _version: number;
+}
+
+const users = await createRepositoryFromConfig<User>({
+  key: "id",
+  columns: {
+    id: text(),
+    email: text(),
+    age: number().optional(),
+    active: boolean(),
+    _version: number(),
+  },
+});
+
+await users.ensureSheet();
+await users.insert({
+  id: "u1",
+  email: "a@test.com",
+  age: undefined,
+  active: true,
+  _version: 1,
+});
+```
+
+By default, the factory reads `.typed-sheets.json` from the current working
+directory. Pass `cwd` or `configPath` to point at a different config file.
+
+```ts
+const users = await createRepositoryFromConfig<User>({
+  cwd: "/app",
+  configPath: "/app/.typed-sheets.json",
+  key: "id",
+  columns,
+});
+```
+
+Service account configs create a `GoogleSheetsAdapter` and call the Google
+Sheets API directly. The target Sheet must be shared with the service account
+`client_email`.
+
+Apps Script gateway configs are accepted by setup, but the runtime gateway
+adapter is not implemented yet. Calling `createRepositoryFromConfig()` with an
+Apps Script gateway config currently throws a clear unsupported-adapter error.
+
+### 한국어
+
+`typed-sheets setup` 실행 후에는 생성된 `.typed-sheets.json`을 읽어서 바로
+repository를 만들 수 있습니다.
+
+기본값은 현재 working directory의 `.typed-sheets.json`입니다. 다른 파일을 쓰려면
+`cwd` 또는 `configPath`를 넘기면 됩니다.
+
+service account config는 `GoogleSheetsAdapter`를 생성하고 Google Sheets API를
+직접 호출합니다. 대상 Sheet는 service account `client_email`에 공유되어 있어야
+합니다.
+
+Apps Script gateway config는 setup에서 생성할 수 있지만, runtime gateway adapter는
+아직 구현되지 않았습니다. 현재는 명확한 unsupported-adapter error를 던집니다.
+
 ## Sheet Shape
 
 The first row is treated as the header row.
@@ -336,8 +413,8 @@ Before the SQL layer, the next priority is a setup layer that improves first-run
 
 - install the library
 - run a setup command
-- sign in with Google
-- paste or enter a Google Sheets URL
+- choose service account or manual Apps Script gateway setup
+- paste or enter the required Google Sheets connection details
 - write a local JSON configuration file for the application to use
 
 The setup layer should make the first successful connection easier without changing the repository safety model.
@@ -352,8 +429,8 @@ SQL layer 전에 우선할 작업은 first-run accessibility를 위한 setup lay
 
 - library 설치
 - setup command 실행
-- Google login
-- Google Sheets URL 입력
+- service account 또는 manual Apps Script gateway setup 선택
+- 필요한 Google Sheets connection 정보 입력
 - application이 사용할 local JSON config 생성
 
 setup layer는 repository safety model을 바꾸지 않고 첫 연결 성공까지의 과정을 쉽게 만드는 것이 목표입니다.
