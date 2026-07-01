@@ -6,6 +6,7 @@ import {
   ParseError,
   SchemaDriftError,
   boolean,
+  createRepositoryFromConfig,
   createSheetRepository,
   loadTypedSheetsConfig,
   number,
@@ -21,6 +22,7 @@ describe("public API", () => {
     expect(text).toBeTypeOf("function");
     expect(number).toBeTypeOf("function");
     expect(boolean).toBeTypeOf("function");
+    expect(createRepositoryFromConfig).toBeTypeOf("function");
     expect(SchemaDriftError).toBeTypeOf("function");
     expect(ParseError).toBeTypeOf("function");
     expect(ConflictError).toBeTypeOf("function");
