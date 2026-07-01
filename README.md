@@ -6,12 +6,6 @@ Typed repository and safe write layer for Google Sheets-backed MVPs.
 
 It is not a MySQL/Postgres replacement, not a full ORM, and not a general-purpose Google Sheets API wrapper. The core goal is to make unsafe spreadsheet-backed data states fail clearly instead of passing silently.
 
-## 한국어
-
-`typed-sheets`는 Google Sheets를 초기 MVP, 내부 운영툴, 프로토타입, 저트래픽 어드민의 lightweight editable data store로 사용할 때 필요한 TypeScript 라이브러리입니다.
-
-이 프로젝트는 MySQL/Postgres 대체재도 아니고, full ORM도 아니며, 범용 Google Sheets API wrapper도 아닙니다. 핵심 목표는 spreadsheet-backed data에서 위험한 상태가 조용히 성공 처리되지 않도록 명확히 실패시키는 것입니다.
-
 ## Current MVP
 
 The current MVP focuses on repository safety:
@@ -26,21 +20,6 @@ The current MVP focuses on repository safety:
 - `ParseError`
 - `ConflictError`
 - adapter boundary for Google Sheets access
-
-### 한국어
-
-현재 MVP는 repository safety에 집중합니다.
-
-- schema drift validation
-- typed row parsing
-- key 기반 `findAll`, `findById`
-- `insert`
-- `update`
-- `_version` 기반 optimistic locking
-- `SchemaDriftError`
-- `ParseError`
-- `ConflictError`
-- Google Sheets 접근을 위한 adapter boundary
 
 ## Installation
 
@@ -112,10 +91,6 @@ const updated = await users.update("u2", current => ({
 
 `ensureSheet()` creates the `Users` tab when it is missing and writes the schema header only when the header row is empty. Existing headers are validated, not automatically rewritten.
 
-### 한국어
-
-`ensureSheet()`는 `Users` tab이 없으면 생성하고, header row가 비어 있을 때만 schema 기준 header를 작성합니다. 이미 존재하는 header는 자동 수정하지 않고 검증합니다.
-
 ## Config-Based Runtime
 
 After running `typed-sheets setup`, applications can load `.typed-sheets.json`
@@ -179,22 +154,6 @@ repository operations to the deployed Web App with `gatewayUrl` and
 `gatewaySecret`. The gateway script must be the `Code.gs` generated or shipped
 with the same package version.
 
-### 한국어
-
-`typed-sheets setup` 실행 후에는 생성된 `.typed-sheets.json`을 읽어서 바로
-repository를 만들 수 있습니다.
-
-기본값은 현재 working directory의 `.typed-sheets.json`입니다. 다른 파일을 쓰려면
-`cwd` 또는 `configPath`를 넘기면 됩니다.
-
-service account config는 `GoogleSheetsAdapter`를 생성하고 Google Sheets API를
-직접 호출합니다. 대상 Sheet는 service account `client_email`에 공유되어 있어야
-합니다.
-
-Apps Script gateway config는 `AppsScriptGatewayAdapter`를 생성하고 `gatewayUrl`과
-`gatewaySecret`으로 배포된 Web App에 repository operation을 보냅니다. gateway
-script는 같은 package version에서 생성되거나 제공된 `Code.gs`를 사용해야 합니다.
-
 ## Sheet Shape
 
 The first row is treated as the header row.
@@ -207,12 +166,6 @@ Example `Users` sheet:
 | u2 | b@test.com |  | false | 1 |
 
 `typed-sheets` maps cells by header order, not by hard-coded column position.
-
-### 한국어
-
-첫 번째 row는 header row로 취급합니다.
-
-`typed-sheets`는 고정 column 위치가 아니라 header 순서로 cell을 매핑합니다.
 
 ## Adapter Boundary
 
@@ -246,14 +199,6 @@ The adapter owns authentication, Google API calls, range mapping, append, row up
 
 The core owns schema validation, parsing, duplicate key detection, repository methods, and optimistic locking.
 
-### 한국어
-
-`typed-sheets` core는 Google SDK에 직접 의존하지 않습니다.
-
-adapter는 인증, Google API 호출, range mapping, append, row update, optional sheet initialization을 담당합니다.
-
-core는 schema validation, parsing, duplicate key detection, repository method, optimistic locking을 담당합니다.
-
 ## Google Sheets Adapter
 
 `GoogleSheetsAdapter` connects the repository core to the Google Sheets API.
@@ -281,25 +226,6 @@ It uses raw values where possible:
 
 - `readSheet` uses `valueRenderOption: "UNFORMATTED_VALUE"`
 - `appendRow` and `updateRow` use `valueInputOption: "RAW"`
-
-### 한국어
-
-`GoogleSheetsAdapter`는 repository core를 Google Sheets API에 연결합니다.
-
-현재 구현된 메서드:
-
-- `ensureSheet(sheetName)`
-- `writeHeader(sheetName, headers)`
-- `readSheet(sheetName)`
-- `appendRow(sheetName, row)`
-- `updateRow(sheetName, rowNumber, row)`
-
-`ensureSheet`는 sheet tab이 없으면 생성합니다. repository-level `ensureSheet()`는 header row가 비어 있을 때만 schema 기준 header를 작성합니다. 이미 header가 있으면 schema drift만 검사하고 자동 수정하지 않습니다.
-
-가능한 raw value 기준으로 동작합니다.
-
-- `readSheet`는 `valueRenderOption: "UNFORMATTED_VALUE"` 사용
-- `appendRow`, `updateRow`는 `valueInputOption: "RAW"` 사용
 
 ## Safety Policies
 
@@ -343,38 +269,6 @@ The update flow:
 
 This is stale-write protection, not a full database transaction.
 
-### 한국어
-
-#### Schema Drift
-
-schema drift는 `SchemaDriftError`로 실패합니다.
-
-감지하는 경우:
-
-- duplicate headers
-- 선언된 column 누락
-- key column 누락
-- `_version` column 누락
-- duplicate keys
-
-extra sheet column은 기본 허용합니다.
-
-#### Parse Errors
-
-잘못된 row value는 `ParseError`로 실패합니다.
-
-예:
-
-- required value 누락
-- invalid number
-- invalid boolean
-
-#### Optimistic Locking
-
-`update(id, updater)`는 `_version`으로 stale write를 방지합니다.
-
-이 방식은 stale-write protection이지 full database transaction이 아닙니다.
-
 ## Current Limitations
 
 This project currently does not support:
@@ -389,21 +283,6 @@ This project currently does not support:
 - retry/backoff
 - browser support
 - automatic Apps Script gateway installation
-
-### 한국어
-
-현재 지원하지 않는 것:
-
-- joins
-- relations
-- SQL execution
-- migrations
-- transactions
-- multi-row atomic updates
-- cache / request collapse
-- retry / backoff
-- browser support
-- Apps Script gateway 자동 설치
 
 ## Long-Term Direction
 
@@ -420,22 +299,6 @@ Before the SQL layer, the next priority is a setup layer that improves first-run
 - write a local JSON configuration file for the application to use
 
 The setup layer should make the first successful connection easier without changing the repository safety model.
-
-### 한국어
-
-장기 방향은 Google Sheets를 storage로 사용하는 lightweight SQL layer입니다. MVP와 내부툴을 위한 online H2-like database 경험에 가깝습니다.
-
-concurrency control과 transaction semantics는 후순위입니다. 우선순위는 repository operation과 향후 작은 SQL subset을 안전하게 지원할 수 있는 typed table/storage model입니다.
-
-SQL layer 전에 우선할 작업은 first-run accessibility를 위한 setup layer입니다.
-
-- library 설치
-- setup command 실행
-- service account 또는 manual Apps Script gateway setup 선택
-- 필요한 Google Sheets connection 정보 입력
-- application이 사용할 local JSON config 생성
-
-setup layer는 repository safety model을 바꾸지 않고 첫 연결 성공까지의 과정을 쉽게 만드는 것이 목표입니다.
 
 ## Development
 
@@ -484,32 +347,3 @@ npm run test:integration
 You can also put these values in `.env`; `npm run test:integration` loads `.env` automatically when it exists.
 
 The smoke test inserts a timestamp-based row and then updates it. It does not delete the row because the MVP adapter does not implement row deletion.
-
-### 한국어
-
-Google Sheets integration test는 opt-in입니다. credentials, spreadsheet access, Google API quota가 필요하므로 기본 `npm test`에는 포함하지 않습니다.
-
-smoke test는 CRUD 전에 repository-level `ensureSheet()`를 호출합니다. 설정한 sheet tab이 없으면 adapter가 생성합니다. header row가 비어 있으면 repository가 아래 schema header를 작성합니다.
-
-| id | email | age | active | _version |
-| --- | --- | --- | --- | --- |
-
-이미 header가 있으면 자동 수정하지 않습니다. schema drift는 여전히 실패합니다.
-
-service account 인증 기준:
-
-1. Google Cloud service account를 만들거나 선택합니다.
-2. JSON key를 다운로드합니다.
-3. 대상 spreadsheet를 service account email에 공유합니다.
-4. 아래 명령을 실행합니다.
-
-```sh
-GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json \
-GOOGLE_SPREADSHEET_URL=https://docs.google.com/spreadsheets/d/your-spreadsheet-id/edit \
-GOOGLE_SHEET_NAME=Users \
-npm run test:integration
-```
-
-`.env`에 값을 넣어도 됩니다. `npm run test:integration`은 `.env`가 있으면 자동으로 읽습니다.
-
-smoke test는 timestamp 기반 row를 insert한 뒤 update합니다. MVP adapter에는 row deletion이 없으므로 테스트 row를 삭제하지 않습니다.
