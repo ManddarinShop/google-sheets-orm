@@ -2,65 +2,96 @@ import {
   input as inquirerInput,
   select as inquirerSelect,
 } from "@inquirer/prompts";
-import type { SetupPrompt } from "./Setup.js";
-
-
-type AuthType = "oauth" | "service-account";
+import type {
+  AppsScriptCodePrintMode,
+  SetupAuthType,
+  SetupPrompt,
+} from "./Setup.js";
 
 type SelectPrompt = typeof inquirerSelect;
 type InputPrompt = typeof inquirerInput;
 
-export interface InquirerSetupPromptDependencies { 
-    select?: SelectPrompt;
-    input?: InputPrompt;
+export interface InquirerSetupPromptDependencies {
+  select?: SelectPrompt;
+  input?: InputPrompt;
+  output?: Pick<NodeJS.WriteStream, "write">;
 }
 
-export function createInquirerSetupPrompt(dependencies: InquirerSetupPromptDependencies = {}): SetupPrompt { 
-    const select = dependencies.select ?? inquirerSelect;
-    const input = dependencies.input ?? inquirerInput;
+export function createInquirerSetupPrompt(
+  dependencies: InquirerSetupPromptDependencies = {},
+): SetupPrompt {
+  const select = dependencies.select ?? inquirerSelect;
+  const input = dependencies.input ?? inquirerInput;
+  const output = dependencies.output ?? process.stdout;
 
-    return {
-      async selectAuthType(): Promise<AuthType> {
-        return select({
-          message: "How do you want to authenticate?",
-          choices: [
-            { name: "Google login", value: "oauth" },
-            { name: "Service account", value: "service-account" },
-          ],
-        }) as Promise<AuthType>;
-      },
+  return {
+    async selectAuthType(): Promise<SetupAuthType> {
+      return select({
+        message: "How should typed-sheets connect?",
+        choices: [
+          {
+            name: "Service account - server or CI",
+            value: "service-account",
+          },
+          {
+            name: "Manual Apps Script gateway - no Google Cloud OAuth",
+            value: "apps-script-gateway",
+          },
+        ],
+      }) as Promise<SetupAuthType>;
+    },
 
-      async inputSpreadsheetUrl(): Promise<string> {
-        return input({
-          message: "Google Sheets URL:",
-        });
-      },
+    async showMessage(message: string): Promise<void> {
+      output.write(`${message}\n`);
+    },
 
-      async inputDefaultSheetName(): Promise<string> {
-        return input({
-          message: "Default sheet name:",
-          default: "Users",
-        });
-      },
+    async inputSpreadsheetUrl(): Promise<string> {
+      return input({
+        message: "Google Sheet URL",
+      });
+    },
 
-      async inputServiceAccountCredentialsFile(): Promise<string> {
-        return input({
-          message: "Service account JSON file path:",
-        });
-      },
+    async inputDefaultSheetName(): Promise<string> {
+      return input({
+        message: "Default sheet tab",
+        default: "Users",
+      });
+    },
 
-      async inputConfigPath(): Promise<string> {
-        return input({
-          message: "Config file path:",
-          default: ".typed-sheets.json",
-        });
-      },
+    async inputServiceAccountCredentialsFile(): Promise<string> {
+      return input({
+        message: "Service account JSON key path",
+      });
+    },
 
-      async inputOAuthTokenFile(): Promise<string> {
-        return input({
-          message: "OAuth token file path:",
-          default: ".typed-sheets/token.json",
-        });
-      },
-    };
+    async selectAppsScriptCodePrintMode(): Promise<AppsScriptCodePrintMode> {
+      return select({
+        message: "Print an Apps Script snippet now?",
+        choices: [
+          { name: "No, I will open the reference file", value: "none" },
+          {
+            name: "Small sheet info helper - run only",
+            value: "sheet-info",
+          },
+          {
+            name: "Full gateway script - deploy as Web App",
+            value: "gateway",
+          },
+        ],
+      }) as Promise<AppsScriptCodePrintMode>;
+    },
+
+    async inputAppsScriptGatewayConfig(): Promise<string> {
+      return input({
+        message: "Paste the generated config JSON from Apps Script logs",
+      });
+    },
+
+    async inputConfigPath(): Promise<string> {
+      return input({
+        message: "Config file path",
+        default: ".typed-sheets.json",
+      });
+    },
+  };
 }

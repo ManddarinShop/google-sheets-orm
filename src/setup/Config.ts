@@ -3,8 +3,9 @@ export type TypedSheetsConfig =
       spreadsheetUrl: string;
       defaultSheetName: string;
       auth: {
-        type: "oauth";
-        tokenFile: string;
+        type: "apps-script-gateway";
+        gatewayUrl: string;
+        gatewaySecret: string;
       };
     }
   | {
@@ -39,18 +40,28 @@ export function parseTypedSheetsConfig(value: unknown): TypedSheetsConfig {
     throw new Error("auth must be an object");
   }
 
-  if (value.auth.type === "oauth") {
+  if (value.auth.type === "apps-script-gateway") {
+    if (
+      typeof value.auth.gatewayUrl !== "string" ||
+      value.auth.gatewayUrl.trim() === ""
+    ) {
+      throw new Error("auth.gatewayUrl must be a non-empty string");
+    }
 
-    if (typeof value.auth.tokenFile !== "string" || value.auth.tokenFile.trim() === "") { 
-      throw new Error("auth.tokenFile must be a non-empty string");
+    if (
+      typeof value.auth.gatewaySecret !== "string" ||
+      value.auth.gatewaySecret.trim() === ""
+    ) {
+      throw new Error("auth.gatewaySecret must be a non-empty string");
     }
 
     return {
       spreadsheetUrl: value.spreadsheetUrl,
       defaultSheetName: value.defaultSheetName,
       auth: {
-        type: "oauth",
-        tokenFile: value.auth.tokenFile
+        type: "apps-script-gateway",
+        gatewayUrl: value.auth.gatewayUrl,
+        gatewaySecret: value.auth.gatewaySecret,
       },
     };
   }
@@ -73,7 +84,9 @@ export function parseTypedSheetsConfig(value: unknown): TypedSheetsConfig {
     };
   }
 
-  throw new Error('auth.type must be "oauth" or "service-account"');
+  throw new Error(
+    'auth.type must be "apps-script-gateway" or "service-account"',
+  );
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

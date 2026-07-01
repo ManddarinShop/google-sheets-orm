@@ -31,8 +31,9 @@ describe("typed sheets config loader", () => {
           "https://docs.google.com/spreadsheets/d/spreadsheet-id/edit?gid=0#gid=0",
         defaultSheetName: "Users",
         auth: {
-          type: "oauth",
-          tokenFile: ".typed-sheets/token.json",
+          type: "apps-script-gateway",
+          gatewayUrl: "https://script.google.com/macros/s/deployment-id/exec",
+          gatewaySecret: "gateway-secret",
         },
       }),
     );
@@ -42,8 +43,9 @@ describe("typed sheets config loader", () => {
         "https://docs.google.com/spreadsheets/d/spreadsheet-id/edit?gid=0#gid=0",
       defaultSheetName: "Users",
       auth: {
-        type: "oauth",
-        tokenFile: ".typed-sheets/token.json",
+        type: "apps-script-gateway",
+        gatewayUrl: "https://script.google.com/macros/s/deployment-id/exec",
+        gatewaySecret: "gateway-secret",
       },
     });
   });
@@ -101,8 +103,9 @@ describe("typed sheets config loader", () => {
         spreadsheetUrl: "https://example.com/not-a-sheet",
         defaultSheetName: "Users",
         auth: {
-          type: "oauth",
-          tokenFile: ".typed-sheets/token.json",
+          type: "apps-script-gateway",
+          gatewayUrl: "https://script.google.com/macros/s/deployment-id/exec",
+          gatewaySecret: "gateway-secret",
         },
       }),
     );
