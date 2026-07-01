@@ -6,8 +6,8 @@ import {
 } from "./Config.js";
 
 export interface LoadTypedSheetsConfigOptions {
-  cwd?: string;
-  configPath?: string;
+  cwd?: string | undefined;
+  configPath?: string | undefined;
 }
 
 export async function loadTypedSheetsConfig(
