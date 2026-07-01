@@ -404,7 +404,11 @@ describe("GoogleSheetsAdapter.ensureSheet", () => {
         sheets: [{ properties: { title: "Orders" } }],
       },
     });
-    const batchUpdate = vi.fn().mockResolvedValue({ data: {} });
+    const batchUpdate = vi.fn().mockResolvedValue({
+      data: {
+        replies: [{ addSheet: { properties: { sheetId: 456 } } }],
+      },
+    });
 
     const sheetsClient = {
       spreadsheets: {
@@ -435,6 +439,32 @@ describe("GoogleSheetsAdapter.ensureSheet", () => {
         ],
       },
     });
+  });
+
+  it("rejects missing sheet ids from the create response", async () => {
+    const get = vi.fn().mockResolvedValue({
+      data: {
+        sheets: [{ properties: { title: "Orders" } }],
+      },
+    });
+    const batchUpdate = vi.fn().mockResolvedValue({ data: {} });
+
+    const sheetsClient = {
+      spreadsheets: {
+        get,
+        batchUpdate,
+      },
+    } as unknown as sheets_v4.Sheets;
+
+    const adapter = new GoogleSheetsAdapter({
+      spreadsheetUrl: "https://docs.google.com/spreadsheets/d/spreadsheet-id/edit",
+      auth: "unused",
+      sheetsClient,
+    }) as InitializableGoogleSheetsAdapter;
+
+    await expect(adapter.ensureSheet("Users")).rejects.toThrow(
+      /Google Sheets API did not return sheetId for Users/,
+    );
   });
 });
 

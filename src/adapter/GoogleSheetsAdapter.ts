@@ -58,12 +58,10 @@ export class GoogleSheetsAdapter implements SheetAdapter {
         ],
       },
     });
-    const createdSheetId =
-      responseAfterCreate.data.replies?.[0]?.addSheet?.properties?.sheetId;
-
-    if (typeof createdSheetId === "number") {
-      this.sheetIdCache.set(sheetName, createdSheetId);
-    }
+    this.sheetIdCache.set(
+      sheetName,
+      requireCreatedSheetId(responseAfterCreate.data, sheetName),
+    );
   }
 
   async writeHeader(sheetName: string, headers: string[]): Promise<void> {
@@ -164,19 +162,41 @@ export class GoogleSheetsAdapter implements SheetAdapter {
       fields: "sheets.properties.sheetId,sheets.properties.title",
     });
 
-    const sheet = (response.data.sheets ?? []).find(
-      (candidate) => candidate.properties?.title === sheetName,
-    );
-    const sheetId = sheet?.properties?.sheetId;
-
-    if (typeof sheetId !== "number") {
-      throw new Error(`Sheet not found: ${sheetName}`);
-    }
+    const sheetId = requireSheetIdForName(response.data, sheetName);
 
     this.sheetIdCache.set(sheetName, sheetId);
 
     return sheetId;
   }
+}
+
+function requireCreatedSheetId(
+  response: sheets_v4.Schema$BatchUpdateSpreadsheetResponse,
+  sheetName: string,
+): number {
+  const sheetId = response.replies?.[0]?.addSheet?.properties?.sheetId;
+
+  if (typeof sheetId !== "number") {
+    throw new Error(`Google Sheets API did not return sheetId for ${sheetName}`);
+  }
+
+  return sheetId;
+}
+
+function requireSheetIdForName(
+  response: sheets_v4.Schema$Spreadsheet,
+  sheetName: string,
+): number {
+  const sheet = (response.sheets ?? []).find(
+    (candidate) => candidate.properties?.title === sheetName,
+  );
+  const sheetId = sheet?.properties?.sheetId;
+
+  if (typeof sheetId !== "number") {
+    throw new Error(`Sheet not found: ${sheetName}`);
+  }
+
+  return sheetId;
 }
 
 export function toA1ColumnName(index: number): string {
