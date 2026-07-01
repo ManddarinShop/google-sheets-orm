@@ -15,6 +15,7 @@ The current MVP focuses on repository safety:
 - key-based `findAll` and `findById`
 - `insert`
 - `update`
+- `deleteById`
 - `_version` based optimistic locking
 - `SchemaDriftError`
 - `ParseError`
@@ -127,6 +128,8 @@ const updated = await users.update("u2", current => ({
   ...current,
   age: 30,
 }));
+
+await users.deleteById("u2");
 ```
 
 `ensureSheet()` creates the configured sheet tab when it is missing and writes
@@ -233,6 +236,7 @@ export interface SheetAdapter {
   readSheet(sheetName: string): Promise<SheetSnapshot>;
   appendRow(sheetName: string, row: SheetCell[]): Promise<void>;
   updateRow(sheetName: string, rowNumber: number, row: SheetCell[]): Promise<void>;
+  deleteRow(sheetName: string, rowNumber: number): Promise<void>;
   ensureSheet?(sheetName: string): Promise<void>;
   writeHeader?(sheetName: string, headers: string[]): Promise<void>;
   initializeSheet?(sheetName: string, headers: string[]): Promise<void>;
@@ -263,6 +267,7 @@ The adapter currently implements:
 - `readSheet(sheetName)`
 - `appendRow(sheetName, row)`
 - `updateRow(sheetName, rowNumber, row)`
+- `deleteRow(sheetName, rowNumber)`
 
 `ensureSheet` creates a missing sheet tab. Repository-level `ensureSheet()` writes schema headers only when the header row is empty. If headers already exist, it checks schema drift and does not auto-rewrite them.
 
@@ -323,7 +328,6 @@ This project currently does not support:
 - migrations
 - transactions
 - multi-row atomic updates
-- row deletion
 - cache or request collapse
 - retry/backoff
 - browser support
@@ -368,7 +372,7 @@ Current test coverage focuses on:
 
 Google Sheets integration tests are opt-in. They are not part of the default `npm test` command because they require credentials, spreadsheet access, and Google API quota.
 
-The smoke test writes a temporary `.typed-sheets.json`, creates repositories with `createRepositoryFromConfig()`, then inserts, reads, lists, and updates timestamp-based rows. It does not delete rows because the MVP adapter does not implement row deletion.
+The smoke test writes a temporary `.typed-sheets.json`, creates repositories with `createRepositoryFromConfig()`, then inserts, reads, lists, updates, and deletes timestamp-based rows.
 
 Both config paths are supported:
 

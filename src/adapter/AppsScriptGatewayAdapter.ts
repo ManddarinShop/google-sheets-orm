@@ -51,6 +51,16 @@ export class AppsScriptGatewayAdapter implements SheetAdapter {
     });
   }
 
+  // Sends row deletion through the gateway so service-account-free setups expose
+  // the same repository contract as the direct Google Sheets adapter.
+  async deleteRow(sheetName: string, rowNumber: number): Promise<void> {
+    await this.request({
+      operation: "deleteRow",
+      sheetName,
+      rowNumber,
+    });
+  }
+
   async ensureSheet(sheetName: string): Promise<void> {
     await this.request({
       operation: "ensureSheet",

@@ -18,6 +18,8 @@ export interface SheetAdapter {
     rowNumber: number,
     row: SheetCell[],
   ): Promise<void>;
+  /** Delete a 1-based data row. Implementations must reject header-row deletes. */
+  deleteRow(sheetName: string, rowNumber: number): Promise<void>;
   ensureSheet?(sheetName: string): Promise<void>;
   writeHeader?(sheetName: string, headers: string[]): Promise<void>;
   initializeSheet?(sheetName: string, headers: string[]): Promise<void>;

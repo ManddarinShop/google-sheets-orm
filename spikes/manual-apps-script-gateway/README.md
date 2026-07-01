@@ -97,6 +97,7 @@ The gateway supports these operations:
 - `readSheet`
 - `appendRow`
 - `updateRow`
+- `deleteRow`
 
 `initializeSheet` creates the sheet when missing and writes headers when the
 header row is empty while holding the document lock. `writeHeader` refuses to

@@ -95,6 +95,11 @@ function doPost(e) {
         return json_({ ok: true });
       }
 
+      if (operation === "deleteRow") {
+        deleteRow_(spreadsheet, request);
+        return json_({ ok: true });
+      }
+
       return error_("unknown_operation", "Unknown operation: " + operation);
     } finally {
       lock.releaseLock();
@@ -135,6 +140,7 @@ function validateOperation_(request) {
     "readSheet",
     "appendRow",
     "updateRow",
+    "deleteRow",
   ];
 
   if (operations.indexOf(operation) === -1) {
@@ -158,6 +164,10 @@ function validateOperation_(request) {
   if (operation === "updateRow") {
     requirePositiveInteger_(request.rowNumber, "rowNumber");
     requireSheetCellArray_(request.row, "row");
+  }
+
+  if (operation === "deleteRow") {
+    requirePositiveInteger_(request.rowNumber, "rowNumber");
   }
 
   return operation;
@@ -260,6 +270,18 @@ function updateRow_(spreadsheet, request) {
   const rowNumber = requirePositiveInteger_(request.rowNumber, "rowNumber");
 
   sheet.getRange(rowNumber, 1, 1, row.length).setValues([row]);
+}
+
+// Deletes only data rows; row 1 is reserved for the schema header.
+function deleteRow_(spreadsheet, request) {
+  const sheet = getSheet_(spreadsheet, request.sheetName);
+  const rowNumber = requirePositiveInteger_(request.rowNumber, "rowNumber");
+
+  if (rowNumber < 2) {
+    throw gatewayError_("invalid_request", "rowNumber must target a data row");
+  }
+
+  sheet.deleteRow(rowNumber);
 }
 
 function getSheet_(spreadsheet, sheetName) {
