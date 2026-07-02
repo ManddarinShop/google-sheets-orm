@@ -26,8 +26,10 @@ export async function createRepositoryFromConfig<
   T extends Record<string, unknown>,
 >(options: CreateRepositoryFromConfigOptions<T>): Promise<SheetRepository<T>> {
   const config = await loadTypedSheetsConfig({
-    cwd: options.cwd,
-    configPath: options.configPath,
+    ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
+    ...(options.configPath === undefined
+      ? {}
+      : { configPath: options.configPath }),
   });
 
   const adapter = options.createAdapter

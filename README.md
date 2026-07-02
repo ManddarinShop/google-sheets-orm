@@ -427,6 +427,11 @@ npm run test:integration
 
 You can also put these values in `.env`; `npm run test:integration` loads `.env` automatically when it exists. `GOOGLE_SERVICE_ACCOUNT_SHEET_NAME` and `GOOGLE_APPS_SCRIPT_GATEWAY_SHEET_NAME` can be used to target different sheets; both fall back to `GOOGLE_SHEET_NAME` and then `Users`.
 
+If you are starting from `typed-sheets setup`, run `setupTypedSheets()` in Apps
+Script, copy the generated execution-log output, and paste the full log text
+into the setup editor prompt. The CLI extracts the config JSON and writes
+`.typed-sheets.json`.
+
 When a smoke path is skipped, the test name includes the missing environment
 variables. For example, the Apps Script gateway smoke test requires
 `GOOGLE_SPREADSHEET_URL`, `GOOGLE_APPS_SCRIPT_GATEWAY_URL`, and

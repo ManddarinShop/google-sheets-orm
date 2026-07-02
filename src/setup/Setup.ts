@@ -52,21 +52,19 @@ export async function runSetup(options: {
 
     const codePrintMode =
       selectAppsScriptCodePrintMode === undefined
-        ? undefined
+        ? "none"
         : await selectAppsScriptCodePrintMode();
 
     if (codePrintMode === "sheet-info") {
       await prompt.showMessage(createManualAppsScriptSheetInfoCodeMessage());
-    }
-
-    if (codePrintMode === "gateway") {
+    } else if (codePrintMode === "gateway") {
       await prompt.showMessage(createManualAppsScriptGatewayCodeMessage());
     }
 
     const rawGatewayConfig = await inputAppsScriptGatewayConfig();
 
     const parsedGatewayConfig =
-      requireAppsScriptGatewayConfigJson(rawGatewayConfig);
+      parseAppsScriptGatewayConfigInput(rawGatewayConfig);
 
     config = parseTypedSheetsConfig(parsedGatewayConfig);
   } else {
@@ -105,10 +103,71 @@ export async function runSetup(options: {
   await prompt.showMessage(`Created ${configPath}`);
 }
 
-function requireAppsScriptGatewayConfigJson(rawGatewayConfig: string): unknown {
+export function parseAppsScriptGatewayConfigInput(input: string): unknown {
+  const jsonObject = requireFirstJsonObject(input);
+
   try {
-    return JSON.parse(rawGatewayConfig);
+    return JSON.parse(jsonObject);
   } catch {
-    throw new Error("Apps Script gateway config must be valid JSON");
+    throw new Error("Apps Script gateway config must contain valid JSON");
   }
+}
+
+function requireFirstJsonObject(input: string): string {
+  const jsonObject = extractFirstJsonObjectOrNull(input);
+
+  if (jsonObject === null) {
+    throw new Error("Apps Script gateway config must contain valid JSON");
+  }
+
+  return jsonObject;
+}
+
+function extractFirstJsonObjectOrNull(input: string): string | null {
+  const start = input.indexOf("{");
+
+  if (start < 0) {
+    return null;
+  }
+
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+
+  for (let index = start; index < input.length; index += 1) {
+    const char = input[index];
+
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+
+    if (char === "\\") {
+      escaped = inString;
+      continue;
+    }
+
+    if (char === '"') {
+      inString = !inString;
+      continue;
+    }
+
+    if (inString) {
+      continue;
+    }
+
+    if (char === "{") {
+      depth += 1;
+    }
+
+    if (char === "}") {
+      depth -= 1;
+
+      if (depth === 0) {
+        return input.slice(start, index + 1);
+      }
+    }
+  }
+
+  return null;
 }
