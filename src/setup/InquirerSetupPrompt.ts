@@ -1,4 +1,5 @@
 import {
+  editor as inquirerEditor,
   input as inquirerInput,
   select as inquirerSelect,
 } from "@inquirer/prompts";
@@ -10,10 +11,12 @@ import type {
 
 type SelectPrompt = typeof inquirerSelect;
 type InputPrompt = typeof inquirerInput;
+type EditorPrompt = typeof inquirerEditor;
 
 export interface InquirerSetupPromptDependencies {
   select?: SelectPrompt;
   input?: InputPrompt;
+  editor?: EditorPrompt;
   output?: Pick<NodeJS.WriteStream, "write">;
 }
 
@@ -22,6 +25,7 @@ export function createInquirerSetupPrompt(
 ): SetupPrompt {
   const select = dependencies.select ?? inquirerSelect;
   const input = dependencies.input ?? inquirerInput;
+  const editor = dependencies.editor ?? inquirerEditor;
   const output = dependencies.output ?? process.stdout;
 
   return {
@@ -82,8 +86,8 @@ export function createInquirerSetupPrompt(
     },
 
     async inputAppsScriptGatewayConfig(): Promise<string> {
-      return input({
-        message: "Paste the generated config JSON from Apps Script logs",
+      return editor({
+        message: "Paste the generated config JSON or Apps Script log output",
       });
     },
 

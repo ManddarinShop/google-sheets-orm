@@ -82,11 +82,13 @@ App gateway.
 
 6. Approve Google permissions.
 
-7. Open Apps Script execution logs and copy the generated JSON.
+7. Open Apps Script execution logs and copy the generated JSON, or copy the
+   full log output around it.
 
-8. Paste it into the `typed-sheets setup` prompt.
+8. Paste it into the `typed-sheets setup` editor prompt.
 
-The CLI validates that JSON and writes `.typed-sheets.json`.
+The CLI extracts the config JSON from the pasted text, validates it, and writes
+`.typed-sheets.json`.
 
 The gateway supports these operations:
 

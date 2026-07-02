@@ -40,53 +40,56 @@ export function parseTypedSheetsConfig(value: unknown): TypedSheetsConfig {
     throw new Error("auth must be an object");
   }
 
-  if (value.auth.type === "apps-script-gateway") {
-    if (
-      typeof value.auth.gatewayUrl !== "string" ||
-      value.auth.gatewayUrl.trim() === ""
-    ) {
-      throw new Error("auth.gatewayUrl must be a non-empty string");
+  switch (value.auth.type) {
+    case "apps-script-gateway": {
+      if (
+        typeof value.auth.gatewayUrl !== "string" ||
+        value.auth.gatewayUrl.trim() === ""
+      ) {
+        throw new Error("auth.gatewayUrl must be a non-empty string");
+      }
+
+      if (
+        typeof value.auth.gatewaySecret !== "string" ||
+        value.auth.gatewaySecret.trim() === ""
+      ) {
+        throw new Error("auth.gatewaySecret must be a non-empty string");
+      }
+
+      return {
+        spreadsheetUrl: value.spreadsheetUrl,
+        defaultSheetName: value.defaultSheetName,
+        auth: {
+          type: "apps-script-gateway",
+          gatewayUrl: value.auth.gatewayUrl,
+          gatewaySecret: value.auth.gatewaySecret,
+        },
+      };
     }
 
-    if (
-      typeof value.auth.gatewaySecret !== "string" ||
-      value.auth.gatewaySecret.trim() === ""
-    ) {
-      throw new Error("auth.gatewaySecret must be a non-empty string");
+    case "service-account": {
+      if (
+        typeof value.auth.credentialsFile !== "string" ||
+        value.auth.credentialsFile.trim() === ""
+      ) {
+        throw new Error("auth.credentialsFile must be a non-empty string");
+      }
+
+      return {
+        spreadsheetUrl: value.spreadsheetUrl,
+        defaultSheetName: value.defaultSheetName,
+        auth: {
+          type: "service-account",
+          credentialsFile: value.auth.credentialsFile,
+        },
+      };
     }
 
-    return {
-      spreadsheetUrl: value.spreadsheetUrl,
-      defaultSheetName: value.defaultSheetName,
-      auth: {
-        type: "apps-script-gateway",
-        gatewayUrl: value.auth.gatewayUrl,
-        gatewaySecret: value.auth.gatewaySecret,
-      },
-    };
+    default:
+      throw new Error(
+        'auth.type must be "apps-script-gateway" or "service-account"',
+      );
   }
-
-  if (value.auth.type === "service-account") {
-    if (
-      typeof value.auth.credentialsFile !== "string" ||
-      value.auth.credentialsFile.trim() === ""
-    ) {
-      throw new Error("auth.credentialsFile must be a non-empty string");
-    }
-
-    return {
-      spreadsheetUrl: value.spreadsheetUrl,
-      defaultSheetName: value.defaultSheetName,
-      auth: {
-        type: "service-account",
-        credentialsFile: value.auth.credentialsFile,
-      },
-    };
-  }
-
-  throw new Error(
-    'auth.type must be "apps-script-gateway" or "service-account"',
-  );
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

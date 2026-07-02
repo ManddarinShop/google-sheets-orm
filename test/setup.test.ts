@@ -5,7 +5,11 @@ import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { manualAppsScriptGatewayCode } from "../src/setup/ManualAppsScriptGateway.js";
-import { runSetup, type SetupPrompt } from "../src/setup/Setup.js";
+import {
+  parseAppsScriptGatewayConfigInput,
+  runSetup,
+  type SetupPrompt,
+} from "../src/setup/Setup.js";
 
 describe("interactive setup flow", () => {
   const tempDirs: string[] = [];
@@ -218,8 +222,84 @@ describe("interactive setup flow", () => {
     };
 
     await expect(runSetup({ cwd, prompt })).rejects.toThrow(
-      /Apps Script gateway config must be valid JSON/,
+      /Apps Script gateway config must contain valid JSON/,
     );
+  });
+
+  it("extracts Apps Script gateway config JSON from pasted execution logs", async () => {
+    const cwd = await createTempDir();
+    const prompt: SetupPrompt = {
+      selectAuthType: async () => "apps-script-gateway",
+      showMessage: async () => undefined,
+      selectAppsScriptCodePrintMode: async () => "none",
+      inputSpreadsheetUrl: async () => {
+        throw new Error("should not ask for spreadsheet URL");
+      },
+      inputDefaultSheetName: async () => {
+        throw new Error("should not ask for default sheet name");
+      },
+      inputAppsScriptGatewayConfig: async () =>
+        [
+          "12:34:56 PM Info typed-sheets config was generated",
+          "{",
+          '  "spreadsheetUrl": "https://docs.google.com/spreadsheets/d/spreadsheet-id/edit",',
+          '  "defaultSheetName": "Users",',
+          '  "auth": {',
+          '    "type": "apps-script-gateway",',
+          '    "gatewayUrl": "https://script.google.com/macros/s/deployment-id/exec",',
+          '    "gatewaySecret": "gateway-secret"',
+          "  }",
+          "}",
+          "12:34:57 PM Notice Execution completed",
+        ].join("\n"),
+      inputConfigPath: async () => ".typed-sheets.json",
+    };
+
+    await runSetup({ cwd, prompt });
+
+    await expect(readFile(join(cwd, ".typed-sheets.json"), "utf8")).resolves.toBe(
+      [
+        "{",
+        '  "spreadsheetUrl": "https://docs.google.com/spreadsheets/d/spreadsheet-id/edit",',
+        '  "defaultSheetName": "Users",',
+        '  "auth": {',
+        '    "type": "apps-script-gateway",',
+        '    "gatewayUrl": "https://script.google.com/macros/s/deployment-id/exec",',
+        '    "gatewaySecret": "gateway-secret"',
+        "  }",
+        "}",
+        "",
+      ].join("\n"),
+    );
+  });
+
+  it("keeps braces inside log JSON strings intact", () => {
+    expect(
+      parseAppsScriptGatewayConfigInput(
+        [
+          "Info before JSON",
+          "{",
+          '  "spreadsheetUrl": "https://docs.google.com/spreadsheets/d/spreadsheet-id/edit",',
+          '  "defaultSheetName": "Users {prod}",',
+          '  "auth": {',
+          '    "type": "apps-script-gateway",',
+          '    "gatewayUrl": "https://script.google.com/macros/s/deployment-id/exec",',
+          '    "gatewaySecret": "secret-with-}-brace"',
+          "  }",
+          "}",
+          "Info after JSON",
+        ].join("\n"),
+      ),
+    ).toEqual({
+      spreadsheetUrl:
+        "https://docs.google.com/spreadsheets/d/spreadsheet-id/edit",
+      defaultSheetName: "Users {prod}",
+      auth: {
+        type: "apps-script-gateway",
+        gatewayUrl: "https://script.google.com/macros/s/deployment-id/exec",
+        gatewaySecret: "secret-with-}-brace",
+      },
+    });
   });
 
   it("asks for service account credentials when service account auth is selected", async () => {

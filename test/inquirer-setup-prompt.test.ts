@@ -38,16 +38,16 @@ describe("inquirer setup prompt adapter", () => {
     expect(output.write).toHaveBeenCalledWith("setup instructions\n");
   });
 
-  it("maps spreadsheet, sheet, gateway config, and config path questions to input prompts", async () => {
+  it("maps spreadsheet, sheet, and config path questions to input prompts", async () => {
     const select = vi.fn();
     const input = vi
       .fn()
       .mockResolvedValueOnce("https://docs.google.com/spreadsheets/d/spreadsheet-id/edit")
       .mockResolvedValueOnce("Users")
-      .mockResolvedValueOnce('{"auth":{"type":"apps-script-gateway"}}')
       .mockResolvedValueOnce(".typed-sheets.json");
+    const editor = vi.fn().mockResolvedValue('{"auth":{"type":"apps-script-gateway"}}');
 
-    const prompt = createInquirerSetupPrompt({ select, input });
+    const prompt = createInquirerSetupPrompt({ select, input, editor });
 
     await expect(prompt.inputSpreadsheetUrl()).resolves.toBe(
       "https://docs.google.com/spreadsheets/d/spreadsheet-id/edit",
@@ -66,11 +66,11 @@ describe("inquirer setup prompt adapter", () => {
       default: "Users",
     });
     expect(input).toHaveBeenNthCalledWith(3, {
-      message: "Paste the generated config JSON from Apps Script logs",
-    });
-    expect(input).toHaveBeenNthCalledWith(4, {
       message: "Config file path",
       default: ".typed-sheets.json",
+    });
+    expect(editor).toHaveBeenCalledWith({
+      message: "Paste the generated config JSON or Apps Script log output",
     });
   });
 
