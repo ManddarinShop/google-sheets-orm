@@ -42,10 +42,21 @@ const columns = {
   _version: number(),
 };
 
-const describeServiceAccountIntegration =
-  spreadsheetUrl && serviceAccountCredentialsFile ? describe : describe.skip;
-const describeGatewayIntegration =
-  spreadsheetUrl && gatewayUrl && gatewaySecret ? describe : describe.skip;
+const describeServiceAccountIntegration = createIntegrationDescribe({
+  name: "Google Sheets service-account smoke test",
+  missingEnv: [
+    ["GOOGLE_SPREADSHEET_URL", spreadsheetUrl],
+    ["GOOGLE_APPLICATION_CREDENTIALS", serviceAccountCredentialsFile],
+  ],
+});
+const describeGatewayIntegration = createIntegrationDescribe({
+  name: "Google Sheets Apps Script gateway smoke test",
+  missingEnv: [
+    ["GOOGLE_SPREADSHEET_URL", spreadsheetUrl],
+    ["GOOGLE_APPS_SCRIPT_GATEWAY_URL", gatewayUrl],
+    ["GOOGLE_APPS_SCRIPT_GATEWAY_SECRET", gatewaySecret],
+  ],
+});
 
 const tempDirs: string[] = [];
 
@@ -59,6 +70,25 @@ async function createTempDir(): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), "typed-sheets-smoke-"));
   tempDirs.push(dir);
   return dir;
+}
+
+function createIntegrationDescribe(input: {
+  name: string;
+  missingEnv: Array<[string, string | undefined]>;
+}): (factory: () => void) => void {
+  const missingNames = input.missingEnv
+    .filter(([, value]) => !value)
+    .map(([name]) => name);
+
+  if (missingNames.length === 0) {
+    return (factory) => describe(input.name, factory);
+  }
+
+  return (factory) =>
+    describe.skip(
+      `${input.name} (skipped: missing ${missingNames.join(", ")})`,
+      factory,
+    );
 }
 
 async function expectRepositoryCrud(input: {
@@ -119,7 +149,7 @@ async function expectRepositoryCrud(input: {
   }
 }
 
-describeServiceAccountIntegration("Google Sheets service-account smoke test", () => {
+describeServiceAccountIntegration(() => {
   it("creates a repository from config and runs CRUD through the direct API adapter", async () => {
     const cwd = await createTempDir();
 
@@ -149,7 +179,7 @@ describeServiceAccountIntegration("Google Sheets service-account smoke test", ()
   }, 60_000);
 });
 
-describeGatewayIntegration("Google Sheets Apps Script gateway smoke test", () => {
+describeGatewayIntegration(() => {
   it("creates a repository from config and runs CRUD through the gateway adapter", async () => {
     const cwd = await createTempDir();
 

@@ -13,8 +13,8 @@ This is the open-source friendly setup path:
 `typed-sheets setup` can show this setup in two ways:
 
 - it prints both reference paths:
-  - `spikes/manual-apps-script-gateway/SheetInfo.gs`
-  - `spikes/manual-apps-script-gateway/Code.gs`
+  - `templates/manual-apps-script-gateway/SheetInfo.gs`
+  - `templates/manual-apps-script-gateway/Code.gs`
 - it can optionally print either script body so the user can copy it directly
   from the terminal
 
