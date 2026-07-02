@@ -27,7 +27,7 @@ export class FakeSheetAdapter implements SheetAdapter {
         ]
       : sheetOrSequence;
 
-    if (!sheet) {
+    if (sheet === undefined) {
       throw new Error(`Unknown fake sheet "${sheetName}"`);
     }
 

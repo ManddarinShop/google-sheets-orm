@@ -1,4 +1,8 @@
-import { SheetAdapter } from "../adapter/Adapter.js";
+import {
+  type SheetAdapter,
+  type SheetCell,
+  type SheetRowSnapshot,
+} from "../adapter/Adapter.js";
 import { Column } from "./Columns.js";
 import { ConflictError, SchemaDriftError } from "./Errors.js";
 import { parseRow } from "./RowParser.js";
@@ -44,7 +48,10 @@ export function createSheetRepository<T extends Record<string, unknown>>(
       return;
     }
 
-    if (!adapter.ensureSheet || !adapter.writeHeader) {
+    if (
+      adapter.ensureSheet === undefined ||
+      adapter.writeHeader === undefined
+    ) {
       throw new SchemaDriftError(
         "Adapter does not support automatic sheet initialization",
       );
@@ -158,11 +165,13 @@ export function createSheetRepository<T extends Record<string, unknown>>(
       key,
     );
 
-    const target = parsedRows.find(
-      (parseRow) => String(parseRow.row[key]) === id,
-    );
+    const target = findParsedRowByIdOrNull({
+      parsedRows,
+      key,
+      id,
+    });
 
-    if (!target) {
+    if (target === null) {
       return null;
     }
 
@@ -181,11 +190,12 @@ export function createSheetRepository<T extends Record<string, unknown>>(
       columns,
     });
 
-    const latestSheetRow = latestSnapshot.rows.find(
-      (sheetRow) => sheetRow.rowNumber === target.rowNumber,
+    const latestSheetRow = findSheetRowByNumberOrNull(
+      latestSnapshot.rows,
+      target.rowNumber,
     );
 
-    if (!latestSheetRow) {
+    if (latestSheetRow === null) {
       throw new ConflictError(`Row "${id}" changed before update`);
     }
 
@@ -235,11 +245,13 @@ export function createSheetRepository<T extends Record<string, unknown>>(
       key,
     );
 
-    const target = parsedRows.find(
-      (parsedRow) => String(parsedRow.row[key]) === id,
-    );
+    const target = findParsedRowByIdOrNull({
+      parsedRows,
+      key,
+      id,
+    });
 
-    if (!target) {
+    if (target === null) {
       return null;
     }
 
@@ -252,11 +264,12 @@ export function createSheetRepository<T extends Record<string, unknown>>(
       columns,
     });
 
-    const latestSheetRow = latestSnapshot.rows.find(
-      (sheetRow) => sheetRow.rowNumber === target.rowNumber,
+    const latestSheetRow = findSheetRowByNumberOrNull(
+      latestSnapshot.rows,
+      target.rowNumber,
     );
 
-    if (!latestSheetRow) {
+    if (latestSheetRow === null) {
       throw new ConflictError(`Row "${id}" changed before delete`);
     }
 
@@ -298,11 +311,30 @@ function assertUniqueKeys<T extends Record<string, unknown>>(
   }
 }
 
+function findParsedRowByIdOrNull<T extends Record<string, unknown>>(input: {
+  parsedRows: Array<{ rowNumber: number; row: T }>;
+  key: keyof T & string;
+  id: string;
+}): { rowNumber: number; row: T } | null {
+  const { parsedRows, key, id } = input;
+
+  return (
+    parsedRows.find((parsedRow) => String(parsedRow.row[key]) === id) ?? null
+  );
+}
+
+function findSheetRowByNumberOrNull(
+  rows: SheetRowSnapshot[],
+  rowNumber: number,
+): SheetRowSnapshot | null {
+  return rows.find((sheetRow) => sheetRow.rowNumber === rowNumber) ?? null;
+}
+
 function serializeRowInHeaderOrder<T extends Record<string, unknown>>(input: {
   headers: string[];
   row: T;
   columns: ColumnMap<T>;
-}) {
+}): SheetCell[] {
   const { headers, row, columns } = input;
 
   return headers
