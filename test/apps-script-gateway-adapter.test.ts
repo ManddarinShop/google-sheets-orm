@@ -167,6 +167,27 @@ describe("AppsScriptGatewayAdapter", () => {
     );
   });
 
+  it("preserves fetch failures as the error cause", async () => {
+    const cause = new Error("network unavailable");
+    const fetch = vi.fn().mockRejectedValue(cause);
+    const adapter = new AppsScriptGatewayAdapter({
+      gatewayUrl: "https://script.google.com/macros/s/deployment-id/exec",
+      gatewaySecret: "gateway-secret",
+      fetch,
+    });
+
+    try {
+      await adapter.readSheet("Users");
+      throw new Error("Expected readSheet to throw");
+    } catch (error) {
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toBe(
+        "Failed to fetch Apps Script gateway",
+      );
+      expect((error as Error).cause).toBe(cause);
+    }
+  });
+
   it("prefers the gateway error message when present", async () => {
     const fetch = vi.fn().mockResolvedValue(
       createJsonResponse({
@@ -184,6 +205,25 @@ describe("AppsScriptGatewayAdapter", () => {
 
     await expect(adapter.readSheet("")).rejects.toThrow(
       /Apps Script gateway failed: sheetName must be a non-empty string/,
+    );
+  });
+
+  it("rejects invalid readSheet response payloads", async () => {
+    const fetch = vi.fn().mockResolvedValue(
+      createJsonResponse({
+        ok: true,
+        headers: ["id", "email", "_version"],
+        rows: [{ rowNumber: 2, cells: ["u1", undefined, 1] }],
+      }),
+    );
+    const adapter = new AppsScriptGatewayAdapter({
+      gatewayUrl: "https://script.google.com/macros/s/deployment-id/exec",
+      gatewaySecret: "gateway-secret",
+      fetch,
+    });
+
+    await expect(adapter.readSheet("Users")).rejects.toThrow(
+      /Apps Script gateway returned an invalid readSheet response/,
     );
   });
 });

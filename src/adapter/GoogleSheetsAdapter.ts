@@ -245,7 +245,7 @@ export function extractSpreadsheetId(url: string): string {
     /^https:\/\/docs\.google\.com\/spreadsheets\/d\/([^/]+)(?:\/|$)/,
   );
 
-  if (!match?.[1]) {
+  if (match?.[1] === undefined) {
     throw new Error("Invalid Google Sheets URL");
   }
 
