@@ -80,7 +80,7 @@ Example Apps Script gateway config:
 
 For the Apps Script gateway path, deploy the shipped `Code.gs` script as a Web
 App before using the generated config. See the manual gateway guide in
-[`spikes/manual-apps-script-gateway/README.md`](spikes/manual-apps-script-gateway/README.md).
+[`templates/manual-apps-script-gateway/README.md`](templates/manual-apps-script-gateway/README.md).
 
 Then create repositories from that config:
 
@@ -426,3 +426,16 @@ npm run test:integration
 ```
 
 You can also put these values in `.env`; `npm run test:integration` loads `.env` automatically when it exists. `GOOGLE_SERVICE_ACCOUNT_SHEET_NAME` and `GOOGLE_APPS_SCRIPT_GATEWAY_SHEET_NAME` can be used to target different sheets; both fall back to `GOOGLE_SHEET_NAME` and then `Users`.
+
+When a smoke path is skipped, the test name includes the missing environment
+variables. For example, the Apps Script gateway smoke test requires
+`GOOGLE_SPREADSHEET_URL`, `GOOGLE_APPS_SCRIPT_GATEWAY_URL`, and
+`GOOGLE_APPS_SCRIPT_GATEWAY_SECRET`.
+
+The shipped setup flow embeds the manual Apps Script gateway script from
+`templates/manual-apps-script-gateway/Code.gs`. After editing `Code.gs`, run:
+
+```sh
+npm run sync:gateway-template
+npm run check:gateway-template
+```
