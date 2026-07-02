@@ -6,12 +6,12 @@ import {
 } from "./Config.js";
 
 export interface LoadTypedSheetsConfigOptions {
-  cwd?: string | undefined;
-  configPath?: string | undefined;
+  cwd?: string;
+  configPath?: string;
 }
 
 export async function loadTypedSheetsConfig(
-  options?: LoadTypedSheetsConfigOptions,
+  options: LoadTypedSheetsConfigOptions = {},
 ): Promise<TypedSheetsConfig> {
   const configPath = resolveConfigPath(options);
   const raw = await readConfigFile(configPath);
@@ -20,10 +20,9 @@ export async function loadTypedSheetsConfig(
   return parseTypedSheetsConfig(parsed);
 }
 
-function resolveConfigPath(options?: LoadTypedSheetsConfigOptions): string {
+function resolveConfigPath(options: LoadTypedSheetsConfigOptions): string {
   return (
-    options?.configPath ??
-    join(options?.cwd ?? process.cwd(), ".typed-sheets.json")
+    options.configPath ?? join(options.cwd ?? process.cwd(), ".typed-sheets.json")
   );
 }
 
