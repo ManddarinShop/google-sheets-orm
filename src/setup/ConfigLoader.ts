@@ -15,7 +15,7 @@ export async function loadTypedSheetsConfig(
 ): Promise<TypedSheetsConfig> {
   const configPath = resolveConfigPath(options);
   const raw = await readConfigFile(configPath);
-  const parsed = parseConfigJson(raw);
+  const parsed = requireConfigJson(raw);
 
   return parseTypedSheetsConfig(parsed);
 }
@@ -39,7 +39,7 @@ async function readConfigFile(configPath: string): Promise<string> {
   }
 }
 
-function parseConfigJson(raw: string): unknown {
+function requireConfigJson(raw: string): unknown {
   try {
     return JSON.parse(raw);
   } catch {

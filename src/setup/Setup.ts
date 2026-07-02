@@ -27,58 +27,63 @@ export async function runSetup(options: {
   cwd?: string;
   prompt: SetupPrompt;
 }): Promise<void> {
-  await options.prompt.showMessage(createSetupWelcomeMessage());
+  const { cwd, prompt } = options;
 
-  const authType = await options.prompt.selectAuthType();
+  await prompt.showMessage(createSetupWelcomeMessage());
+
+  const authType = await prompt.selectAuthType();
 
   let config: TypedSheetsConfig;
 
   if (authType === "apps-script-gateway") {
-    if (!options.prompt.inputAppsScriptGatewayConfig) {
+    const inputAppsScriptGatewayConfig =
+      prompt.inputAppsScriptGatewayConfig;
+
+    if (inputAppsScriptGatewayConfig === undefined) {
       throw new Error(
         "inputAppsScriptGatewayConfig is required for apps-script-gateway auth",
       );
     }
 
-    await options.prompt.showMessage(createManualAppsScriptGatewayIntro());
+    await prompt.showMessage(createManualAppsScriptGatewayIntro());
+
+    const selectAppsScriptCodePrintMode =
+      prompt.selectAppsScriptCodePrintMode;
 
     const codePrintMode =
-      options.prompt.selectAppsScriptCodePrintMode &&
-      (await options.prompt.selectAppsScriptCodePrintMode());
+      selectAppsScriptCodePrintMode === undefined
+        ? undefined
+        : await selectAppsScriptCodePrintMode();
 
     if (codePrintMode === "sheet-info") {
-      await options.prompt.showMessage(createManualAppsScriptSheetInfoCodeMessage());
+      await prompt.showMessage(createManualAppsScriptSheetInfoCodeMessage());
     }
 
     if (codePrintMode === "gateway") {
-      await options.prompt.showMessage(createManualAppsScriptGatewayCodeMessage());
+      await prompt.showMessage(createManualAppsScriptGatewayCodeMessage());
     }
 
-    const rawGatewayConfig =
-      await options.prompt.inputAppsScriptGatewayConfig();
+    const rawGatewayConfig = await inputAppsScriptGatewayConfig();
 
-    let parsedGatewayConfig: unknown;
-
-    try {
-      parsedGatewayConfig = JSON.parse(rawGatewayConfig);
-    } catch {
-      throw new Error("Apps Script gateway config must be valid JSON");
-    }
+    const parsedGatewayConfig =
+      requireAppsScriptGatewayConfigJson(rawGatewayConfig);
 
     config = parseTypedSheetsConfig(parsedGatewayConfig);
   } else {
-    if (!options.prompt.inputServiceAccountCredentialsFile) {
+    const inputServiceAccountCredentialsFile =
+      prompt.inputServiceAccountCredentialsFile;
+
+    if (inputServiceAccountCredentialsFile === undefined) {
       throw new Error(
         "inputServiceAccountCredentialsFile is required for service-account auth",
       );
     }
 
-    await options.prompt.showMessage(createServiceAccountInstructions());
+    await prompt.showMessage(createServiceAccountInstructions());
 
-    const spreadsheetUrl = await options.prompt.inputSpreadsheetUrl();
-    const defaultSheetName = await options.prompt.inputDefaultSheetName();
-    const credentialsFile =
-      await options.prompt.inputServiceAccountCredentialsFile();
+    const spreadsheetUrl = await prompt.inputSpreadsheetUrl();
+    const defaultSheetName = await prompt.inputDefaultSheetName();
+    const credentialsFile = await inputServiceAccountCredentialsFile();
 
     config = {
       spreadsheetUrl,
@@ -90,12 +95,20 @@ export async function runSetup(options: {
     };
   }
 
-  const configPath = await options.prompt.inputConfigPath();
+  const configPath = await prompt.inputConfigPath();
 
   await writeTypedSheetsConfig({
-    configPath: join(options.cwd ?? process.cwd(), configPath),
+    configPath: join(cwd ?? process.cwd(), configPath),
     config,
   });
 
-  await options.prompt.showMessage(`Created ${configPath}`);
+  await prompt.showMessage(`Created ${configPath}`);
+}
+
+function requireAppsScriptGatewayConfigJson(rawGatewayConfig: string): unknown {
+  try {
+    return JSON.parse(rawGatewayConfig);
+  } catch {
+    throw new Error("Apps Script gateway config must be valid JSON");
+  }
 }
