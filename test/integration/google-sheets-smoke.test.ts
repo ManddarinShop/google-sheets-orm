@@ -69,60 +69,54 @@ async function expectRepositoryCrud(input: {
   const id = `${input.idPrefix}-${Date.now()}-${Math.random()
     .toString(36)
     .slice(2)}`;
+  let inserted = false;
+  let deleted = false;
 
   if (input.ensureSheet) {
     await input.users.ensureSheet();
   }
 
-  await input.users.insert({
-    id,
-    email: `${id}@example.com`,
-    age: undefined,
-    active: true,
-    _version: 1,
-  });
-
-  await expect(input.users.findById(id)).resolves.toEqual({
-    id,
-    email: `${id}@example.com`,
-    age: undefined,
-    active: true,
-    _version: 1,
-  });
-
-  await expect(input.users.findAll()).resolves.toContainEqual({
-    id,
-    email: `${id}@example.com`,
-    age: undefined,
-    active: true,
-    _version: 1,
-  });
-
-  await expect(
-    input.users.update(id, (current) => ({
-      ...current,
+  try {
+    const insertedRow = {
+      id,
+      email: `${id}@example.com`,
+      age: undefined,
+      active: true,
+      _version: 1,
+    };
+    const updatedRow = {
+      ...insertedRow,
       age: 42,
-    })),
-  ).resolves.toEqual({
-    id,
-    email: `${id}@example.com`,
-    age: 42,
-    active: true,
-    _version: 2,
-  });
+      _version: insertedRow._version + 1,
+    };
 
-  await expect(input.users.findById(id)).resolves.toMatchObject({
-    id,
-    age: 42,
-    _version: 2,
-  });
+    await input.users.insert(insertedRow);
+    inserted = true;
 
-  await expect(input.users.deleteById(id)).resolves.toMatchObject({
-    id,
-    age: 42,
-    _version: 2,
-  });
-  await expect(input.users.findById(id)).resolves.toBeNull();
+    await expect(input.users.findById(id)).resolves.toEqual(insertedRow);
+    await expect(input.users.findAll()).resolves.toContainEqual(insertedRow);
+
+    await expect(
+      input.users.update(id, (current) => ({
+        ...current,
+        age: 42,
+      })),
+    ).resolves.toEqual(updatedRow);
+
+    await expect(input.users.findById(id)).resolves.toEqual(updatedRow);
+    await expect(input.users.findAll()).resolves.toContainEqual(updatedRow);
+
+    await expect(input.users.deleteById(id)).resolves.toEqual(updatedRow);
+    deleted = true;
+
+    await expect(input.users.findById(id)).resolves.toBeNull();
+    await expect(input.users.findAll()).resolves.not.toContainEqual(updatedRow);
+    await expect(input.users.deleteById(id)).resolves.toBeNull();
+  } finally {
+    if (inserted && !deleted) {
+      await input.users.deleteById(id);
+    }
+  }
 }
 
 describeServiceAccountIntegration("Google Sheets service-account smoke test", () => {
