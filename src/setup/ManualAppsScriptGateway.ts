@@ -1,8 +1,8 @@
 export const manualAppsScriptGatewayCodePath =
-  "spikes/manual-apps-script-gateway/Code.gs";
+  "templates/manual-apps-script-gateway/Code.gs";
 
 export const manualAppsScriptSheetInfoCodePath =
-  "spikes/manual-apps-script-gateway/SheetInfo.gs";
+  "templates/manual-apps-script-gateway/SheetInfo.gs";
 
 export const manualAppsScriptSheetInfoCode = `function setupTypedSheetsSheetInfo() {
   const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
