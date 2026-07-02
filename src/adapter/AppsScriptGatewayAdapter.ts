@@ -16,13 +16,12 @@ export class AppsScriptGatewayAdapter implements SheetAdapter {
   }
 
   async readSheet(sheetName: string): Promise<SheetSnapshot> {
-    const response = await this.request<{
-      headers: string[];
-      rows: SheetSnapshot["rows"];
-    }>({
-      operation: "readSheet",
-      sheetName,
-    });
+    const response = requireReadSheetResponse(
+      await this.request({
+        operation: "readSheet",
+        sheetName,
+      }),
+    );
 
     return {
       headers: response.headers,
@@ -84,35 +83,73 @@ export class AppsScriptGatewayAdapter implements SheetAdapter {
     });
   }
 
-  private async request<T>(payload: Record<string, unknown>): Promise<T> {
-    const response = await this.fetch(this.options.gatewayUrl, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({
-        ...payload,
-        secret: this.options.gatewaySecret,
-      }),
-    });
+  private async request(
+    payload: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    let response: Response;
 
-    const body = await response.json();
-
-    if (!isGatewayResponse(body)) {
-      throw new Error("Apps Script gateway returned an invalid response");
+    try {
+      response = await this.fetch(this.options.gatewayUrl, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          ...payload,
+          secret: this.options.gatewaySecret,
+        }),
+      });
+    } catch (error) {
+      throw new Error("Failed to fetch Apps Script gateway", {
+        cause: error,
+      });
     }
 
-    if (!body.ok) {
-      const code = typeof body.code === "string" ? body.code : body.error;
-      const message = typeof body.message === "string" ? body.message : code;
+    const body: unknown = await response.json();
+    const gatewayResponse = requireGatewayResponse(body);
+
+    if (gatewayResponse.ok === false) {
+      const code = gatewayResponse.code ?? gatewayResponse.error;
+      const message = gatewayResponse.message ?? code;
 
       throw new Error(
         `Apps Script gateway failed: ${message ?? "unknown_error"}`,
       );
     }
 
-    return body as T;
+    return gatewayResponse;
   }
+}
+
+function requireReadSheetResponse(value: Record<string, unknown>): SheetSnapshot {
+  if (
+    !Array.isArray(value.headers) ||
+    !value.headers.every((header) => typeof header === "string") ||
+    !Array.isArray(value.rows) ||
+    !value.rows.every(isSheetRowSnapshot)
+  ) {
+    throw new Error("Apps Script gateway returned an invalid readSheet response");
+  }
+
+  return {
+    headers: value.headers,
+    rows: value.rows,
+  };
+}
+
+function requireGatewayResponse(
+  value: unknown,
+): {
+  ok: boolean;
+  code?: string;
+  error?: string;
+  message?: string;
+} & Record<string, unknown> {
+  if (!isGatewayResponse(value)) {
+    throw new Error("Apps Script gateway returned an invalid response");
+  }
+
+  return value;
 }
 
 function isGatewayResponse(
@@ -124,9 +161,46 @@ function isGatewayResponse(
   message?: string;
 } & Record<string, unknown> {
   return (
-    typeof value === "object" &&
-    value !== null &&
+    isRecord(value) &&
     "ok" in value &&
-    typeof value.ok === "boolean"
+    typeof value.ok === "boolean" &&
+    isOptionalString(value.code) &&
+    isOptionalString(value.error) &&
+    isOptionalString(value.message)
   );
+}
+
+function isSheetRowSnapshot(
+  value: unknown,
+): value is SheetSnapshot["rows"][number] {
+  if (!isRecord(value)) {
+    return false;
+  }
+
+  const rowNumber = value.rowNumber;
+
+  return (
+    typeof rowNumber === "number" &&
+    Number.isInteger(rowNumber) &&
+    rowNumber >= 2 &&
+    Array.isArray(value.cells) &&
+    value.cells.every(isSheetCell)
+  );
+}
+
+function isSheetCell(value: unknown): value is SheetCell {
+  return (
+    typeof value === "string" ||
+    typeof value === "number" ||
+    typeof value === "boolean" ||
+    value === null
+  );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isOptionalString(value: unknown): value is string | undefined {
+  return value === undefined || typeof value === "string";
 }
