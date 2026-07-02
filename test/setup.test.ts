@@ -24,7 +24,7 @@ describe("interactive setup flow", () => {
 
   it("keeps the shipped gateway template in sync with Code.gs", async () => {
     await expect(
-      readFile("spikes/manual-apps-script-gateway/Code.gs", "utf8"),
+      readFile("templates/manual-apps-script-gateway/Code.gs", "utf8"),
     ).resolves.toBe(manualAppsScriptGatewayCode);
   });
 
@@ -82,8 +82,8 @@ describe("interactive setup flow", () => {
       "showMessage",
     ]);
     expect(messages[0]).toContain("typed-sheets setup");
-    expect(messages[1]).toContain("spikes/manual-apps-script-gateway/Code.gs");
-    expect(messages[1]).toContain("spikes/manual-apps-script-gateway/SheetInfo.gs");
+    expect(messages[1]).toContain("templates/manual-apps-script-gateway/Code.gs");
+    expect(messages[1]).toContain("templates/manual-apps-script-gateway/SheetInfo.gs");
     expect(messages[1]).toContain("Run only. No Web App deployment.");
     expect(messages[1]).toContain("Deploy > New deployment > Web app");
     expect(messages[1]).not.toContain("function setupTypedSheets()");
