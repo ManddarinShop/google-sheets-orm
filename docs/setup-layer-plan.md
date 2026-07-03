@@ -60,13 +60,14 @@ Expected flow:
    - a short step-by-step guide
    - the small `SheetInfo.gs` reference path
    - the full `Code.gs` gateway reference path
-4. User can choose what to print in the terminal:
+4. User can choose which copy command to print in the terminal:
    - nothing
-   - the small sheet info helper
-   - the full gateway script
-5. For the small helper, user only runs `setupTypedSheetsSheetInfo()`.
+   - the small sheet info helper copy command
+   - the full gateway script copy command
+5. For the small helper, user copies `SheetInfo.gs` and runs
+   `setupTypedSheetsSheetInfo()`.
    No Web App deployment is needed. This prints sheet identity values only.
-6. For the gateway setup, user pastes the provided `Code.gs` gateway script.
+6. For the gateway setup, user copies the provided `Code.gs` gateway script.
 7. User deploys the gateway script as a Web App.
 8. User runs `setupTypedSheets()`.
 9. Apps Script logs the generated config JSON.
@@ -134,9 +135,9 @@ Apps Script 방식은 두 파일을 분리합니다.
   웹 앱으로 배포한 뒤 `setupTypedSheets()`를 실행합니다. 이 스크립트가 gateway
   URL과 secret을 포함한 config JSON을 Apps Script 실행 로그에 출력합니다.
 
-`typed-sheets setup`은 두 파일 경로를 모두 보여주고, 필요한 경우에만 터미널에
-작은 helper 또는 전체 gateway 코드를 출력합니다. gateway config JSON은 setup
-프롬프트에 붙여넣습니다.
+`typed-sheets setup`은 두 파일 경로를 모두 보여주고, 필요한 경우에만 현재 OS에
+맞는 복사 명령을 출력합니다. 스크립트 본문은 터미널에 출력하지 않습니다. gateway
+config JSON은 setup 프롬프트에 붙여넣습니다.
 
 이 방식은 다음을 피합니다.
 
