@@ -427,20 +427,22 @@ npm run test:integration
 
 You can also put these values in `.env`; `npm run test:integration` loads `.env` automatically when it exists. `GOOGLE_SERVICE_ACCOUNT_SHEET_NAME` and `GOOGLE_APPS_SCRIPT_GATEWAY_SHEET_NAME` can be used to target different sheets; both fall back to `GOOGLE_SHEET_NAME` and then `Users`.
 
-If you are starting from `typed-sheets setup`, run `setupTypedSheets()` in Apps
-Script, copy the generated execution-log output, and paste the full log text
-into the setup editor prompt. The CLI extracts the config JSON and writes
-`.typed-sheets.json`.
+If you are starting from `typed-sheets setup`, deploy the gateway script, reload
+the Google Sheet, click `typed-sheets > Setup gateway` or run
+`setupTypedSheets()`, and paste the execution-log output into the setup editor
+prompt. On macOS, copy the gateway script without selecting terminal output:
+
+```sh
+pbcopy < templates/manual-apps-script-gateway/Code.gs
+```
+
+The CLI extracts the config JSON before writing `.typed-sheets.json`.
 
 When a smoke path is skipped, the test name includes the missing environment
 variables. For example, the Apps Script gateway smoke test requires
 `GOOGLE_SPREADSHEET_URL`, `GOOGLE_APPS_SCRIPT_GATEWAY_URL`, and
 `GOOGLE_APPS_SCRIPT_GATEWAY_SECRET`.
 
-The shipped setup flow embeds the manual Apps Script gateway script from
-`templates/manual-apps-script-gateway/Code.gs`. After editing `Code.gs`, run:
-
-```sh
-npm run sync:gateway-template
-npm run check:gateway-template
-```
+The shipped setup flow points users to the manual Apps Script gateway templates
+under `templates/manual-apps-script-gateway/`. Keep those files in the package
+`files` list when changing the setup flow.

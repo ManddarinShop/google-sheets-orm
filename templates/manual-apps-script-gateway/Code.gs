@@ -1,6 +1,16 @@
+// typed-sheets - Manual Apps Script Gateway
+//
+// This file is the canonical Apps Script gateway template shipped with the npm
+// package. The setup CLI points users to this file instead of embedding a copy.
+
 const TYPED_SHEETS_CONFIG_PROPERTY = "typedSheetsConfig";
 const TYPED_SHEETS_META_SHEET_NAME = "_typed_sheets_meta";
 
+/**
+ * Adds the typed-sheets setup menu to the bound Google Sheet.
+ *
+ * @returns {void}
+ */
 function onOpen() {
   SpreadsheetApp.getUi()
     .createMenu("typed-sheets")
@@ -8,6 +18,11 @@ function onOpen() {
     .addToUi();
 }
 
+/**
+ * Generates and stores the gateway config for this spreadsheet.
+ *
+ * @returns {object} The typed-sheets config to paste into .typed-sheets.json.
+ */
 function setupTypedSheets() {
   const config = createTypedSheetsConfig_();
   const configJson = JSON.stringify(config, null, 2);
@@ -20,6 +35,12 @@ function setupTypedSheets() {
   return config;
 }
 
+/**
+ * Handles typed-sheets gateway HTTP requests under the document lock.
+ *
+ * @param {object} e - Apps Script Web App event with the JSON request body.
+ * @returns {TextOutput} JSON response for the requested gateway operation.
+ */
 function doPost(e) {
   try {
     const request = parseRequest_(e);
@@ -438,7 +459,9 @@ function ensureMetaSheet_(spreadsheet, config) {
 
 function getGatewayUrlOrEmpty_() {
   try {
-    return ScriptApp.getService().getUrl() || "";
+    const url = ScriptApp.getService().getUrl() || "";
+
+    return url.replace(/\/dev$/, "/exec");
   } catch (error) {
     return "";
   }

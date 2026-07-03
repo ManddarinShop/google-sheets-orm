@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { manualAppsScriptGatewayCode } from "../src/setup/ManualAppsScriptGateway.js";
+import { createClipboardCopyCommand } from "../src/setup/ManualAppsScriptGateway.js";
 import {
   parseAppsScriptGatewayConfigInput,
   runSetup,
@@ -26,10 +26,25 @@ describe("interactive setup flow", () => {
     return dir;
   }
 
-  it("keeps the shipped gateway template in sync with Code.gs", async () => {
+  it("ships the manual Apps Script template files referenced by setup", async () => {
     await expect(
       readFile("templates/manual-apps-script-gateway/Code.gs", "utf8"),
-    ).resolves.toBe(manualAppsScriptGatewayCode);
+    ).resolves.toContain("function setupTypedSheets()");
+    await expect(
+      readFile("templates/manual-apps-script-gateway/SheetInfo.gs", "utf8"),
+    ).resolves.toContain("function setupTypedSheetsSheetInfo()");
+  });
+
+  it("selects the clipboard copy command for the current platform", () => {
+    expect(createClipboardCopyCommand("Code.gs", "darwin")).toBe(
+      "pbcopy < Code.gs",
+    );
+    expect(createClipboardCopyCommand("Code.gs", "win32")).toBe(
+      "Get-Content Code.gs | Set-Clipboard",
+    );
+    expect(createClipboardCopyCommand("Code.gs", "linux")).toBe(
+      "xclip -selection clipboard < Code.gs",
+    );
   });
 
   it("asks gateway questions and writes an Apps Script gateway config", async () => {
@@ -74,7 +89,7 @@ describe("interactive setup flow", () => {
       },
     };
 
-    await runSetup({ cwd, prompt });
+    await runSetup({ cwd, platform: "darwin", prompt });
 
     expect(promptCalls).toEqual([
       "showMessage",
@@ -88,6 +103,7 @@ describe("interactive setup flow", () => {
     expect(messages[0]).toContain("typed-sheets setup");
     expect(messages[1]).toContain("templates/manual-apps-script-gateway/Code.gs");
     expect(messages[1]).toContain("templates/manual-apps-script-gateway/SheetInfo.gs");
+    expect(messages[1]).toContain("pbcopy < templates/manual-apps-script-gateway/Code.gs");
     expect(messages[1]).toContain("Run only. No Web App deployment.");
     expect(messages[1]).toContain("Deploy > New deployment > Web app");
     expect(messages[1]).not.toContain("function setupTypedSheets()");
@@ -108,7 +124,7 @@ describe("interactive setup flow", () => {
     );
   });
 
-  it("prints Apps Script code only when requested", async () => {
+  it("prints the gateway copy command without dumping the script body", async () => {
     const cwd = await createTempDir();
     const messages: string[] = [];
     const prompt: SetupPrompt = {
@@ -137,12 +153,19 @@ describe("interactive setup flow", () => {
       inputConfigPath: async () => ".typed-sheets.json",
     };
 
-    await runSetup({ cwd, prompt });
+    await runSetup({ cwd, platform: "win32", prompt });
 
     expect(messages.some((message) => message.includes("Code.gs"))).toBe(true);
     expect(
-      messages.some((message) => message.includes("function setupTypedSheets()")),
+      messages.some((message) =>
+        message.includes(
+          "Get-Content templates/manual-apps-script-gateway/Code.gs | Set-Clipboard",
+        ),
+      ),
     ).toBe(true);
+    expect(
+      messages.some((message) => message.includes("function setupTypedSheets()")),
+    ).toBe(false);
   });
 
   it("prints the small sheet info helper when requested", async () => {
@@ -174,16 +197,21 @@ describe("interactive setup flow", () => {
       inputConfigPath: async () => ".typed-sheets.json",
     };
 
-    await runSetup({ cwd, prompt });
+    await runSetup({ cwd, platform: "darwin", prompt });
 
     expect(messages.some((message) => message.includes("SheetInfo.gs"))).toBe(
       true,
     );
     expect(
       messages.some((message) =>
-        message.includes("function setupTypedSheetsSheetInfo()"),
+        message.includes("pbcopy < templates/manual-apps-script-gateway/SheetInfo.gs"),
       ),
     ).toBe(true);
+    expect(
+      messages.some((message) =>
+        message.includes("function setupTypedSheetsSheetInfo()"),
+      ),
+    ).toBe(false);
     expect(
       messages.some((message) => message.includes("Deployment is not needed")),
     ).toBe(true);
