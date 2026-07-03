@@ -7,10 +7,14 @@ import {
   createManualAppsScriptSheetInfoCodeMessage,
   createServiceAccountInstructions,
   createSetupWelcomeMessage,
+  type SetupPlatform,
 } from "./ManualAppsScriptGateway.js";
 
 export type SetupAuthType = "apps-script-gateway" | "service-account";
-export type AppsScriptCodePrintMode = "none" | "sheet-info" | "gateway";
+export type AppsScriptCodePrintMode =
+  | "none"
+  | "sheet-info"
+  | "gateway";
 
 export interface SetupPrompt {
   selectAuthType(): Promise<SetupAuthType>;
@@ -25,9 +29,11 @@ export interface SetupPrompt {
 
 export async function runSetup(options: {
   cwd?: string;
+  platform?: SetupPlatform;
   prompt: SetupPrompt;
 }): Promise<void> {
   const { cwd, prompt } = options;
+  const platform = options.platform ?? process.platform;
 
   await prompt.showMessage(createSetupWelcomeMessage());
 
@@ -45,7 +51,7 @@ export async function runSetup(options: {
       );
     }
 
-    await prompt.showMessage(createManualAppsScriptGatewayIntro());
+    await prompt.showMessage(createManualAppsScriptGatewayIntro(platform));
 
     const selectAppsScriptCodePrintMode =
       prompt.selectAppsScriptCodePrintMode;
@@ -56,9 +62,9 @@ export async function runSetup(options: {
         : await selectAppsScriptCodePrintMode();
 
     if (codePrintMode === "sheet-info") {
-      await prompt.showMessage(createManualAppsScriptSheetInfoCodeMessage());
+      await prompt.showMessage(createManualAppsScriptSheetInfoCodeMessage(platform));
     } else if (codePrintMode === "gateway") {
-      await prompt.showMessage(createManualAppsScriptGatewayCodeMessage());
+      await prompt.showMessage(createManualAppsScriptGatewayCodeMessage(platform));
     }
 
     const rawGatewayConfig = await inputAppsScriptGatewayConfig();
