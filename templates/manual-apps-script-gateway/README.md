@@ -15,8 +15,7 @@ This is the open-source friendly setup path:
 - it prints both reference paths:
   - `templates/manual-apps-script-gateway/SheetInfo.gs`
   - `templates/manual-apps-script-gateway/Code.gs`
-- it can optionally print either script body so the user can copy it directly
-  from the terminal
+- it can optionally print a platform-specific copy command for either script
 
 ## Sheet Info Helper
 
@@ -31,7 +30,13 @@ Deployment is not needed.
    Extensions > Apps Script
    ```
 
-3. Paste `SheetInfo.gs` from this directory into Apps Script.
+3. Copy `SheetInfo.gs` from this directory into Apps Script.
+
+   On macOS:
+
+   ```sh
+   pbcopy < templates/manual-apps-script-gateway/SheetInfo.gs
+   ```
 
 4. Run this function in Apps Script:
 
@@ -64,7 +69,13 @@ App gateway.
    Extensions > Apps Script
    ```
 
-3. Paste `Code.gs` from this directory into Apps Script.
+3. Copy `Code.gs` from this directory into Apps Script.
+
+   On macOS:
+
+   ```sh
+   pbcopy < templates/manual-apps-script-gateway/Code.gs
+   ```
 
 4. Deploy it as a web app:
 
@@ -74,16 +85,15 @@ App gateway.
    Who has access: Anyone
    ```
 
-5. Run this function in Apps Script:
+5. Approve Google permissions if Apps Script asks.
+
+6. Run `setupTypedSheets()` or reload the Google Sheet and click:
 
    ```txt
-   setupTypedSheets
+   typed-sheets > Setup gateway
    ```
 
-6. Approve Google permissions.
-
-7. Open Apps Script execution logs and copy the generated JSON, or copy the
-   full log output around it.
+7. Open Apps Script execution logs and copy the generated JSON.
 
 8. Paste it into the `typed-sheets setup` editor prompt.
 

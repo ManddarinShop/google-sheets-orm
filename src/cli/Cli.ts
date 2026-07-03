@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 
+import { realpathSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { runSetup, type SetupPrompt } from "../setup/Setup.js";
 import { createInquirerSetupPrompt } from "../setup/InquirerSetupPrompt.js";
 
@@ -48,6 +50,19 @@ if (isMainModule()) {
   process.exit(exitCode);
 }
 
-function isMainModule(): boolean {
-  return import.meta.url === `file://${process.argv[1]}`;
+export function isMainModule(
+  moduleUrl = import.meta.url,
+  argvPath = requireArgvPath(),
+): boolean {
+  return realpathSync(fileURLToPath(moduleUrl)) === realpathSync(argvPath);
+}
+
+function requireArgvPath(): string {
+  const argvPath = process.argv[1];
+
+  if (argvPath === undefined) {
+    throw new Error("process.argv[1] is required to detect CLI entrypoint");
+  }
+
+  return argvPath;
 }

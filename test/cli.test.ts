@@ -1,6 +1,28 @@
 import { describe, expect, it, vi } from "vitest";
 
 describe("CLI setup command", () => {
+  it("detects bin symlink execution as the main module", async () => {
+    const { mkdtemp, symlink, rm, writeFile } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const { pathToFileURL } = await import("node:url");
+    const { isMainModule } = await import("../src/cli/Cli.js");
+
+    const dir = await mkdtemp(join(tmpdir(), "typed-sheets-cli-"));
+
+    try {
+      const target = join(dir, "Cli.js");
+      const link = join(dir, "typed-sheets");
+
+      await writeFile(target, "");
+      await symlink(target, link);
+
+      expect(isMainModule(pathToFileURL(target).href, link)).toBe(true);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it("wires the setup command to prompt and runSetup", async () => {
     const { runCli } = await import("../src/cli/Cli.js");
     const prompt = { kind: "prompt" };
