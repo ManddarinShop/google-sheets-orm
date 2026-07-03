@@ -29,7 +29,7 @@ function setupTypedSheets() {
 
   Logger.log(configJson);
   SpreadsheetApp.getUi().alert(
-    "typed-sheets config was generated. Open Apps Script execution logs and copy the JSON into .typed-sheets.json.",
+    "typed-sheets is ready for this Sheet. Open Apps Script execution logs, copy the generated JSON, and paste it back into the typed-sheets setup prompt.",
   );
 
   return config;
@@ -400,6 +400,7 @@ function createTypedSheetsConfig_() {
   const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
   const activeSheet = spreadsheet.getActiveSheet();
   const lock = LockService.getDocumentLock();
+  const gatewayUrl = promptGatewayUrl_();
 
   lock.waitLock(30000);
 
@@ -408,7 +409,6 @@ function createTypedSheetsConfig_() {
     const gatewaySecret = existing && existing.auth.gatewaySecret
       ? existing.auth.gatewaySecret
       : Utilities.getUuid();
-    const gatewayUrl = getGatewayUrlOrEmpty_();
 
     const config = {
       spreadsheetUrl: spreadsheet.getUrl(),
@@ -457,14 +457,28 @@ function ensureMetaSheet_(spreadsheet, config) {
   ]);
 }
 
-function getGatewayUrlOrEmpty_() {
-  try {
-    const url = ScriptApp.getService().getUrl() || "";
+function promptGatewayUrl_() {
+  const ui = SpreadsheetApp.getUi();
+  const response = ui.prompt(
+    "typed-sheets: Paste Web App URL",
+    "Use the deployed Apps Script Web App URL that ends with /exec. You can copy it from Deploy > Manage deployments.",
+    ui.ButtonSet.OK_CANCEL,
+  );
 
-    return url.replace(/\/dev$/, "/exec");
-  } catch (error) {
-    return "";
+  if (response.getSelectedButton() !== ui.Button.OK) {
+    throw gatewayError_("setup_cancelled", "Gateway setup was cancelled");
   }
+
+  const gatewayUrl = response.getResponseText().trim();
+
+  if (!/^https:\/\/script\.google\.com\/macros\/s\/[^/]+\/exec$/.test(gatewayUrl)) {
+    throw gatewayError_(
+      "invalid_gateway_url",
+      "Paste the deployed Apps Script Web App URL that ends with /exec",
+    );
+  }
+
+  return gatewayUrl;
 }
 
 function json_(value) {

@@ -104,7 +104,7 @@ describe("interactive setup flow", () => {
     expect(messages[1]).toContain("templates/manual-apps-script-gateway/Code.gs");
     expect(messages[1]).toContain("templates/manual-apps-script-gateway/SheetInfo.gs");
     expect(messages[1]).toContain("pbcopy < templates/manual-apps-script-gateway/Code.gs");
-    expect(messages[1]).toContain("Run only. No Web App deployment.");
+    expect(messages[1]).toContain("No Web App deployment is needed.");
     expect(messages[1]).toContain("Deploy > New deployment > Web app");
     expect(messages[1]).not.toContain("function setupTypedSheets()");
     expect(messages[2]).toBe("Created .typed-sheets.json");
@@ -213,7 +213,7 @@ describe("interactive setup flow", () => {
       ),
     ).toBe(false);
     expect(
-      messages.some((message) => message.includes("Deployment is not needed")),
+      messages.some((message) => message.includes("You do not need to deploy it")),
     ).toBe(true);
   });
 
