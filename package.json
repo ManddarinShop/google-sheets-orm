@@ -1,6 +1,6 @@
 {
   "name": "typed-sheets",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "Typed repository and safe write layer for Google Sheets-backed MVPs.",
   "type": "module",
   "main": "./dist/index.js",
@@ -16,6 +16,7 @@
   },
   "files": [
     "dist",
+    "docs",
     "templates/manual-apps-script-gateway/SheetInfo.gs",
     "templates/manual-apps-script-gateway/Code.gs",
     "templates/manual-apps-script-gateway/README.md"
