@@ -1,6 +1,6 @@
-# Manual Apps Script Gateway Spike
+# Manual Apps Script Gateway
 
-This is the open-source friendly setup path:
+This is the open-source friendly Apps Script setup path:
 
 - no typed-sheets OAuth client ID
 - no Google Cloud Console setup
@@ -19,8 +19,8 @@ This is the open-source friendly setup path:
 
 ## Sheet Info Helper
 
-Use `SheetInfo.gs` when you only need to inspect the required Sheet values.
-Deployment is not needed.
+Use `SheetInfo.gs` only when you want to inspect the Sheet URL and default tab.
+It is a run-only helper; deployment is not needed.
 
 1. Open the target Google Sheet.
 
@@ -30,7 +30,7 @@ Deployment is not needed.
    Extensions > Apps Script
    ```
 
-3. Copy `SheetInfo.gs` from this directory into Apps Script.
+3. Copy `SheetInfo.gs` into Apps Script.
 
    On macOS:
 
@@ -58,8 +58,8 @@ This helper prints:
 
 ## Full Gateway
 
-Use `Code.gs` when you want typed-sheets to connect through an Apps Script Web
-App gateway.
+Use `Code.gs` to connect typed-sheets to this spreadsheet through an Apps Script
+Web App gateway.
 
 1. Open the target Google Sheet.
 
@@ -69,7 +69,7 @@ App gateway.
    Extensions > Apps Script
    ```
 
-3. Copy `Code.gs` from this directory into Apps Script.
+3. Copy `Code.gs` into Apps Script.
 
    On macOS:
 
@@ -87,18 +87,25 @@ App gateway.
 
 5. Approve Google permissions if Apps Script asks.
 
-6. Run `setupTypedSheets()` or reload the Google Sheet and click:
+6. Copy the Web App URL shown after deployment. It must end with `/exec`.
+
+7. Run `setupTypedSheets()` or reload the Google Sheet and click:
 
    ```txt
    typed-sheets > Setup gateway
    ```
 
-7. Open Apps Script execution logs and copy the generated JSON.
+8. Paste that `/exec` URL into the Apps Script prompt.
 
-8. Paste it into the `typed-sheets setup` editor prompt.
+9. Open Apps Script execution logs and copy the generated JSON.
+
+10. Paste that JSON into the `typed-sheets setup` editor prompt.
 
 The CLI extracts the config JSON from the pasted text, validates it, and writes
 `.typed-sheets.json`.
+
+Security note: the generated `gatewaySecret` is a credential. Treat it like a
+password and do not commit it to version control.
 
 The gateway supports these operations:
 
