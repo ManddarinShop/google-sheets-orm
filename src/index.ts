@@ -11,6 +11,12 @@ export { GoogleSheetsAdapter } from "./adapter/GoogleSheetsAdapter.js";
 export { AppsScriptGatewayAdapter } from "./adapter/AppsScriptGatewayAdapter.js";
 export type { GoogleSheetsAdapterOptions } from "./adapter/GoogleSheetsAdapter.js";
 export type { AppsScriptGatewayAdapterOptions } from "./adapter/AppsScriptGatewayAdapter.js";
+export type {
+  AppsScriptGatewayAuthenticatedRequest,
+  AppsScriptGatewayReadSheetResponse,
+  AppsScriptGatewayRequest,
+  AppsScriptGatewayResponse,
+} from "./adapter/AppsScriptGatewayProtocol.js";
 
 export type { SheetAdapter, SheetCell, SheetSnapshot } from "./adapter/Adapter.js";
 export type { Column } from "./core/Columns.js";

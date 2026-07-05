@@ -45,10 +45,10 @@ describe("repository inserts", () => {
       _version: 1,
     });
 
-    expect(adapter.appendedRows).toEqual([
+    expect(adapter.appendedRowBatches).toEqual([
       {
         sheetName: "Users",
-        row: ["u1", "a@test.com", 20, true, 1],
+        rows: [["u1", "a@test.com", 20, true, 1]],
       },
     ]);
   });
@@ -76,7 +76,7 @@ describe("repository inserts", () => {
       _version: 1,
     });
 
-    expect(adapter.appendedRows[0]?.row).toEqual([
+    expect(adapter.appendedRowBatches[0]?.rows[0]).toEqual([
       "u1",
       "a@test.com",
       null,
@@ -108,7 +108,7 @@ describe("repository inserts", () => {
       _version: 1,
     });
 
-    expect(adapter.appendedRows[0]?.row).toEqual([
+    expect(adapter.appendedRowBatches[0]?.rows[0]).toEqual([
       1,
       true,
       20,
@@ -143,5 +143,88 @@ describe("repository inserts", () => {
     ).rejects.toThrow(SchemaDriftError);
 
     expect(adapter.appendedRows).toEqual([]);
+    expect(adapter.appendedRowBatches).toEqual([]);
+  });
+
+  it("batches same-tick inserts into one adapter call", async () => {
+    const adapter = new FakeSheetAdapter({
+      Users: {
+        headers: ["id", "email", "age", "active", "_version"],
+        rows: [],
+      },
+    });
+
+    const users = createSheetRepository<User>({
+      adapter,
+      sheetName: "Users",
+      key: "id",
+      columns,
+    });
+
+    await Promise.all([
+      users.insert({
+        id: "u1",
+        email: "a@test.com",
+        age: 20,
+        active: true,
+        _version: 1,
+      }),
+      users.insert({
+        id: "u2",
+        email: "b@test.com",
+        age: 21,
+        active: false,
+        _version: 1,
+      }),
+    ]);
+
+    expect(adapter.appendedRows).toEqual([]);
+    expect(adapter.appendedRowBatches).toEqual([
+      {
+        sheetName: "Users",
+        rows: [
+          ["u1", "a@test.com", 20, true, 1],
+          ["u2", "b@test.com", 21, false, 1],
+        ],
+      },
+    ]);
+  });
+
+  it("rejects duplicate keys within the same insert batch", async () => {
+    const adapter = new FakeSheetAdapter({
+      Users: {
+        headers: ["id", "email", "age", "active", "_version"],
+        rows: [],
+      },
+    });
+
+    const users = createSheetRepository<User>({
+      adapter,
+      sheetName: "Users",
+      key: "id",
+      columns,
+    });
+
+    await expect(
+      Promise.all([
+        users.insert({
+          id: "u1",
+          email: "a@test.com",
+          age: 20,
+          active: true,
+          _version: 1,
+        }),
+        users.insert({
+          id: "u1",
+          email: "duplicate@test.com",
+          age: 21,
+          active: false,
+          _version: 1,
+        }),
+      ]),
+    ).rejects.toThrow(SchemaDriftError);
+
+    expect(adapter.appendedRows).toEqual([]);
+    expect(adapter.appendedRowBatches).toEqual([]);
   });
 });

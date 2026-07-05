@@ -7,6 +7,7 @@ import { Column } from "./Columns.js";
 import { ConflictError, SchemaDriftError } from "./Errors.js";
 import { parseRow } from "./RowParser.js";
 import { assertSchema } from "./Schema.js";
+import { createSameTickBatcher } from "./SameTickBatcher.js";
 
 export type ColumnMap<T extends Record<string, unknown>> = {
   [K in keyof T]: Column<T[K]>;
@@ -32,6 +33,7 @@ export function createSheetRepository<T extends Record<string, unknown>>(
   input: CreateSheetRepositoryInput<T>,
 ): SheetRepository<T> {
   const { adapter, sheetName, key, columns } = input;
+  const insertBatcher = createInsertBatcher({ adapter, sheetName, key, columns });
 
   async function ensureSheet(): Promise<void> {
     if (adapter.initializeSheet) {
@@ -102,41 +104,7 @@ export function createSheetRepository<T extends Record<string, unknown>>(
   }
 
   async function insert(row: T): Promise<void> {
-    const snapshot = await adapter.readSheet(sheetName);
-
-    assertSchema({
-      headers: snapshot.headers,
-      key,
-      columns,
-    });
-
-    const existingRows = snapshot.rows.map((sheetRow) =>
-      parseRow<T>({
-        headers: snapshot.headers,
-        cells: sheetRow.cells,
-        columns,
-      }),
-    );
-
-    assertUniqueKeys(existingRows, key);
-
-    const keyValue = String(row[key]);
-
-    if (
-      existingRows.some(
-        (existingRows) => String(existingRows[key]) === keyValue,
-      )
-    ) {
-      throw new SchemaDriftError(`Duplicate key "${keyValue}"`);
-    }
-
-    const serializedRow = serializeRowInHeaderOrder({
-      headers: snapshot.headers,
-      row,
-      columns,
-    });
-
-    await adapter.appendRow(sheetName, serializedRow);
+    await insertBatcher.insert(row);
   }
 
   async function update(
@@ -292,6 +260,77 @@ export function createSheetRepository<T extends Record<string, unknown>>(
   }
 
   return { ensureSheet, findAll, findById, insert, update, deleteById };
+}
+
+interface InsertBatcher<T extends Record<string, unknown>> {
+  insert(row: T): Promise<void>;
+}
+
+interface InsertBatcherInput<T extends Record<string, unknown>> {
+  adapter: SheetAdapter;
+  sheetName: string;
+  key: keyof T & string;
+  columns: ColumnMap<T>;
+}
+
+/**
+ * Coalesces same-tick insert calls into one schema read and one appendRows
+ * transport call. Sequential callers still observe the old insert contract,
+ * while Promise.all-style callers avoid per-row Apps Script requests.
+ */
+function createInsertBatcher<T extends Record<string, unknown>>(
+  input: InsertBatcherInput<T>,
+): InsertBatcher<T> {
+  const { adapter, sheetName, key, columns } = input;
+  const batcher = createSameTickBatcher<T, void>({
+    flush: insertRows,
+  });
+
+  return {
+    insert(row) {
+      return batcher.enqueue(row);
+    },
+  };
+
+  async function insertRows(rows: T[]): Promise<void[]> {
+    const snapshot = await adapter.readSheet(sheetName);
+
+    assertSchema({
+      headers: snapshot.headers,
+      key,
+      columns,
+    });
+
+    const existingRows = snapshot.rows.map((sheetRow) =>
+      parseRow<T>({
+        headers: snapshot.headers,
+        cells: sheetRow.cells,
+        columns,
+      }),
+    );
+
+    assertUniqueKeys(existingRows, key);
+    assertUniqueKeys([...existingRows, ...rows], key);
+
+    const serializedRows = rows.map((row) =>
+      serializeRowInHeaderOrder({
+        headers: snapshot.headers,
+        row,
+        columns,
+      }),
+    );
+
+    if (adapter.appendRows !== undefined) {
+      await adapter.appendRows(sheetName, serializedRows);
+      return rows.map(() => undefined);
+    }
+
+    for (const serializedRow of serializedRows) {
+      await adapter.appendRow(sheetName, serializedRow);
+    }
+
+    return rows.map(() => undefined);
+  }
 }
 
 function assertUniqueKeys<T extends Record<string, unknown>>(
