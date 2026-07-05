@@ -115,12 +115,14 @@ The gateway supports these operations:
 - `writeHeader`
 - `readSheet`
 - `appendRow`
+- `appendRows`
 - `updateRow`
 - `deleteRow`
 
 `initializeSheet` creates the sheet when missing and writes headers when the
 header row is empty while holding the document lock. `writeHeader` refuses to
-overwrite a non-empty header row.
+overwrite a non-empty header row. `appendRows` writes a burst of rows through one
+gateway request so repository inserts can avoid per-row Apps Script calls.
 
 Invalid requests return a JSON response with `ok: false`, an error `code`, and
 a human-readable `message`.

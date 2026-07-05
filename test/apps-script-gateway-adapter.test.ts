@@ -59,6 +59,30 @@ describe("AppsScriptGatewayAdapter", () => {
     });
   });
 
+  it("appends multiple rows through one Apps Script gateway request", async () => {
+    const fetch = vi.fn().mockResolvedValue(createJsonResponse({ ok: true }));
+    const adapter = new AppsScriptGatewayAdapter({
+      gatewayUrl: "https://script.google.com/macros/s/deployment-id/exec",
+      gatewaySecret: "gateway-secret",
+      fetch,
+    });
+
+    await adapter.appendRows("Users", [
+      ["u1", "a@test.com", true, 1],
+      ["u2", "b@test.com", false, 1],
+    ]);
+
+    expectGatewayRequest(fetch, {
+      operation: "appendRows",
+      secret: "gateway-secret",
+      sheetName: "Users",
+      rows: [
+        ["u1", "a@test.com", true, 1],
+        ["u2", "b@test.com", false, 1],
+      ],
+    });
+  });
+
   it("updates a row through the Apps Script gateway", async () => {
     const fetch = vi.fn().mockResolvedValue(createJsonResponse({ ok: true }));
     const adapter = new AppsScriptGatewayAdapter({

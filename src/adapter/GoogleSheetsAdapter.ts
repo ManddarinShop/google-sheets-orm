@@ -105,6 +105,26 @@ export class GoogleSheetsAdapter implements SheetAdapter {
     });
   }
 
+  /**
+   * Appends a burst of rows with one Google Sheets values.append call. This is
+   * used by repository-level insert batching to reduce remote API calls without
+   * changing the public insert contract.
+   */
+  async appendRows(sheetName: string, rows: SheetCell[][]): Promise<void> {
+    if (rows.length === 0) {
+      return;
+    }
+
+    await this.sheetsClient.spreadsheets.values.append({
+      spreadsheetId: this.spreadsheetId,
+      range: sheetName,
+      valueInputOption: "RAW",
+      requestBody: {
+        values: rows,
+      },
+    });
+  }
+
   async updateRow(
     sheetName: string,
     rowNumber: number,
