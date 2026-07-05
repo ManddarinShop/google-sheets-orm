@@ -3,7 +3,7 @@ import { ParseError } from "./Errors.js";
 
 export interface Column<T> {
   readonly isOptional: boolean;
-  parse(value: SheetCell, columName: string): T;
+  parse(value: SheetCell, columnName: string): T;
   serialize(value: T): SheetCell;
   optional(): Column<T | undefined>;
 }
@@ -26,6 +26,7 @@ class BaseColumn<T> implements Column<T> {
 
     return this.parser(value, columnName);
   }
+
   serialize(value: T): SheetCell {
     if (value === undefined) {
       return null;
@@ -33,6 +34,7 @@ class BaseColumn<T> implements Column<T> {
 
     return this.serializer(value);
   }
+
   optional(): Column<T | undefined> {
     return new BaseColumn<T | undefined>(
       true,
@@ -46,49 +48,47 @@ function isEmptyCell(value: SheetCell): boolean {
   return value === null || value === "";
 }
 
-export function text(): Column<string> { 
-    return new BaseColumn<string>(
-        false,
-        value => String(value),
-        value => value,
-    );
-}
-
-
-export function number(): Column<number> {
-  return new BaseColumn<number>(
+export function text(): Column<string> {
+  return new BaseColumn<string>(
     false,
-      (value, columnName) => { 
-          const parsed = typeof value === "number" ? value : Number(value);
-
-          if (!Number.isFinite(parsed)) { 
-              throw new ParseError(`Invalid number for column "${columnName}"`);
-          }
-
-          return parsed;
-      },
+    (value) => String(value),
     (value) => value,
   );
 }
 
+export function number(): Column<number> {
+  return new BaseColumn<number>(
+    false,
+    (value, columnName) => {
+      const parsed = typeof value === "number" ? value : Number(value);
+
+      if (!Number.isFinite(parsed)) {
+        throw new ParseError(`Invalid number for column "${columnName}"`);
+      }
+
+      return parsed;
+    },
+    (value) => value,
+  );
+}
 
 export function boolean(): Column<boolean> {
   return new BaseColumn<boolean>(
     false,
     (value, columnName) => {
-        if (typeof value === "boolean") { 
-            return value;
-        }
+      if (typeof value === "boolean") {
+        return value;
+      }
 
-        if (value === "true") { 
-            return true;
-        }
+      if (value === "true") {
+        return true;
+      }
 
-        if (value === "false") {
-          return false;
-        }
+      if (value === "false") {
+        return false;
+      }
 
-        throw new ParseError(`Invalid boolean for column "${columnName}"`);
+      throw new ParseError(`Invalid boolean for column "${columnName}"`);
     },
     (value) => value,
   );
