@@ -208,10 +208,41 @@ describe("GoogleSheetsAdapter.appendRow", () => {
 
     expect(append).toHaveBeenCalledWith({
       spreadsheetId: "spreadsheet-id",
-      range: "Users",
+      range: "'Users'",
       valueInputOption: "RAW",
       requestBody: {
         values: [["u1", "a@test.com", 20, true, 1]],
+      },
+    });
+  });
+
+  it("quotes sheet names when appending rows", async () => {
+    const append = vi.fn().mockResolvedValue({
+      data: {},
+    });
+
+    const sheetsClient = {
+      spreadsheets: {
+        values: {
+          append,
+        },
+      },
+    } as unknown as sheets_v4.Sheets;
+
+    const adapter = new GoogleSheetsAdapter({
+      spreadsheetUrl: "https://docs.google.com/spreadsheets/d/spreadsheet-id/edit",
+      auth: "unused",
+      sheetsClient,
+    });
+
+    await adapter.appendRow("Owner's Sheet", ["u1", "a@test.com", 1]);
+
+    expect(append).toHaveBeenCalledWith({
+      spreadsheetId: "spreadsheet-id",
+      range: "'Owner''s Sheet'",
+      valueInputOption: "RAW",
+      requestBody: {
+        values: [["u1", "a@test.com", 1]],
       },
     });
   });
@@ -244,12 +275,49 @@ describe("GoogleSheetsAdapter.appendRows", () => {
 
     expect(append).toHaveBeenCalledWith({
       spreadsheetId: "spreadsheet-id",
-      range: "Users",
+      range: "'Users'",
       valueInputOption: "RAW",
       requestBody: {
         values: [
           ["u1", "a@test.com", 20, true, 1],
           ["u2", "b@test.com", 21, false, 1],
+        ],
+      },
+    });
+  });
+
+  it("quotes sheet names when appending multiple rows", async () => {
+    const append = vi.fn().mockResolvedValue({
+      data: {},
+    });
+
+    const sheetsClient = {
+      spreadsheets: {
+        values: {
+          append,
+        },
+      },
+    } as unknown as sheets_v4.Sheets;
+
+    const adapter = new GoogleSheetsAdapter({
+      spreadsheetUrl: "https://docs.google.com/spreadsheets/d/spreadsheet-id/edit",
+      auth: "unused",
+      sheetsClient,
+    });
+
+    await adapter.appendRows("Owner's Sheet", [
+      ["u1", "a@test.com", 1],
+      ["u2", "b@test.com", 1],
+    ]);
+
+    expect(append).toHaveBeenCalledWith({
+      spreadsheetId: "spreadsheet-id",
+      range: "'Owner''s Sheet'",
+      valueInputOption: "RAW",
+      requestBody: {
+        values: [
+          ["u1", "a@test.com", 1],
+          ["u2", "b@test.com", 1],
         ],
       },
     });

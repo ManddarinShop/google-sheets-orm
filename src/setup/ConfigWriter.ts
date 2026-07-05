@@ -1,10 +1,12 @@
 import { writeFile } from "node:fs/promises";
-import { join } from "node:path";
 import { parseTypedSheetsConfig, type TypedSheetsConfig } from "./Config.js";
+import {
+  resolveTypedSheetsConfigPath,
+  type TypedSheetsConfigPathOptions,
+} from "./ConfigPath.js";
 
-export interface WriteTypedSheetsConfigOptions {
-  cwd?: string;
-  configPath?: string;
+export interface WriteTypedSheetsConfigOptions
+  extends TypedSheetsConfigPathOptions {
   config: TypedSheetsConfig;
 }
 
@@ -12,9 +14,7 @@ export async function writeTypedSheetsConfig(
   options: WriteTypedSheetsConfigOptions,
 ): Promise<void> {
   const config = parseTypedSheetsConfig(options.config);
-  const configPath =
-    options.configPath ??
-    join(options.cwd ?? process.cwd(), ".typed-sheets.json");
+  const configPath = resolveTypedSheetsConfigPath(options);
 
   await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
 }

@@ -26,10 +26,9 @@ export class GoogleSheetsAdapter implements SheetAdapter {
   }
 
   async ensureSheet(sheetName: string): Promise<void> {
-    const response = await this.sheetsClient.spreadsheets.get({
-      spreadsheetId: this.spreadsheetId,
-      fields: "sheets.properties.sheetId,sheets.properties.title",
-    });
+    const response = await this.sheetsClient.spreadsheets.get(
+      createSheetListRequest(this.spreadsheetId),
+    );
 
     const sheets = response.data.sheets ?? [];
     const existingSheet = sheets.find(
@@ -47,15 +46,7 @@ export class GoogleSheetsAdapter implements SheetAdapter {
     const responseAfterCreate = await this.sheetsClient.spreadsheets.batchUpdate({
       spreadsheetId: this.spreadsheetId,
       requestBody: {
-        requests: [
-          {
-            addSheet: {
-              properties: {
-                title: sheetName,
-              },
-            },
-          },
-        ],
+        requests: [createAddSheetRequest(sheetName)],
       },
     });
     this.sheetIdCache.set(
@@ -69,9 +60,7 @@ export class GoogleSheetsAdapter implements SheetAdapter {
       spreadsheetId: this.spreadsheetId,
       range: toRowRange(sheetName, 1, headers.length),
       valueInputOption: "RAW",
-      requestBody: {
-        values: [headers],
-      },
+      requestBody: createValuesBody([headers]),
     });
   }
 
@@ -97,11 +86,9 @@ export class GoogleSheetsAdapter implements SheetAdapter {
   async appendRow(sheetName: string, row: SheetCell[]): Promise<void> {
     await this.sheetsClient.spreadsheets.values.append({
       spreadsheetId: this.spreadsheetId,
-      range: sheetName,
+      range: quoteSheetName(sheetName),
       valueInputOption: "RAW",
-      requestBody: {
-        values: [row],
-      },
+      requestBody: createValuesBody([row]),
     });
   }
 
@@ -117,11 +104,9 @@ export class GoogleSheetsAdapter implements SheetAdapter {
 
     await this.sheetsClient.spreadsheets.values.append({
       spreadsheetId: this.spreadsheetId,
-      range: sheetName,
+      range: quoteSheetName(sheetName),
       valueInputOption: "RAW",
-      requestBody: {
-        values: rows,
-      },
+      requestBody: createValuesBody(rows),
     });
   }
 
@@ -134,9 +119,7 @@ export class GoogleSheetsAdapter implements SheetAdapter {
       spreadsheetId: this.spreadsheetId,
       range: toRowRange(sheetName, rowNumber, row.length),
       valueInputOption: "RAW",
-      requestBody: {
-        values: [row],
-      },
+      requestBody: createValuesBody([row]),
     });
   }
 
@@ -152,18 +135,7 @@ export class GoogleSheetsAdapter implements SheetAdapter {
     await this.sheetsClient.spreadsheets.batchUpdate({
       spreadsheetId: this.spreadsheetId,
       requestBody: {
-        requests: [
-          {
-            deleteDimension: {
-              range: {
-                sheetId,
-                dimension: "ROWS",
-                startIndex: rowNumber - 1,
-                endIndex: rowNumber,
-              },
-            },
-          },
-        ],
+        requests: [createDeleteRowRequest(sheetId, rowNumber)],
       },
     });
   }
@@ -177,10 +149,9 @@ export class GoogleSheetsAdapter implements SheetAdapter {
       return cached;
     }
 
-    const response = await this.sheetsClient.spreadsheets.get({
-      spreadsheetId: this.spreadsheetId,
-      fields: "sheets.properties.sheetId,sheets.properties.title",
-    });
+    const response = await this.sheetsClient.spreadsheets.get(
+      createSheetListRequest(this.spreadsheetId),
+    );
 
     const sheetId = requireSheetIdForName(response.data, sheetName);
 
@@ -188,6 +159,48 @@ export class GoogleSheetsAdapter implements SheetAdapter {
 
     return sheetId;
   }
+}
+
+function createSheetListRequest(spreadsheetId: string): {
+  spreadsheetId: string;
+  fields: string;
+} {
+  return {
+    spreadsheetId,
+    fields: "sheets.properties.sheetId,sheets.properties.title",
+  };
+}
+
+function createAddSheetRequest(
+  sheetName: string,
+): sheets_v4.Schema$Request {
+  return {
+    addSheet: {
+      properties: {
+        title: sheetName,
+      },
+    },
+  };
+}
+
+function createDeleteRowRequest(
+  sheetId: number,
+  rowNumber: number,
+): sheets_v4.Schema$Request {
+  return {
+    deleteDimension: {
+      range: {
+        sheetId,
+        dimension: "ROWS",
+        startIndex: rowNumber - 1,
+        endIndex: rowNumber,
+      },
+    },
+  };
+}
+
+function createValuesBody(values: SheetCell[][]): { values: SheetCell[][] } {
+  return { values };
 }
 
 function requireCreatedSheetId(
