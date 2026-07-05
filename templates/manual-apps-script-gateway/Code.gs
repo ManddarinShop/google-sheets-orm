@@ -90,6 +90,11 @@ function doPost(e) {
         return json_({ ok: true });
       }
 
+      if (operation === "appendRows") {
+        appendRows_(spreadsheet, request);
+        return json_({ ok: true });
+      }
+
       if (operation === "updateRow") {
         updateRow_(spreadsheet, request);
         return json_({ ok: true });
@@ -139,6 +144,7 @@ function validateOperation_(request) {
     "writeHeader",
     "readSheet",
     "appendRow",
+    "appendRows",
     "updateRow",
     "deleteRow",
   ];
@@ -159,6 +165,10 @@ function validateOperation_(request) {
 
   if (operation === "appendRow") {
     requireSheetCellArray_(request.row, "row");
+  }
+
+  if (operation === "appendRows") {
+    requireSheetCellRows_(request.rows, "rows");
   }
 
   if (operation === "updateRow") {
@@ -264,6 +274,31 @@ function appendRow_(spreadsheet, request) {
   sheet.appendRow(row);
 }
 
+// Appends multiple rows with one range write to reduce gateway round trips.
+function appendRows_(spreadsheet, request) {
+  const sheet = getSheet_(spreadsheet, request.sheetName);
+  const rows = requireSheetCellRows_(request.rows, "rows");
+
+  if (rows.length === 0) {
+    return;
+  }
+
+  const width = rows[0].length;
+
+  rows.forEach(function(row, index) {
+    if (row.length !== width) {
+      throw gatewayError_(
+        "invalid_request",
+        "rows[" + index + "] must have the same length as rows[0]",
+      );
+    }
+  });
+
+  sheet
+    .getRange(sheet.getLastRow() + 1, 1, rows.length, width)
+    .setValues(rows);
+}
+
 function updateRow_(spreadsheet, request) {
   const sheet = getSheet_(spreadsheet, request.sheetName);
   const row = requireSheetCellArray_(request.row, "row");
@@ -340,6 +375,18 @@ function requireSheetCellArray_(value, name) {
         name + "[" + index + "] must be a string, number, boolean, or null",
       );
     }
+  });
+
+  return value;
+}
+
+function requireSheetCellRows_(value, name) {
+  if (!Array.isArray(value)) {
+    throw gatewayError_("invalid_request", name + " must be an array");
+  }
+
+  value.forEach(function(row, index) {
+    requireSheetCellArray_(row, name + "[" + index + "]");
   });
 
   return value;

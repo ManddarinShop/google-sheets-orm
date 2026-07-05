@@ -13,6 +13,12 @@ export interface SheetRowSnapshot {
 export interface SheetAdapter {
   readSheet(sheetName: string): Promise<SheetSnapshot>;
   appendRow(sheetName: string, row: SheetCell[]): Promise<void>;
+  /**
+   * Append multiple rows in one adapter call when the backing transport supports
+   * it. Repository code treats this as an atomic transport optimization: if the
+   * method rejects, none of the queued inserts are reported as successful.
+   */
+  appendRows?(sheetName: string, rows: SheetCell[][]): Promise<void>;
   updateRow(
     sheetName: string,
     rowNumber: number,
