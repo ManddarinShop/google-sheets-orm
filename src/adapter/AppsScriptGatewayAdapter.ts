@@ -1,4 +1,10 @@
 import type { SheetAdapter, SheetCell, SheetSnapshot } from "./Adapter.js";
+import type {
+  AppsScriptGatewayAuthenticatedRequest,
+  AppsScriptGatewayReadSheetResponse,
+  AppsScriptGatewayRequest,
+  AppsScriptGatewayResponse,
+} from "./AppsScriptGatewayProtocol.js";
 
 type GatewayFetch = typeof fetch;
 
@@ -34,6 +40,18 @@ export class AppsScriptGatewayAdapter implements SheetAdapter {
       operation: "appendRow",
       sheetName,
       row,
+    });
+  }
+
+  /**
+   * Sends multiple appended rows through one gateway request to avoid per-row
+   * Apps Script startup and network overhead for bursty repository inserts.
+   */
+  async appendRows(sheetName: string, rows: SheetCell[][]): Promise<void> {
+    await this.request({
+      operation: "appendRows",
+      sheetName,
+      rows,
     });
   }
 
@@ -84,9 +102,13 @@ export class AppsScriptGatewayAdapter implements SheetAdapter {
   }
 
   private async request(
-    payload: Record<string, unknown>,
-  ): Promise<Record<string, unknown>> {
+    payload: AppsScriptGatewayRequest,
+  ): Promise<AppsScriptGatewayResponse> {
     let response: Response;
+    const bodyPayload: AppsScriptGatewayAuthenticatedRequest = {
+      ...payload,
+      secret: this.options.gatewaySecret,
+    };
 
     try {
       response = await this.fetch(this.options.gatewayUrl, {
@@ -94,10 +116,7 @@ export class AppsScriptGatewayAdapter implements SheetAdapter {
         headers: {
           "content-type": "application/json",
         },
-        body: JSON.stringify({
-          ...payload,
-          secret: this.options.gatewaySecret,
-        }),
+        body: JSON.stringify(bodyPayload),
       });
     } catch (error) {
       throw new Error("Failed to fetch Apps Script gateway", {
@@ -121,7 +140,9 @@ export class AppsScriptGatewayAdapter implements SheetAdapter {
   }
 }
 
-function requireReadSheetResponse(value: Record<string, unknown>): SheetSnapshot {
+function requireReadSheetResponse(
+  value: AppsScriptGatewayResponse,
+): AppsScriptGatewayReadSheetResponse {
   if (
     !Array.isArray(value.headers) ||
     !value.headers.every((header) => typeof header === "string") ||
@@ -132,19 +153,13 @@ function requireReadSheetResponse(value: Record<string, unknown>): SheetSnapshot
   }
 
   return {
+    ...value,
     headers: value.headers,
     rows: value.rows,
   };
 }
 
-function requireGatewayResponse(
-  value: unknown,
-): {
-  ok: boolean;
-  code?: string;
-  error?: string;
-  message?: string;
-} & Record<string, unknown> {
+function requireGatewayResponse(value: unknown): AppsScriptGatewayResponse {
   if (!isGatewayResponse(value)) {
     throw new Error("Apps Script gateway returned an invalid response");
   }
@@ -154,12 +169,7 @@ function requireGatewayResponse(
 
 function isGatewayResponse(
   value: unknown,
-): value is {
-  ok: boolean;
-  code?: string;
-  error?: string;
-  message?: string;
-} & Record<string, unknown> {
+): value is AppsScriptGatewayResponse {
   return (
     isRecord(value) &&
     "ok" in value &&

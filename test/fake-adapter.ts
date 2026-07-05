@@ -4,6 +4,7 @@ export class FakeSheetAdapter implements SheetAdapter {
   private readIndex = 0;
 
   readonly appendedRows: Array<{ sheetName: string; row: SheetCell[] }> = [];
+  readonly appendedRowBatches: Array<{ sheetName: string; rows: SheetCell[][] }> = [];
   readonly ensuredSheets: string[] = [];
   readonly writtenHeaders: Array<{ sheetName: string; headers: string[] }> = [];
   readonly deletedRows: Array<{ sheetName: string; rowNumber: number }> = [];
@@ -50,6 +51,13 @@ export class FakeSheetAdapter implements SheetAdapter {
 
   async appendRow(sheetName: string, row: SheetCell[]): Promise<void> {
     this.appendedRows.push({ sheetName, row: [...row] });
+  }
+
+  async appendRows(sheetName: string, rows: SheetCell[][]): Promise<void> {
+    this.appendedRowBatches.push({
+      sheetName,
+      rows: rows.map((row) => [...row]),
+    });
   }
 
   async updateRow(

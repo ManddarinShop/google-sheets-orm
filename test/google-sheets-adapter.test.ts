@@ -217,6 +217,67 @@ describe("GoogleSheetsAdapter.appendRow", () => {
   });
 });
 
+describe("GoogleSheetsAdapter.appendRows", () => {
+  it("appends multiple rows using one raw value input request", async () => {
+    const append = vi.fn().mockResolvedValue({
+      data: {},
+    });
+
+    const sheetsClient = {
+      spreadsheets: {
+        values: {
+          append,
+        },
+      },
+    } as unknown as sheets_v4.Sheets;
+
+    const adapter = new GoogleSheetsAdapter({
+      spreadsheetUrl: "https://docs.google.com/spreadsheets/d/spreadsheet-id/edit",
+      auth: "unused",
+      sheetsClient,
+    });
+
+    await adapter.appendRows("Users", [
+      ["u1", "a@test.com", 20, true, 1],
+      ["u2", "b@test.com", 21, false, 1],
+    ]);
+
+    expect(append).toHaveBeenCalledWith({
+      spreadsheetId: "spreadsheet-id",
+      range: "Users",
+      valueInputOption: "RAW",
+      requestBody: {
+        values: [
+          ["u1", "a@test.com", 20, true, 1],
+          ["u2", "b@test.com", 21, false, 1],
+        ],
+      },
+    });
+  });
+
+  it("skips the Google Sheets API call for an empty row batch", async () => {
+    const append = vi.fn();
+
+    const sheetsClient = {
+      spreadsheets: {
+        values: {
+          append,
+        },
+      },
+    } as unknown as sheets_v4.Sheets;
+
+    const adapter = new GoogleSheetsAdapter({
+      spreadsheetUrl: "https://docs.google.com/spreadsheets/d/spreadsheet-id/edit",
+      auth: "unused",
+      sheetsClient,
+    });
+
+    await adapter.appendRows("Users", []);
+
+    expect(append).not.toHaveBeenCalled();
+  });
+});
+
 describe("GoogleSheetsAdapter.updateRow", () => {
   it("updates a row using raw value input and A1 range", async () => {
     const update = vi.fn().mockResolvedValue({
