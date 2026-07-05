@@ -8,7 +8,12 @@ export type AppsScriptGatewayRequest =
   | { operation: "readSheet"; sheetName: string }
   | { operation: "appendRow"; sheetName: string; row: SheetCell[] }
   | { operation: "appendRows"; sheetName: string; rows: SheetCell[][] }
-  | { operation: "updateRow"; sheetName: string; rowNumber: number; row: SheetCell[] }
+  | {
+      operation: "updateRow";
+      sheetName: string;
+      rowNumber: number;
+      row: SheetCell[];
+    }
   | { operation: "deleteRow"; sheetName: string; rowNumber: number };
 
 export type AppsScriptGatewayAuthenticatedRequest =

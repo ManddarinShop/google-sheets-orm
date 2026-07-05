@@ -1,29 +1,24 @@
 import { readFile } from "node:fs/promises";
-import { join } from "node:path";
 import {
   parseTypedSheetsConfig,
   type TypedSheetsConfig,
 } from "./Config.js";
+import {
+  resolveTypedSheetsConfigPath,
+  type TypedSheetsConfigPathOptions,
+} from "./ConfigPath.js";
 
-export interface LoadTypedSheetsConfigOptions {
-  cwd?: string;
-  configPath?: string;
-}
+export interface LoadTypedSheetsConfigOptions
+  extends TypedSheetsConfigPathOptions {}
 
 export async function loadTypedSheetsConfig(
   options: LoadTypedSheetsConfigOptions = {},
 ): Promise<TypedSheetsConfig> {
-  const configPath = resolveConfigPath(options);
+  const configPath = resolveTypedSheetsConfigPath(options);
   const raw = await readConfigFile(configPath);
   const parsed = requireConfigJson(raw);
 
   return parseTypedSheetsConfig(parsed);
-}
-
-function resolveConfigPath(options: LoadTypedSheetsConfigOptions): string {
-  return (
-    options.configPath ?? join(options.cwd ?? process.cwd(), ".typed-sheets.json")
-  );
 }
 
 async function readConfigFile(configPath: string): Promise<string> {
