@@ -118,11 +118,18 @@ The gateway supports these operations:
 - `appendRows`
 - `updateRow`
 - `deleteRow`
+- `deleteRows`
+- `deleteRowsByKey`
 
 `initializeSheet` creates the sheet when missing and writes headers when the
 header row is empty while holding the document lock. `writeHeader` refuses to
 overwrite a non-empty header row. `appendRows` writes a burst of rows through one
 gateway request so repository inserts can avoid per-row Apps Script calls.
+`deleteRows` deletes data rows from bottom to top in one gateway request so
+batched repository deletes do not corrupt row numbers as Google Sheets shifts
+rows upward. `deleteRowsByKey` lets gateway-backed repositories validate keys
+and `_version` under the Apps Script document lock before deleting, avoiding an
+extra client-side read round trip.
 
 Invalid requests return a JSON response with `ok: false`, an error `code`, and
 a human-readable `message`.

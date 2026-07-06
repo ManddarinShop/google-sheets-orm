@@ -15,6 +15,7 @@ export interface AppendRowsInput {
 }
 
 export interface DeleteRowsByKeyInput {
+  expectedHeaders: string[];
   keyHeader: string;
   versionHeader: string;
   ids: string[];

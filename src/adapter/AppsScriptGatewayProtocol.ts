@@ -23,6 +23,7 @@ export type AppsScriptGatewayRequest =
   | {
       operation: "deleteRowsByKey";
       sheetName: string;
+      expectedHeaders: string[];
       keyHeader: string;
       versionHeader: string;
       ids: string[];

@@ -112,6 +112,7 @@ export class AppsScriptGatewayAdapter implements SheetAdapter {
       await this.request({
         operation: "deleteRowsByKey",
         sheetName,
+        expectedHeaders: input.expectedHeaders,
         keyHeader: input.keyHeader,
         versionHeader: input.versionHeader,
         ids: input.ids,
