@@ -151,6 +151,40 @@ export function createSheetRepository<T extends Record<string, unknown>>(
       _version: currentVersion + 1,
     } as T;
 
+    const serializedRow = serializeRowInHeaderOrder({
+      headers: snapshot.headers,
+      row: updateRow,
+      columns,
+    });
+
+    if (adapter.updateRowsByKey !== undefined) {
+      const updateResult = await adapter.updateRowsByKey(sheetName, {
+        expectedHeaders: snapshot.headers,
+        keyHeader: key,
+        versionHeader: "_version",
+        updates: [
+          {
+            id,
+            expectedVersion: currentVersion,
+            row: serializedRow,
+          },
+        ],
+      });
+      const updatedRow = updateResult.updatedRows.find(
+        (row) => row.id === id,
+      );
+
+      if (updatedRow === undefined) {
+        throw new ConflictError(`Row "${id}" changed before update`);
+      }
+
+      return parseAdapterResultRow<T>({
+        headers: snapshot.headers,
+        cells: updatedRow.cells,
+        columns,
+      });
+    }
+
     const latestSnapshot = await adapter.readSheet(sheetName);
 
     assertSchema({
@@ -177,12 +211,6 @@ export function createSheetRepository<T extends Record<string, unknown>>(
     if (Number(latestRow["_version"]) !== currentVersion) {
       throw new ConflictError(`Stale write for key "${id}"`);
     }
-
-    const serializedRow = serializeRowInHeaderOrder({
-      headers: snapshot.headers,
-      row: updateRow,
-      columns,
-    });
 
     await adapter.updateRow(sheetName, target.rowNumber, serializedRow);
 
@@ -294,7 +322,7 @@ function createDeleteBatcher<T extends Record<string, unknown>>(
       const deletedRowsById = new Map(
         deleteResult.deletedRows.map((deletedRow) => [
           deletedRow.id,
-          parseRow<T>({
+          parseAdapterResultRow<T>({
             headers: snapshot.headers,
             cells: deletedRow.cells,
             columns,
@@ -357,6 +385,16 @@ function createDeleteBatcher<T extends Record<string, unknown>>(
 
     return targets.map((target) => target?.row ?? null);
   }
+}
+
+// Parses cells returned by a write-capable adapter back into the repository row
+// shape, so fast paths return the row that the adapter actually wrote/deleted.
+function parseAdapterResultRow<T extends Record<string, unknown>>(input: {
+  headers: string[];
+  cells: SheetCell[];
+  columns: ColumnMap<T>;
+}): T {
+  return parseRow<T>(input);
 }
 
 interface InsertBatcher<T extends Record<string, unknown>> {

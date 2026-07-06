@@ -20,6 +20,7 @@ export class FakeSheetAdapter implements SheetAdapter {
     rowNumber: number;
     row: SheetCell[];
   }> = [];
+  updateRowsByKey?: SheetAdapter["updateRowsByKey"];
   deleteRowsByKey?: SheetAdapter["deleteRowsByKey"];
 
   constructor(
