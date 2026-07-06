@@ -140,6 +140,28 @@ export class GoogleSheetsAdapter implements SheetAdapter {
     });
   }
 
+  /**
+   * Deletes multiple physical rows in one batchUpdate request. Row numbers are
+   * sorted descending so deleting one row does not shift another pending delete.
+   */
+  async deleteRows(sheetName: string, rowNumbers: number[]): Promise<void> {
+    if (rowNumbers.length === 0) {
+      return;
+    }
+
+    const sortedRowNumbers = toUniqueDescendingDataRowNumbers(rowNumbers);
+    const sheetId = await this.getSheetId(sheetName);
+
+    await this.sheetsClient.spreadsheets.batchUpdate({
+      spreadsheetId: this.spreadsheetId,
+      requestBody: {
+        requests: sortedRowNumbers.map((rowNumber) =>
+          createDeleteRowRequest(sheetId, rowNumber),
+        ),
+      },
+    });
+  }
+
   // Google batchUpdate needs a numeric sheetId, so cache the lookup by tab name
   // for the adapter lifetime to avoid an extra API call on repeated deletes.
   private async getSheetId(sheetName: string): Promise<number> {
