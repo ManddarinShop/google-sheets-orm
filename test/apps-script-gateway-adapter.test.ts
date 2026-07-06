@@ -105,6 +105,83 @@ describe("AppsScriptGatewayAdapter", () => {
     });
   });
 
+  it("updates rows by key through one Apps Script gateway request", async () => {
+    const fetch = vi.fn().mockResolvedValue(
+      createJsonResponse({
+        ok: true,
+        updatedRows: [{ id: "u1", cells: ["u1", "a@test.com", 21, true, 2] }],
+      }),
+    );
+    const adapter = new AppsScriptGatewayAdapter({
+      gatewayUrl: "https://script.google.com/macros/s/deployment-id/exec",
+      gatewaySecret: "gateway-secret",
+      fetch,
+    });
+
+    await expect(
+      adapter.updateRowsByKey("Users", {
+        expectedHeaders: ["id", "email", "age", "active", "_version"],
+        keyHeader: "id",
+        versionHeader: "_version",
+        updates: [
+          {
+            id: "u1",
+            expectedVersion: 1,
+            row: ["u1", "a@test.com", 21, true, 2],
+          },
+        ],
+      }),
+    ).resolves.toEqual({
+      updatedRows: [{ id: "u1", cells: ["u1", "a@test.com", 21, true, 2] }],
+    });
+    expectGatewayRequest(fetch, {
+      operation: "updateRowsByKey",
+      secret: "gateway-secret",
+      sheetName: "Users",
+      expectedHeaders: ["id", "email", "age", "active", "_version"],
+      keyHeader: "id",
+      versionHeader: "_version",
+      updates: [
+        {
+          id: "u1",
+          expectedVersion: 1,
+          row: ["u1", "a@test.com", 21, true, 2],
+        },
+      ],
+    });
+  });
+
+  it("rejects invalid updateRowsByKey response payloads", async () => {
+    const fetch = vi.fn().mockResolvedValue(
+      createJsonResponse({
+        ok: true,
+        updatedRows: [{ id: "u1", cells: ["u1", undefined, 2] }],
+      }),
+    );
+    const adapter = new AppsScriptGatewayAdapter({
+      gatewayUrl: "https://script.google.com/macros/s/deployment-id/exec",
+      gatewaySecret: "gateway-secret",
+      fetch,
+    });
+
+    await expect(
+      adapter.updateRowsByKey("Users", {
+        expectedHeaders: ["id", "email", "_version"],
+        keyHeader: "id",
+        versionHeader: "_version",
+        updates: [
+          {
+            id: "u1",
+            expectedVersion: 1,
+            row: ["u1", "a@test.com", 2],
+          },
+        ],
+      }),
+    ).rejects.toThrow(
+      /Apps Script gateway returned an invalid updateRowsByKey response/,
+    );
+  });
+
   it("deletes a row through the Apps Script gateway", async () => {
     const fetch = vi.fn().mockResolvedValue(createJsonResponse({ ok: true }));
     const adapter = new AppsScriptGatewayAdapter({

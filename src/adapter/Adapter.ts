@@ -29,6 +29,24 @@ export interface DeleteRowsByKeyResult {
   }>;
 }
 
+export interface UpdateRowsByKeyInput {
+  expectedHeaders: string[];
+  keyHeader: string;
+  versionHeader: string;
+  updates: Array<{
+    id: string;
+    expectedVersion: number;
+    row: SheetCell[];
+  }>;
+}
+
+export interface UpdateRowsByKeyResult {
+  updatedRows: Array<{
+    id: string;
+    cells: SheetCell[];
+  }>;
+}
+
 export interface SheetAdapter {
   readSheet(sheetName: string): Promise<SheetSnapshot>;
   appendRow(sheetName: string, row: SheetCell[]): Promise<void>;
@@ -43,6 +61,14 @@ export interface SheetAdapter {
     rowNumber: number,
     row: SheetCell[],
   ): Promise<void>;
+  /**
+   * Update rows by key under one transport-level lock when supported. The
+   * adapter validates headers and expected versions immediately before writing.
+   */
+  updateRowsByKey?(
+    sheetName: string,
+    input: UpdateRowsByKeyInput,
+  ): Promise<UpdateRowsByKeyResult>;
   /** Delete a 1-based data row. Implementations must reject header-row deletes. */
   deleteRow(sheetName: string, rowNumber: number): Promise<void>;
   /**

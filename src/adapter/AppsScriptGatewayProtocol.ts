@@ -2,6 +2,7 @@ import type {
   DeleteRowsByKeyResult,
   SheetCell,
   SheetSnapshot,
+  UpdateRowsByKeyResult,
 } from "./Adapter.js";
 
 export type AppsScriptGatewayRequest =
@@ -17,6 +18,18 @@ export type AppsScriptGatewayRequest =
       sheetName: string;
       rowNumber: number;
       row: SheetCell[];
+    }
+  | {
+      operation: "updateRowsByKey";
+      sheetName: string;
+      expectedHeaders: string[];
+      keyHeader: string;
+      versionHeader: string;
+      updates: Array<{
+        id: string;
+        expectedVersion: number;
+        row: SheetCell[];
+      }>;
     }
   | { operation: "deleteRow"; sheetName: string; rowNumber: number }
   | { operation: "deleteRows"; sheetName: string; rowNumbers: number[] }
@@ -47,3 +60,6 @@ export type AppsScriptGatewayReadSheetResponse = AppsScriptGatewayResponse &
 
 export type AppsScriptGatewayDeleteRowsByKeyResponse =
   AppsScriptGatewayResponse & DeleteRowsByKeyResult;
+
+export type AppsScriptGatewayUpdateRowsByKeyResponse =
+  AppsScriptGatewayResponse & UpdateRowsByKeyResult;
