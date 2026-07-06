@@ -1,5 +1,10 @@
 import { auth as googleAuth, sheets, type sheets_v4 } from "@googleapis/sheets";
-import type { SheetAdapter, SheetCell, SheetSnapshot } from "./Adapter.js";
+import type {
+  AppendRowsInput,
+  SheetAdapter,
+  SheetCell,
+  SheetSnapshot,
+} from "./Adapter.js";
 
 type GoogleSheetsAuth = NonNullable<sheets_v4.Options["auth"]>;
 
@@ -97,8 +102,8 @@ export class GoogleSheetsAdapter implements SheetAdapter {
    * used by repository-level insert batching to reduce remote API calls without
    * changing the public insert contract.
    */
-  async appendRows(sheetName: string, rows: SheetCell[][]): Promise<void> {
-    if (rows.length === 0) {
+  async appendRows(sheetName: string, input: AppendRowsInput): Promise<void> {
+    if (input.rows.length === 0) {
       return;
     }
 
@@ -106,7 +111,7 @@ export class GoogleSheetsAdapter implements SheetAdapter {
       spreadsheetId: this.spreadsheetId,
       range: quoteSheetName(sheetName),
       valueInputOption: "RAW",
-      requestBody: createValuesBody(rows),
+      requestBody: createValuesBody(input.rows),
     });
   }
 
@@ -136,6 +141,28 @@ export class GoogleSheetsAdapter implements SheetAdapter {
       spreadsheetId: this.spreadsheetId,
       requestBody: {
         requests: [createDeleteRowRequest(sheetId, rowNumber)],
+      },
+    });
+  }
+
+  /**
+   * Deletes multiple physical rows in one batchUpdate request. Row numbers are
+   * sorted descending so deleting one row does not shift another pending delete.
+   */
+  async deleteRows(sheetName: string, rowNumbers: number[]): Promise<void> {
+    if (rowNumbers.length === 0) {
+      return;
+    }
+
+    const sortedRowNumbers = toUniqueDescendingDataRowNumbers(rowNumbers);
+    const sheetId = await this.getSheetId(sheetName);
+
+    await this.sheetsClient.spreadsheets.batchUpdate({
+      spreadsheetId: this.spreadsheetId,
+      requestBody: {
+        requests: sortedRowNumbers.map((rowNumber) =>
+          createDeleteRowRequest(sheetId, rowNumber),
+        ),
       },
     });
   }
@@ -197,6 +224,24 @@ function createDeleteRowRequest(
       },
     },
   };
+}
+
+function toUniqueDescendingDataRowNumbers(rowNumbers: number[]): number[] {
+  const unique = new Set<number>();
+
+  for (const rowNumber of rowNumbers) {
+    if (!Number.isInteger(rowNumber) || rowNumber < 2) {
+      throw new RangeError(`Invalid data row number "${rowNumber}"`);
+    }
+
+    if (unique.has(rowNumber)) {
+      throw new RangeError(`Duplicate data row number "${rowNumber}"`);
+    }
+
+    unique.add(rowNumber);
+  }
+
+  return [...unique].sort((left, right) => right - left);
 }
 
 function createValuesBody(values: SheetCell[][]): { values: SheetCell[][] } {

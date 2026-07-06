@@ -1,6 +1,15 @@
-import type { SheetAdapter, SheetCell, SheetSnapshot } from "./Adapter.js";
+import type {
+  AppendRowsInput,
+  DeleteRowsByKeyInput,
+  DeleteRowsByKeyResult,
+  SheetAdapter,
+  SheetCell,
+  SheetSnapshot,
+} from "./Adapter.js";
+import { ConflictError, SchemaDriftError } from "../core/Errors.js";
 import type {
   AppsScriptGatewayAuthenticatedRequest,
+  AppsScriptGatewayDeleteRowsByKeyResponse,
   AppsScriptGatewayReadSheetResponse,
   AppsScriptGatewayRequest,
   AppsScriptGatewayResponse,
@@ -47,11 +56,11 @@ export class AppsScriptGatewayAdapter implements SheetAdapter {
    * Sends multiple appended rows through one gateway request to avoid per-row
    * Apps Script startup and network overhead for bursty repository inserts.
    */
-  async appendRows(sheetName: string, rows: SheetCell[][]): Promise<void> {
+  async appendRows(sheetName: string, input: AppendRowsInput): Promise<void> {
     await this.request({
       operation: "appendRows",
       sheetName,
-      rows,
+      rows: input.rows,
     });
   }
 
@@ -76,6 +85,44 @@ export class AppsScriptGatewayAdapter implements SheetAdapter {
       sheetName,
       rowNumber,
     });
+  }
+
+  /**
+   * Deletes multiple rows through one gateway request. The Apps Script handler
+   * owns bottom-up ordering so repository batching does not corrupt row numbers.
+   */
+  async deleteRows(sheetName: string, rowNumbers: number[]): Promise<void> {
+    await this.request({
+      operation: "deleteRows",
+      sheetName,
+      rowNumbers,
+    });
+  }
+
+  /**
+   * Lets the gateway delete by key under the Apps Script document lock. This
+   * keeps stale-delete validation close to the sheet and avoids a second
+   * repository-side readSheet call for gateway-backed repositories.
+   */
+  async deleteRowsByKey(
+    sheetName: string,
+    input: DeleteRowsByKeyInput,
+  ): Promise<DeleteRowsByKeyResult> {
+    const response = requireDeleteRowsByKeyResponse(
+      await this.request({
+        operation: "deleteRowsByKey",
+        sheetName,
+        expectedHeaders: input.expectedHeaders,
+        keyHeader: input.keyHeader,
+        versionHeader: input.versionHeader,
+        ids: input.ids,
+        versionsById: input.versionsById,
+      }),
+    );
+
+    return {
+      deletedRows: response.deletedRows,
+    };
   }
 
   async ensureSheet(sheetName: string): Promise<void> {
@@ -131,13 +178,28 @@ export class AppsScriptGatewayAdapter implements SheetAdapter {
       const code = gatewayResponse.code ?? gatewayResponse.error;
       const message = gatewayResponse.message ?? code;
 
-      throw new Error(
-        `Apps Script gateway failed: ${message ?? "unknown_error"}`,
-      );
+      throw createGatewayError(code, message);
     }
 
     return gatewayResponse;
   }
+}
+
+function createGatewayError(
+  code: string | undefined,
+  message: string | undefined,
+): Error {
+  const safeMessage = message ?? code ?? "unknown_error";
+
+  if (code === "conflict") {
+    return new ConflictError(safeMessage);
+  }
+
+  if (code === "schema_drift") {
+    return new SchemaDriftError(safeMessage);
+  }
+
+  return new Error(`Apps Script gateway failed: ${safeMessage}`);
 }
 
 function requireReadSheetResponse(
@@ -156,6 +218,24 @@ function requireReadSheetResponse(
     ...value,
     headers: value.headers,
     rows: value.rows,
+  };
+}
+
+function requireDeleteRowsByKeyResponse(
+  value: AppsScriptGatewayResponse,
+): AppsScriptGatewayDeleteRowsByKeyResponse {
+  if (
+    !Array.isArray(value.deletedRows) ||
+    !value.deletedRows.every(isDeletedRowByKeyResult)
+  ) {
+    throw new Error(
+      "Apps Script gateway returned an invalid deleteRowsByKey response",
+    );
+  }
+
+  return {
+    ...value,
+    deletedRows: value.deletedRows,
   };
 }
 
@@ -204,6 +284,17 @@ function isSheetCell(value: unknown): value is SheetCell {
     typeof value === "number" ||
     typeof value === "boolean" ||
     value === null
+  );
+}
+
+function isDeletedRowByKeyResult(
+  value: unknown,
+): value is DeleteRowsByKeyResult["deletedRows"][number] {
+  return (
+    isRecord(value) &&
+    typeof value.id === "string" &&
+    Array.isArray(value.cells) &&
+    value.cells.every(isSheetCell)
   );
 }
 

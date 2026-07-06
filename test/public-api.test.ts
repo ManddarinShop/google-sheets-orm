@@ -39,6 +39,11 @@ describe("public API", () => {
     expect(GoogleSheetsAdapter.prototype.ensureSheet).toBeTypeOf("function");
     expect(GoogleSheetsAdapter.prototype.writeHeader).toBeTypeOf("function");
     expect(GoogleSheetsAdapter.prototype.deleteRow).toBeTypeOf("function");
+    expect(GoogleSheetsAdapter.prototype.deleteRows).toBeTypeOf("function");
     expect(AppsScriptGatewayAdapter.prototype.deleteRow).toBeTypeOf("function");
+    expect(AppsScriptGatewayAdapter.prototype.deleteRows).toBeTypeOf("function");
+    expect(AppsScriptGatewayAdapter.prototype.deleteRowsByKey).toBeTypeOf(
+      "function",
+    );
   });
 });

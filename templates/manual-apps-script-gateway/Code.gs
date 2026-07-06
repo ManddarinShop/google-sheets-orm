@@ -105,6 +105,15 @@ function doPost(e) {
         return json_({ ok: true });
       }
 
+      if (operation === "deleteRows") {
+        deleteRows_(spreadsheet, request);
+        return json_({ ok: true });
+      }
+
+      if (operation === "deleteRowsByKey") {
+        return json_(deleteRowsByKey_(spreadsheet, request));
+      }
+
       return error_("unknown_operation", "Unknown operation: " + operation);
     } finally {
       lock.releaseLock();
@@ -147,6 +156,8 @@ function validateOperation_(request) {
     "appendRows",
     "updateRow",
     "deleteRow",
+    "deleteRows",
+    "deleteRowsByKey",
   ];
 
   if (operations.indexOf(operation) === -1) {
@@ -178,6 +189,18 @@ function validateOperation_(request) {
 
   if (operation === "deleteRow") {
     requirePositiveInteger_(request.rowNumber, "rowNumber");
+  }
+
+  if (operation === "deleteRows") {
+    requirePositiveIntegerArray_(request.rowNumbers, "rowNumbers");
+  }
+
+  if (operation === "deleteRowsByKey") {
+    requireStringArray_(request.expectedHeaders, "expectedHeaders");
+    requireString_(request.keyHeader, "keyHeader");
+    requireString_(request.versionHeader, "versionHeader");
+    requireStringArray_(request.ids, "ids");
+    requireNumberRecord_(request.versionsById, "versionsById");
   }
 
   return operation;
@@ -319,6 +342,142 @@ function deleteRow_(spreadsheet, request) {
   sheet.deleteRow(rowNumber);
 }
 
+// Deletes multiple data rows from bottom to top so row shifts are safe.
+function deleteRows_(spreadsheet, request) {
+  const sheet = getSheet_(spreadsheet, request.sheetName);
+  const rowNumbers = requirePositiveIntegerArray_(
+    request.rowNumbers,
+    "rowNumbers",
+  );
+  const seen = {};
+
+  rowNumbers.forEach(function(rowNumber) {
+    if (rowNumber < 2) {
+      throw gatewayError_("invalid_request", "rowNumbers must target data rows");
+    }
+
+    if (seen[rowNumber]) {
+      throw gatewayError_(
+        "invalid_request",
+        "rowNumbers must not contain duplicates",
+      );
+    }
+
+    seen[rowNumber] = true;
+  });
+
+  rowNumbers
+    .slice()
+    .sort(function(left, right) {
+      return right - left;
+    })
+    .forEach(function(rowNumber) {
+      sheet.deleteRow(rowNumber);
+    });
+}
+
+// Deletes rows by key after validating the expected _version under one lock.
+function deleteRowsByKey_(spreadsheet, request) {
+  const sheet = getSheet_(spreadsheet, request.sheetName);
+  const expectedHeaders = requireStringArray_(
+    request.expectedHeaders,
+    "expectedHeaders",
+  );
+  const keyHeader = requireString_(request.keyHeader, "keyHeader");
+  const versionHeader = requireString_(request.versionHeader, "versionHeader");
+  const ids = requireStringArray_(request.ids, "ids");
+  const versionsById = requireNumberRecord_(request.versionsById, "versionsById");
+  const lastRow = sheet.getLastRow();
+  const lastColumn = sheet.getLastColumn();
+
+  if (lastRow === 0 || lastColumn === 0) {
+    throw gatewayError_("schema_drift", "Sheet is empty before delete");
+  }
+
+  const values = sheet.getRange(1, 1, lastRow, lastColumn).getValues();
+  const headers = (values[0] || []).map(function(value) {
+    return String(value);
+  });
+  const keyIndex = headers.indexOf(keyHeader);
+  const versionIndex = headers.indexOf(versionHeader);
+
+  assertExpectedHeaders_(headers, expectedHeaders);
+
+  if (keyIndex === -1) {
+    throw gatewayError_("schema_drift", "Missing key header: " + keyHeader);
+  }
+
+  if (versionIndex === -1) {
+    throw gatewayError_(
+      "schema_drift",
+      "Missing version header: " + versionHeader,
+    );
+  }
+
+  const requestedIds = Object.create(null);
+  const seenRequestedIds = Object.create(null);
+  const rowsToDelete = [];
+
+  ids.forEach(function(id) {
+    if (requestedIds[id]) {
+      throw gatewayError_("invalid_request", "ids must not contain duplicates");
+    }
+
+    requestedIds[id] = true;
+  });
+
+  values.slice(1).forEach(function(cells, index) {
+    const id = String(cells[keyIndex]);
+
+    if (!requestedIds[id] && !seenRequestedIds[id]) {
+      return;
+    }
+
+    if (seenRequestedIds[id]) {
+      throw gatewayError_("schema_drift", "Duplicate key \"" + id + "\"");
+    }
+
+    seenRequestedIds[id] = true;
+
+    const version = Number(cells[versionIndex]);
+
+    if (version !== versionsById[id]) {
+      throw gatewayError_("conflict", "Stale delete for key \"" + id + "\"");
+    }
+
+    rowsToDelete.push({
+      id: id,
+      rowNumber: index + 2,
+      cells: cells.map(toSheetCell_),
+    });
+
+    delete requestedIds[id];
+  });
+
+  Object.keys(requestedIds).forEach(function(id) {
+    throw gatewayError_("conflict", "Row \"" + id + "\" changed before delete");
+  });
+
+  rowsToDelete
+    .slice()
+    .sort(function(left, right) {
+      return right.rowNumber - left.rowNumber;
+    })
+    .forEach(function(row) {
+      sheet.deleteRow(row.rowNumber);
+    });
+
+  return {
+    ok: true,
+    deletedRows: rowsToDelete.map(function(row) {
+      return {
+        id: row.id,
+        cells: row.cells,
+      };
+    }),
+  };
+}
+
 function getSheet_(spreadsheet, sheetName) {
   const name = requireString_(sheetName, "sheetName");
   const sheet = spreadsheet.getSheetByName(name);
@@ -400,6 +559,49 @@ function requirePositiveInteger_(value, name) {
   }
 
   return numberValue;
+}
+
+function requirePositiveIntegerArray_(value, name) {
+  if (!Array.isArray(value)) {
+    throw gatewayError_("invalid_request", name + " must be an array");
+  }
+
+  value.forEach(function(item, index) {
+    requirePositiveInteger_(item, name + "[" + index + "]");
+  });
+
+  return value.map(function(item) {
+    return Number(item);
+  });
+}
+
+function requireNumberRecord_(value, name) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw gatewayError_("invalid_request", name + " must be an object");
+  }
+
+  Object.keys(value).forEach(function(key) {
+    if (typeof value[key] !== "number" || !Number.isFinite(value[key])) {
+      throw gatewayError_("invalid_request", name + "." + key + " must be a number");
+    }
+  });
+
+  return value;
+}
+
+function assertExpectedHeaders_(actualHeaders, expectedHeaders) {
+  if (actualHeaders.length < expectedHeaders.length) {
+    throw gatewayError_("schema_drift", "Header row changed before delete");
+  }
+
+  expectedHeaders.forEach(function(expectedHeader, index) {
+    if (actualHeaders[index] !== expectedHeader) {
+      throw gatewayError_(
+        "schema_drift",
+        "Header row changed before delete",
+      );
+    }
+  });
 }
 
 function isHeaderRowEmpty_(sheet) {
