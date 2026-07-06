@@ -45,5 +45,8 @@ describe("public API", () => {
     expect(AppsScriptGatewayAdapter.prototype.deleteRowsByKey).toBeTypeOf(
       "function",
     );
+    expect(AppsScriptGatewayAdapter.prototype.updateRowsByKey).toBeTypeOf(
+      "function",
+    );
   });
 });

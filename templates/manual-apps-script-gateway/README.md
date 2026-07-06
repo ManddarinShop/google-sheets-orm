@@ -117,6 +117,7 @@ The gateway supports these operations:
 - `appendRow`
 - `appendRows`
 - `updateRow`
+- `updateRowsByKey`
 - `deleteRow`
 - `deleteRows`
 - `deleteRowsByKey`
@@ -129,7 +130,9 @@ gateway request so repository inserts can avoid per-row Apps Script calls.
 batched repository deletes do not corrupt row numbers as Google Sheets shifts
 rows upward. `deleteRowsByKey` lets gateway-backed repositories validate keys
 and `_version` under the Apps Script document lock before deleting, avoiding an
-extra client-side read round trip.
+extra client-side read round trip. `updateRowsByKey` applies the same locked
+key and `_version` validation before updating rows, avoiding an extra
+client-side read round trip for gateway-backed updates.
 
 Invalid requests return a JSON response with `ok: false`, an error `code`, and
 a human-readable `message`.

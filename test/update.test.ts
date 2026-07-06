@@ -86,6 +86,110 @@ describe("repository updates and optimistic locking", () => {
     });
   });
 
+  it("uses adapter key-based update when available", async () => {
+    const sheet = {
+      headers: ["id", "email", "age", "active", "_version"],
+      rows: [{ rowNumber: 2, cells: ["u1", "a@test.com", 20, true, 1] }],
+    };
+    const adapter = new FakeSheetAdapter({
+      Users: [sheet, sheet],
+    });
+    adapter.updateRowsByKey = async (sheetName, input) => {
+      expect(sheetName).toBe("Users");
+      expect(input).toEqual({
+        expectedHeaders: ["id", "email", "age", "active", "_version"],
+        keyHeader: "id",
+        versionHeader: "_version",
+        updates: [
+          {
+            id: "u1",
+            expectedVersion: 1,
+            row: ["u1", "a@test.com", 21, true, 2],
+          },
+        ],
+      });
+
+      return {
+        updatedRows: [
+          { id: "u1", cells: ["u1", "a@test.com", 21, true, 2] },
+        ],
+      };
+    };
+
+    const users = createSheetRepository<User>({
+      adapter,
+      sheetName: "Users",
+      key: "id",
+      columns,
+    });
+
+    await expect(
+      users.update("u1", current => ({
+        ...current,
+        age: 21,
+      })),
+    ).resolves.toEqual({
+      id: "u1",
+      email: "a@test.com",
+      age: 21,
+      active: true,
+      _version: 2,
+    });
+    expect(adapter.readSheets).toEqual(["Users"]);
+    expect(adapter.updatedRows).toEqual([]);
+  });
+
+  it("preserves unknown sheet columns when using key-based update", async () => {
+    const sheet = {
+      headers: ["id", "notes", "email", "age", "active", "_version"],
+      rows: [
+        {
+          rowNumber: 2,
+          cells: ["u1", "keep this note", "a@test.com", 20, true, 1],
+        },
+      ],
+    };
+    const adapter = new FakeSheetAdapter({
+      Users: [sheet, sheet],
+    });
+    adapter.updateRowsByKey = async (_sheetName, input) => {
+      expect(input.updates[0]).toEqual({
+        id: "u1",
+        expectedVersion: 1,
+        row: ["u1", "keep this note", "a@test.com", 21, true, 2],
+      });
+
+      return {
+        updatedRows: [
+          {
+            id: "u1",
+            cells: ["u1", "keep this note", "a@test.com", 21, true, 2],
+          },
+        ],
+      };
+    };
+
+    const users = createSheetRepository<User>({
+      adapter,
+      sheetName: "Users",
+      key: "id",
+      columns,
+    });
+
+    await expect(
+      users.update("u1", current => ({
+        ...current,
+        age: 21,
+      })),
+    ).resolves.toEqual({
+      id: "u1",
+      email: "a@test.com",
+      age: 21,
+      active: true,
+      _version: 2,
+    });
+  });
+
   it("returns null when the target row does not exist", async () => {
     const adapter = new FakeSheetAdapter({
       Users: {
