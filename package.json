@@ -6,7 +6,7 @@
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "bin": {
-    "typed-sheets": "./dist/cli/Cli.js"
+    "typed-sheets": "dist/cli/Cli.js"
   },
   "exports": {
     ".": {
