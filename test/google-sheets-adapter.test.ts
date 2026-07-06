@@ -268,10 +268,12 @@ describe("GoogleSheetsAdapter.appendRows", () => {
       sheetsClient,
     });
 
-    await adapter.appendRows("Users", [
-      ["u1", "a@test.com", 20, true, 1],
-      ["u2", "b@test.com", 21, false, 1],
-    ]);
+    await adapter.appendRows("Users", {
+      rows: [
+        ["u1", "a@test.com", 20, true, 1],
+        ["u2", "b@test.com", 21, false, 1],
+      ],
+    });
 
     expect(append).toHaveBeenCalledWith({
       spreadsheetId: "spreadsheet-id",
@@ -305,10 +307,12 @@ describe("GoogleSheetsAdapter.appendRows", () => {
       sheetsClient,
     });
 
-    await adapter.appendRows("Owner's Sheet", [
-      ["u1", "a@test.com", 1],
-      ["u2", "b@test.com", 1],
-    ]);
+    await adapter.appendRows("Owner's Sheet", {
+      rows: [
+        ["u1", "a@test.com", 1],
+        ["u2", "b@test.com", 1],
+      ],
+    });
 
     expect(append).toHaveBeenCalledWith({
       spreadsheetId: "spreadsheet-id",
@@ -340,7 +344,7 @@ describe("GoogleSheetsAdapter.appendRows", () => {
       sheetsClient,
     });
 
-    await adapter.appendRows("Users", []);
+    await adapter.appendRows("Users", { rows: [] });
 
     expect(append).not.toHaveBeenCalled();
   });
@@ -493,6 +497,99 @@ describe("GoogleSheetsAdapter.deleteRow", () => {
     });
 
     await expect(adapter.deleteRow("Users", 1)).rejects.toThrow(RangeError);
+  });
+});
+
+describe("GoogleSheetsAdapter.deleteRows", () => {
+  it("deletes multiple data rows from bottom to top in one batch request", async () => {
+    const get = vi.fn().mockResolvedValue({
+      data: {
+        sheets: [{ properties: { title: "Users", sheetId: 123 } }],
+      },
+    });
+    const batchUpdate = vi.fn().mockResolvedValue({ data: {} });
+
+    const sheetsClient = {
+      spreadsheets: {
+        get,
+        batchUpdate,
+      },
+    } as unknown as sheets_v4.Sheets;
+
+    const adapter = new GoogleSheetsAdapter({
+      spreadsheetUrl: "https://docs.google.com/spreadsheets/d/spreadsheet-id/edit",
+      auth: "unused",
+      sheetsClient,
+    });
+
+    await adapter.deleteRows("Users", [2, 5, 3]);
+
+    expect(batchUpdate).toHaveBeenCalledWith({
+      spreadsheetId: "spreadsheet-id",
+      requestBody: {
+        requests: [
+          {
+            deleteDimension: {
+              range: {
+                sheetId: 123,
+                dimension: "ROWS",
+                startIndex: 4,
+                endIndex: 5,
+              },
+            },
+          },
+          {
+            deleteDimension: {
+              range: {
+                sheetId: 123,
+                dimension: "ROWS",
+                startIndex: 2,
+                endIndex: 3,
+              },
+            },
+          },
+          {
+            deleteDimension: {
+              range: {
+                sheetId: 123,
+                dimension: "ROWS",
+                startIndex: 1,
+                endIndex: 2,
+              },
+            },
+          },
+        ],
+      },
+    });
+  });
+
+  it("rejects duplicate row numbers", async () => {
+    const adapter = new GoogleSheetsAdapter({
+      spreadsheetUrl: "https://docs.google.com/spreadsheets/d/spreadsheet-id/edit",
+      auth: "unused",
+      sheetsClient: {} as sheets_v4.Sheets,
+    });
+
+    await expect(adapter.deleteRows("Users", [3, 3])).rejects.toThrow(
+      RangeError,
+    );
+  });
+
+  it("does nothing for empty row batches", async () => {
+    const batchUpdate = vi.fn();
+    const adapter = new GoogleSheetsAdapter({
+      spreadsheetUrl: "https://docs.google.com/spreadsheets/d/spreadsheet-id/edit",
+      auth: "unused",
+      sheetsClient: {
+        spreadsheets: {
+          batchUpdate,
+        },
+      } as unknown as sheets_v4.Sheets["spreadsheets"],
+    });
+
+    await adapter.deleteRows("Users", []);
+
+    expect(batchUpdate).not.toHaveBeenCalled();
   });
 });
 

@@ -1,4 +1,9 @@
-import type { SheetAdapter, SheetCell, SheetSnapshot } from "../src/adapter/Adapter.js";
+import type {
+  AppendRowsInput,
+  SheetAdapter,
+  SheetCell,
+  SheetSnapshot,
+} from "../src/adapter/Adapter.js";
 
 export class FakeSheetAdapter implements SheetAdapter {
   private readIndex = 0;
@@ -6,13 +11,16 @@ export class FakeSheetAdapter implements SheetAdapter {
   readonly appendedRows: Array<{ sheetName: string; row: SheetCell[] }> = [];
   readonly appendedRowBatches: Array<{ sheetName: string; rows: SheetCell[][] }> = [];
   readonly ensuredSheets: string[] = [];
+  readonly readSheets: string[] = [];
   readonly writtenHeaders: Array<{ sheetName: string; headers: string[] }> = [];
   readonly deletedRows: Array<{ sheetName: string; rowNumber: number }> = [];
+  readonly deletedRowBatches: Array<{ sheetName: string; rowNumbers: number[] }> = [];
   readonly updatedRows: Array<{
     sheetName: string;
     rowNumber: number;
     row: SheetCell[];
   }> = [];
+  deleteRowsByKey?: SheetAdapter["deleteRowsByKey"];
 
   constructor(
     private readonly sheets:
@@ -21,6 +29,8 @@ export class FakeSheetAdapter implements SheetAdapter {
   ) {}
 
   async readSheet(sheetName: string): Promise<SheetSnapshot> {
+    this.readSheets.push(sheetName);
+
     const sheetOrSequence = this.sheets[sheetName];
     const sheet = Array.isArray(sheetOrSequence)
       ? sheetOrSequence[
@@ -53,10 +63,10 @@ export class FakeSheetAdapter implements SheetAdapter {
     this.appendedRows.push({ sheetName, row: [...row] });
   }
 
-  async appendRows(sheetName: string, rows: SheetCell[][]): Promise<void> {
+  async appendRows(sheetName: string, input: AppendRowsInput): Promise<void> {
     this.appendedRowBatches.push({
       sheetName,
-      rows: rows.map((row) => [...row]),
+      rows: input.rows.map((row) => [...row]),
     });
   }
 
@@ -70,5 +80,12 @@ export class FakeSheetAdapter implements SheetAdapter {
 
   async deleteRow(sheetName: string, rowNumber: number): Promise<void> {
     this.deletedRows.push({ sheetName, rowNumber });
+  }
+
+  async deleteRows(sheetName: string, rowNumbers: number[]): Promise<void> {
+    this.deletedRowBatches.push({
+      sheetName,
+      rowNumbers: [...rowNumbers],
+    });
   }
 }

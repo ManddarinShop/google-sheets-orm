@@ -280,6 +280,7 @@ function createDeleteBatcher<T extends Record<string, unknown>>(
 
     if (adapter.deleteRowsByKey !== undefined) {
       const deleteResult = await adapter.deleteRowsByKey(sheetName, {
+        expectedHeaders: snapshot.headers,
         keyHeader: key,
         versionHeader: "_version",
         ids: rowsToDelete.map((target) => String(target.row[key])),
