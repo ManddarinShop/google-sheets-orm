@@ -100,6 +100,10 @@ function doPost(e) {
         return json_({ ok: true });
       }
 
+      if (operation === "updateRowsByKey") {
+        return json_(updateRowsByKey_(spreadsheet, request));
+      }
+
       if (operation === "deleteRow") {
         deleteRow_(spreadsheet, request);
         return json_({ ok: true });
@@ -155,6 +159,7 @@ function validateOperation_(request) {
     "appendRow",
     "appendRows",
     "updateRow",
+    "updateRowsByKey",
     "deleteRow",
     "deleteRows",
     "deleteRowsByKey",
@@ -185,6 +190,13 @@ function validateOperation_(request) {
   if (operation === "updateRow") {
     requirePositiveInteger_(request.rowNumber, "rowNumber");
     requireSheetCellArray_(request.row, "row");
+  }
+
+  if (operation === "updateRowsByKey") {
+    requireStringArray_(request.expectedHeaders, "expectedHeaders");
+    requireString_(request.keyHeader, "keyHeader");
+    requireString_(request.versionHeader, "versionHeader");
+    requireUpdateRows_(request.updates, "updates");
   }
 
   if (operation === "deleteRow") {
@@ -330,6 +342,115 @@ function updateRow_(spreadsheet, request) {
   sheet.getRange(rowNumber, 1, 1, row.length).setValues([row]);
 }
 
+// Updates rows by key after validating expected headers and _version under one lock.
+function updateRowsByKey_(spreadsheet, request) {
+  const sheet = getSheet_(spreadsheet, request.sheetName);
+  const expectedHeaders = requireStringArray_(
+    request.expectedHeaders,
+    "expectedHeaders",
+  );
+  const keyHeader = requireString_(request.keyHeader, "keyHeader");
+  const versionHeader = requireString_(request.versionHeader, "versionHeader");
+  const updates = requireUpdateRows_(request.updates, "updates");
+  const lastRow = sheet.getLastRow();
+  const lastColumn = sheet.getLastColumn();
+
+  if (lastRow === 0 || lastColumn === 0) {
+    throw gatewayError_("schema_drift", "Sheet is empty before update");
+  }
+
+  const values = sheet.getRange(1, 1, lastRow, lastColumn).getValues();
+  const headers = (values[0] || []).map(function(value) {
+    return String(value);
+  });
+  const keyIndex = headers.indexOf(keyHeader);
+  const versionIndex = headers.indexOf(versionHeader);
+
+  assertExpectedHeaders_(headers, expectedHeaders, "update");
+
+  if (keyIndex === -1) {
+    throw gatewayError_("schema_drift", "Missing key header: " + keyHeader);
+  }
+
+  if (versionIndex === -1) {
+    throw gatewayError_(
+      "schema_drift",
+      "Missing version header: " + versionHeader,
+    );
+  }
+
+  const updatesById = Object.create(null);
+  const seenRequestedIds = Object.create(null);
+  const rowsToUpdate = [];
+
+  updates.forEach(function(update) {
+    if (updatesById[update.id]) {
+      throw gatewayError_(
+        "invalid_request",
+        "updates must not contain duplicate ids",
+      );
+    }
+
+    if (update.row.length !== expectedHeaders.length) {
+      throw gatewayError_(
+        "invalid_request",
+        "updates." + update.id + ".row must match expectedHeaders length",
+      );
+    }
+
+    updatesById[update.id] = update;
+  });
+
+  values.slice(1).forEach(function(cells, index) {
+    const id = String(cells[keyIndex]);
+
+    if (!updatesById[id] && !seenRequestedIds[id]) {
+      return;
+    }
+
+    if (seenRequestedIds[id]) {
+      throw gatewayError_("schema_drift", "Duplicate key \"" + id + "\"");
+    }
+
+    seenRequestedIds[id] = true;
+
+    const update = updatesById[id];
+    const version = Number(cells[versionIndex]);
+
+    if (version !== update.expectedVersion) {
+      throw gatewayError_("conflict", "Stale write for key \"" + id + "\"");
+    }
+
+    rowsToUpdate.push({
+      id: id,
+      rowNumber: index + 2,
+      row: update.row,
+    });
+
+    delete updatesById[id];
+  });
+
+  Object.keys(updatesById).forEach(function(id) {
+    throw gatewayError_("conflict", "Row \"" + id + "\" changed before update");
+  });
+
+  rowsToUpdate.forEach(function(update) {
+    sheet.getRange(update.rowNumber, 1, 1, update.row.length).setValues([
+      update.row,
+    ]);
+  });
+
+  return {
+    ok: true,
+    updatedRows: rowsToUpdate.map(function(update) {
+      return {
+        id: update.id,
+        cells: update.row.map(toSheetCell_),
+      };
+    }),
+  };
+}
+
 // Deletes only data rows; row 1 is reserved for the schema header.
 function deleteRow_(spreadsheet, request) {
   const sheet = getSheet_(spreadsheet, request.sheetName);
@@ -401,7 +522,7 @@ function deleteRowsByKey_(spreadsheet, request) {
   const keyIndex = headers.indexOf(keyHeader);
   const versionIndex = headers.indexOf(versionHeader);
 
-  assertExpectedHeaders_(headers, expectedHeaders);
+  assertExpectedHeaders_(headers, expectedHeaders, "delete");
 
   if (keyIndex === -1) {
     throw gatewayError_("schema_drift", "Missing key header: " + keyHeader);
@@ -551,6 +672,30 @@ function requireSheetCellRows_(value, name) {
   return value;
 }
 
+function requireUpdateRows_(value, name) {
+  if (!Array.isArray(value) || value.length === 0) {
+    throw gatewayError_("invalid_request", name + " must be a non-empty array");
+  }
+
+  value.forEach(function(update, index) {
+    if (!update || typeof update !== "object" || Array.isArray(update)) {
+      throw gatewayError_(
+        "invalid_request",
+        name + "[" + index + "] must be an object",
+      );
+    }
+
+    requireString_(update.id, name + "[" + index + "].id");
+    requireFiniteNumber_(
+      update.expectedVersion,
+      name + "[" + index + "].expectedVersion",
+    );
+    requireSheetCellArray_(update.row, name + "[" + index + "].row");
+  });
+
+  return value;
+}
+
 function requirePositiveInteger_(value, name) {
   const numberValue = Number(value);
 
@@ -575,6 +720,14 @@ function requirePositiveIntegerArray_(value, name) {
   });
 }
 
+function requireFiniteNumber_(value, name) {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw gatewayError_("invalid_request", name + " must be a number");
+  }
+
+  return value;
+}
+
 function requireNumberRecord_(value, name) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw gatewayError_("invalid_request", name + " must be an object");
@@ -589,16 +742,19 @@ function requireNumberRecord_(value, name) {
   return value;
 }
 
-function assertExpectedHeaders_(actualHeaders, expectedHeaders) {
+function assertExpectedHeaders_(actualHeaders, expectedHeaders, operation) {
   if (actualHeaders.length < expectedHeaders.length) {
-    throw gatewayError_("schema_drift", "Header row changed before delete");
+    throw gatewayError_(
+      "schema_drift",
+      "Header row changed before " + operation,
+    );
   }
 
   expectedHeaders.forEach(function(expectedHeader, index) {
     if (actualHeaders[index] !== expectedHeader) {
       throw gatewayError_(
         "schema_drift",
-        "Header row changed before delete",
+        "Header row changed before " + operation,
       );
     }
   });

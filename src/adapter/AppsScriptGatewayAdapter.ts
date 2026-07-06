@@ -5,6 +5,8 @@ import type {
   SheetAdapter,
   SheetCell,
   SheetSnapshot,
+  UpdateRowsByKeyInput,
+  UpdateRowsByKeyResult,
 } from "./Adapter.js";
 import { ConflictError, SchemaDriftError } from "../core/Errors.js";
 import type {
@@ -13,6 +15,7 @@ import type {
   AppsScriptGatewayReadSheetResponse,
   AppsScriptGatewayRequest,
   AppsScriptGatewayResponse,
+  AppsScriptGatewayUpdateRowsByKeyResponse,
 } from "./AppsScriptGatewayProtocol.js";
 
 type GatewayFetch = typeof fetch;
@@ -75,6 +78,30 @@ export class AppsScriptGatewayAdapter implements SheetAdapter {
       rowNumber,
       row,
     });
+  }
+
+  /**
+   * Lets the gateway update by key under the Apps Script document lock. This
+   * preserves optimistic locking while avoiding a second repository-side read.
+   */
+  async updateRowsByKey(
+    sheetName: string,
+    input: UpdateRowsByKeyInput,
+  ): Promise<UpdateRowsByKeyResult> {
+    const response = requireUpdateRowsByKeyResponse(
+      await this.request({
+        operation: "updateRowsByKey",
+        sheetName,
+        expectedHeaders: input.expectedHeaders,
+        keyHeader: input.keyHeader,
+        versionHeader: input.versionHeader,
+        updates: input.updates,
+      }),
+    );
+
+    return {
+      updatedRows: response.updatedRows,
+    };
   }
 
   // Sends row deletion through the gateway so service-account-free setups expose
@@ -239,6 +266,24 @@ function requireDeleteRowsByKeyResponse(
   };
 }
 
+function requireUpdateRowsByKeyResponse(
+  value: AppsScriptGatewayResponse,
+): AppsScriptGatewayUpdateRowsByKeyResponse {
+  if (
+    !Array.isArray(value.updatedRows) ||
+    !value.updatedRows.every(isUpdatedRowByKeyResult)
+  ) {
+    throw new Error(
+      "Apps Script gateway returned an invalid updateRowsByKey response",
+    );
+  }
+
+  return {
+    ...value,
+    updatedRows: value.updatedRows,
+  };
+}
+
 function requireGatewayResponse(value: unknown): AppsScriptGatewayResponse {
   if (!isGatewayResponse(value)) {
     throw new Error("Apps Script gateway returned an invalid response");
@@ -290,6 +335,17 @@ function isSheetCell(value: unknown): value is SheetCell {
 function isDeletedRowByKeyResult(
   value: unknown,
 ): value is DeleteRowsByKeyResult["deletedRows"][number] {
+  return (
+    isRecord(value) &&
+    typeof value.id === "string" &&
+    Array.isArray(value.cells) &&
+    value.cells.every(isSheetCell)
+  );
+}
+
+function isUpdatedRowByKeyResult(
+  value: unknown,
+): value is UpdateRowsByKeyResult["updatedRows"][number] {
   return (
     isRecord(value) &&
     typeof value.id === "string" &&
