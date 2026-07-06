@@ -44,10 +44,157 @@ describe("repository deletes and optimistic locking", () => {
       active: true,
       _version: 1,
     });
-    expect(adapter.deletedRows).toEqual([
+    expect(adapter.deletedRows).toEqual([]);
+    expect(adapter.deletedRowBatches).toEqual([
       {
         sheetName: "Users",
-        rowNumber: 2,
+        rowNumbers: [2],
+      },
+    ]);
+  });
+
+  it("batches same-tick deletes and deletes physical rows from bottom to top", async () => {
+    const sheet = {
+      headers: ["id", "email", "age", "active", "_version"],
+      rows: [
+        { rowNumber: 2, cells: ["u1", "a@test.com", 20, true, 1] },
+        { rowNumber: 3, cells: ["u2", "b@test.com", 21, false, 1] },
+        { rowNumber: 4, cells: ["u3", "c@test.com", 22, true, 1] },
+      ],
+    };
+    const adapter = new FakeSheetAdapter({
+      Users: [sheet, sheet],
+    });
+
+    const users = createSheetRepository<User>({
+      adapter,
+      sheetName: "Users",
+      key: "id",
+      columns,
+    });
+
+    await expect(
+      Promise.all([users.deleteById("u1"), users.deleteById("u3")]),
+    ).resolves.toEqual([
+      {
+        id: "u1",
+        email: "a@test.com",
+        age: 20,
+        active: true,
+        _version: 1,
+      },
+      {
+        id: "u3",
+        email: "c@test.com",
+        age: 22,
+        active: true,
+        _version: 1,
+      },
+    ]);
+    expect(adapter.deletedRows).toEqual([]);
+    expect(adapter.deletedRowBatches).toEqual([
+      {
+        sheetName: "Users",
+        rowNumbers: [4, 2],
+      },
+    ]);
+  });
+
+  it("uses adapter key-based batch delete when available", async () => {
+    const sheet = {
+      headers: ["id", "email", "age", "active", "_version"],
+      rows: [
+        { rowNumber: 2, cells: ["u1", "a@test.com", 20, true, 1] },
+        { rowNumber: 3, cells: ["u2", "b@test.com", 21, false, 1] },
+        { rowNumber: 4, cells: ["u3", "c@test.com", 22, true, 1] },
+      ],
+    };
+    const adapter = new FakeSheetAdapter({
+      Users: [sheet, sheet],
+    });
+    adapter.deleteRowsByKey = async (sheetName, input) => {
+      expect(sheetName).toBe("Users");
+      expect(input).toEqual({
+        expectedHeaders: ["id", "email", "age", "active", "_version"],
+        keyHeader: "id",
+        versionHeader: "_version",
+        ids: ["u1", "u3"],
+        versionsById: {
+          u1: 1,
+          u3: 1,
+        },
+      });
+
+      return {
+        deletedRows: [
+          { id: "u1", cells: ["u1", "a@test.com", 20, true, 1] },
+          { id: "u3", cells: ["u3", "c@test.com", 22, true, 1] },
+        ],
+      };
+    };
+
+    const users = createSheetRepository<User>({
+      adapter,
+      sheetName: "Users",
+      key: "id",
+      columns,
+    });
+
+    await expect(
+      Promise.all([users.deleteById("u1"), users.deleteById("u3")]),
+    ).resolves.toEqual([
+      {
+        id: "u1",
+        email: "a@test.com",
+        age: 20,
+        active: true,
+        _version: 1,
+      },
+      {
+        id: "u3",
+        email: "c@test.com",
+        age: 22,
+        active: true,
+        _version: 1,
+      },
+    ]);
+    expect(adapter.readSheets).toEqual(["Users"]);
+    expect(adapter.deletedRows).toEqual([]);
+    expect(adapter.deletedRowBatches).toEqual([]);
+  });
+
+  it("returns null for duplicate ids after the first same-tick delete", async () => {
+    const sheet = {
+      headers: ["id", "email", "age", "active", "_version"],
+      rows: [{ rowNumber: 2, cells: ["u1", "a@test.com", 20, true, 1] }],
+    };
+    const adapter = new FakeSheetAdapter({
+      Users: [sheet, sheet],
+    });
+
+    const users = createSheetRepository<User>({
+      adapter,
+      sheetName: "Users",
+      key: "id",
+      columns,
+    });
+
+    await expect(
+      Promise.all([users.deleteById("u1"), users.deleteById("u1")]),
+    ).resolves.toEqual([
+      {
+        id: "u1",
+        email: "a@test.com",
+        age: 20,
+        active: true,
+        _version: 1,
+      },
+      null,
+    ]);
+    expect(adapter.deletedRowBatches).toEqual([
+      {
+        sheetName: "Users",
+        rowNumbers: [2],
       },
     ]);
   });

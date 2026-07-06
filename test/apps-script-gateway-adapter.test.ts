@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
+import { ConflictError, SchemaDriftError } from "../src/core/Errors.js";
 import { AppsScriptGatewayAdapter } from "../src/index.js";
 
 function createJsonResponse(value: unknown): Response {
@@ -67,10 +68,12 @@ describe("AppsScriptGatewayAdapter", () => {
       fetch,
     });
 
-    await adapter.appendRows("Users", [
-      ["u1", "a@test.com", true, 1],
-      ["u2", "b@test.com", false, 1],
-    ]);
+    await adapter.appendRows("Users", {
+      rows: [
+        ["u1", "a@test.com", true, 1],
+        ["u2", "b@test.com", false, 1],
+      ],
+    });
 
     expectGatewayRequest(fetch, {
       operation: "appendRows",
@@ -117,6 +120,72 @@ describe("AppsScriptGatewayAdapter", () => {
       secret: "gateway-secret",
       sheetName: "Users",
       rowNumber: 3,
+    });
+  });
+
+  it("deletes multiple rows through one Apps Script gateway request", async () => {
+    const fetch = vi.fn().mockResolvedValue(createJsonResponse({ ok: true }));
+    const adapter = new AppsScriptGatewayAdapter({
+      gatewayUrl: "https://script.google.com/macros/s/deployment-id/exec",
+      gatewaySecret: "gateway-secret",
+      fetch,
+    });
+
+    await adapter.deleteRows("Users", [5, 3]);
+
+    expectGatewayRequest(fetch, {
+      operation: "deleteRows",
+      secret: "gateway-secret",
+      sheetName: "Users",
+      rowNumbers: [5, 3],
+    });
+  });
+
+  it("deletes multiple rows by key through one Apps Script gateway request", async () => {
+    const fetch = vi.fn().mockResolvedValue(
+      createJsonResponse({
+        ok: true,
+        deletedRows: [
+          { id: "u1", cells: ["u1", "a@test.com", 1] },
+          { id: "u3", cells: ["u3", "c@test.com", 1] },
+        ],
+      }),
+    );
+    const adapter = new AppsScriptGatewayAdapter({
+      gatewayUrl: "https://script.google.com/macros/s/deployment-id/exec",
+      gatewaySecret: "gateway-secret",
+      fetch,
+    });
+
+    await expect(
+      adapter.deleteRowsByKey("Users", {
+        expectedHeaders: ["id", "email", "_version"],
+        keyHeader: "id",
+        versionHeader: "_version",
+        ids: ["u1", "u3"],
+        versionsById: {
+          u1: 1,
+          u3: 1,
+        },
+      }),
+    ).resolves.toEqual({
+      deletedRows: [
+        { id: "u1", cells: ["u1", "a@test.com", 1] },
+        { id: "u3", cells: ["u3", "c@test.com", 1] },
+      ],
+    });
+    expectGatewayRequest(fetch, {
+      operation: "deleteRowsByKey",
+      secret: "gateway-secret",
+      sheetName: "Users",
+      expectedHeaders: ["id", "email", "_version"],
+      keyHeader: "id",
+      versionHeader: "_version",
+      ids: ["u1", "u3"],
+      versionsById: {
+        u1: 1,
+        u3: 1,
+      },
     });
   });
 
@@ -230,6 +299,62 @@ describe("AppsScriptGatewayAdapter", () => {
     await expect(adapter.readSheet("")).rejects.toThrow(
       /Apps Script gateway failed: sheetName must be a non-empty string/,
     );
+  });
+
+  it("maps gateway conflict errors to ConflictError", async () => {
+    const fetch = vi.fn().mockResolvedValue(
+      createJsonResponse({
+        ok: false,
+        code: "conflict",
+        error: "conflict",
+        message: 'Stale delete for key "u1"',
+      }),
+    );
+    const adapter = new AppsScriptGatewayAdapter({
+      gatewayUrl: "https://script.google.com/macros/s/deployment-id/exec",
+      gatewaySecret: "gateway-secret",
+      fetch,
+    });
+
+    await expect(
+      adapter.deleteRowsByKey("Users", {
+        expectedHeaders: ["id", "email", "_version"],
+        keyHeader: "id",
+        versionHeader: "_version",
+        ids: ["u1"],
+        versionsById: {
+          u1: 1,
+        },
+      }),
+    ).rejects.toThrow(ConflictError);
+  });
+
+  it("maps gateway schema drift errors to SchemaDriftError", async () => {
+    const fetch = vi.fn().mockResolvedValue(
+      createJsonResponse({
+        ok: false,
+        code: "schema_drift",
+        error: "schema_drift",
+        message: 'Duplicate key "u1"',
+      }),
+    );
+    const adapter = new AppsScriptGatewayAdapter({
+      gatewayUrl: "https://script.google.com/macros/s/deployment-id/exec",
+      gatewaySecret: "gateway-secret",
+      fetch,
+    });
+
+    await expect(
+      adapter.deleteRowsByKey("Users", {
+        expectedHeaders: ["id", "email", "_version"],
+        keyHeader: "id",
+        versionHeader: "_version",
+        ids: ["u1"],
+        versionsById: {
+          u1: 1,
+        },
+      }),
+    ).rejects.toThrow(SchemaDriftError);
   });
 
   it("rejects invalid readSheet response payloads", async () => {

@@ -1,4 +1,8 @@
-import type { SheetCell, SheetSnapshot } from "./Adapter.js";
+import type {
+  DeleteRowsByKeyResult,
+  SheetCell,
+  SheetSnapshot,
+} from "./Adapter.js";
 
 export type AppsScriptGatewayRequest =
   | { operation: "ping" }
@@ -14,7 +18,17 @@ export type AppsScriptGatewayRequest =
       rowNumber: number;
       row: SheetCell[];
     }
-  | { operation: "deleteRow"; sheetName: string; rowNumber: number };
+  | { operation: "deleteRow"; sheetName: string; rowNumber: number }
+  | { operation: "deleteRows"; sheetName: string; rowNumbers: number[] }
+  | {
+      operation: "deleteRowsByKey";
+      sheetName: string;
+      expectedHeaders: string[];
+      keyHeader: string;
+      versionHeader: string;
+      ids: string[];
+      versionsById: Record<string, number>;
+    };
 
 export type AppsScriptGatewayAuthenticatedRequest =
   AppsScriptGatewayRequest & {
@@ -30,3 +44,6 @@ export type AppsScriptGatewayResponse = {
 
 export type AppsScriptGatewayReadSheetResponse = AppsScriptGatewayResponse &
   SheetSnapshot;
+
+export type AppsScriptGatewayDeleteRowsByKeyResponse =
+  AppsScriptGatewayResponse & DeleteRowsByKeyResult;

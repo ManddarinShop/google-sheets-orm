@@ -7,6 +7,7 @@ typed-sheets-mvp-scope*.md
 # Dependencies and build output
 node_modules/
 dist/
+.npm-cache/
 
 # Local environment
 .env
