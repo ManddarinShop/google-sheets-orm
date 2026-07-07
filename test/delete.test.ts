@@ -45,15 +45,24 @@ describe("repository deletes and optimistic locking", () => {
       _version: 1,
     });
     expect(adapter.deletedRows).toEqual([]);
-    expect(adapter.deletedRowBatches).toEqual([
+    expect(adapter.deletedRowBatches).toEqual([]);
+    expect(adapter.deletedRowsByKey).toEqual([
       {
         sheetName: "Users",
-        rowNumbers: [2],
+        input: {
+          expectedHeaders: ["id", "email", "age", "active", "_version"],
+          keyHeader: "id",
+          versionHeader: "_version",
+          ids: ["u1"],
+          versionsById: {
+            u1: 1,
+          },
+        },
       },
     ]);
   });
 
-  it("batches same-tick deletes and deletes physical rows from bottom to top", async () => {
+  it("batches same-tick deletes by key", async () => {
     const sheet = {
       headers: ["id", "email", "age", "active", "_version"],
       rows: [
@@ -92,10 +101,20 @@ describe("repository deletes and optimistic locking", () => {
       },
     ]);
     expect(adapter.deletedRows).toEqual([]);
-    expect(adapter.deletedRowBatches).toEqual([
+    expect(adapter.deletedRowBatches).toEqual([]);
+    expect(adapter.deletedRowsByKey).toEqual([
       {
         sheetName: "Users",
-        rowNumbers: [4, 2],
+        input: {
+          expectedHeaders: ["id", "email", "age", "active", "_version"],
+          keyHeader: "id",
+          versionHeader: "_version",
+          ids: ["u1", "u3"],
+          versionsById: {
+            u1: 1,
+            u3: 1,
+          },
+        },
       },
     ]);
   });
@@ -191,12 +210,7 @@ describe("repository deletes and optimistic locking", () => {
       },
       null,
     ]);
-    expect(adapter.deletedRowBatches).toEqual([
-      {
-        sheetName: "Users",
-        rowNumbers: [2],
-      },
-    ]);
+    expect(adapter.deletedRowBatches).toEqual([]);
   });
 
   it("returns null when the target row does not exist", async () => {
