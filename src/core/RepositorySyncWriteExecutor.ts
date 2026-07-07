@@ -148,64 +148,19 @@ async function updateRepositoryRows<T extends Record<string, unknown>>(
   }
 
   if (adapter.updateRowsByKey !== undefined) {
-    const updateResult = await adapter.updateRowsByKey(sheetName, {
-      expectedHeaders: snapshot.headers,
-      keyHeader: key,
-      versionHeader: "_version",
-      updates: rowsToUpdate.map((update) => ({
-        id: update.id,
-        expectedVersion: update.currentVersion,
-        row: update.serializedRow,
-      })),
+    return applyLockedKeyBasedUpdates({
+      input,
+      snapshot,
+      resolvedUpdates,
+      rowsToUpdate,
     });
-    const updatedRowsById = new Map(
-      updateResult.updatedRows.map((updatedRow) => [
-        updatedRow.id,
-        parseAdapterResultRow<T>({
-          headers: snapshot.headers,
-          cells: updatedRow.cells,
-          columns,
-        }),
-      ]),
-    );
-
-    for (const update of rowsToUpdate) {
-      if (!updatedRowsById.has(update.id)) {
-        throw new ConflictError(`Row "${update.id}" changed before update`);
-      }
-    }
-
-    return resolvedUpdates.map((update) =>
-      update === null ? null : updatedRowsById.get(update.id) as T,
-    );
   }
 
-  const latestSnapshot = await readRepositorySnapshot(input);
-
-  for (const update of rowsToUpdate) {
-    const latestSheetRow = findParsedRowByNumberOrNull(
-      latestSnapshot.parsedRows,
-      update.target.rowNumber,
-    );
-
-    if (latestSheetRow === null) {
-      throw new ConflictError(`Row "${update.id}" changed before update`);
-    }
-
-    if (Number(latestSheetRow.row["_version"]) !== update.currentVersion) {
-      throw new ConflictError(`Stale write for key "${update.id}"`);
-    }
-  }
-
-  for (const update of rowsToUpdate) {
-    await adapter.updateRow(
-      sheetName,
-      update.target.rowNumber,
-      update.serializedRow,
-    );
-  }
-
-  return resolvedUpdates.map((update) => update?.row ?? null);
+  return applyDirectRowNumberUpdates({
+    input,
+    resolvedUpdates,
+    rowsToUpdate,
+  });
 }
 
 async function deleteRepositoryRowsById<T extends Record<string, unknown>>(
@@ -248,44 +203,167 @@ async function deleteRepositoryRowsById<T extends Record<string, unknown>>(
   }
 
   if (adapter.deleteRowsByKey !== undefined) {
-    const deleteResult = await adapter.deleteRowsByKey(sheetName, {
-      expectedHeaders: snapshot.headers,
-      keyHeader: key,
-      versionHeader: "_version",
-      ids: rowsToDelete.map((target) => String(target.row[key])),
-      versionsById: Object.fromEntries(
-        rowsToDelete.map((target) => [
-          String(target.row[key]),
-          Number(target.row["_version"]),
-        ]),
-      ),
+    return applyLockedKeyBasedDeletes({
+      input,
+      snapshot,
+      targets,
+      rowsToDelete,
     });
-    const deletedRowsById = new Map(
-      deleteResult.deletedRows.map((deletedRow) => [
-        deletedRow.id,
-        parseAdapterResultRow<T>({
-          headers: snapshot.headers,
-          cells: deletedRow.cells,
-          columns,
-        }),
-      ]),
+  }
+
+  return applyDirectRowNumberDeletes({
+    input,
+    targets,
+    rowsToDelete,
+  });
+}
+
+async function applyLockedKeyBasedUpdates<T extends Record<string, unknown>>(
+  params: {
+    input: RepositoryWriteBatcherContext<T>;
+    snapshot: RepositorySnapshot<T>;
+    resolvedUpdates: Array<ResolvedUpdate<T> | null>;
+    rowsToUpdate: Array<ResolvedUpdate<T>>;
+  },
+): Promise<Array<T | null>> {
+  const { input, snapshot, resolvedUpdates, rowsToUpdate } = params;
+  const { adapter, sheetName, key, columns } = input;
+
+  if (adapter.updateRowsByKey === undefined) {
+    throw new Error("Adapter does not support locked key-based updates");
+  }
+
+  const updateResult = await adapter.updateRowsByKey(sheetName, {
+    expectedHeaders: snapshot.headers,
+    keyHeader: key,
+    versionHeader: "_version",
+    updates: rowsToUpdate.map((update) => ({
+      id: update.id,
+      expectedVersion: update.currentVersion,
+      row: update.serializedRow,
+    })),
+  });
+  const updatedRowsById = new Map(
+    updateResult.updatedRows.map((updatedRow) => [
+      updatedRow.id,
+      parseAdapterResultRow<T>({
+        headers: snapshot.headers,
+        cells: updatedRow.cells,
+        columns,
+      }),
+    ]),
+  );
+
+  for (const update of rowsToUpdate) {
+    if (!updatedRowsById.has(update.id)) {
+      throw new ConflictError(`Row "${update.id}" changed before update`);
+    }
+  }
+
+  return resolvedUpdates.map((update) =>
+    update === null ? null : updatedRowsById.get(update.id) as T,
+  );
+}
+
+async function applyDirectRowNumberUpdates<T extends Record<string, unknown>>(
+  params: {
+    input: RepositoryWriteBatcherContext<T>;
+    resolvedUpdates: Array<ResolvedUpdate<T> | null>;
+    rowsToUpdate: Array<ResolvedUpdate<T>>;
+  },
+): Promise<Array<T | null>> {
+  const { input, resolvedUpdates, rowsToUpdate } = params;
+  const { adapter, sheetName } = input;
+  const latestSnapshot = await readRepositorySnapshot(input);
+
+  for (const update of rowsToUpdate) {
+    const latestSheetRow = findParsedRowByNumberOrNull(
+      latestSnapshot.parsedRows,
+      update.target.rowNumber,
     );
 
-    for (const target of rowsToDelete) {
-      const id = String(target.row[key]);
-
-      if (!deletedRowsById.has(id)) {
-        throw new ConflictError(`Row "${id}" changed before delete`);
-      }
+    if (latestSheetRow === null) {
+      throw new ConflictError(`Row "${update.id}" changed before update`);
     }
 
-    return targets.map((target) =>
-      target === null
-        ? null
-        : deletedRowsById.get(String(target.row[key])) ?? null,
+    if (Number(latestSheetRow.row["_version"]) !== update.currentVersion) {
+      throw new ConflictError(`Stale write for key "${update.id}"`);
+    }
+  }
+
+  for (const update of rowsToUpdate) {
+    await adapter.updateRow(
+      sheetName,
+      update.target.rowNumber,
+      update.serializedRow,
     );
   }
 
+  return resolvedUpdates.map((update) => update?.row ?? null);
+}
+
+async function applyLockedKeyBasedDeletes<T extends Record<string, unknown>>(
+  params: {
+    input: RepositoryWriteBatcherContext<T>;
+    snapshot: RepositorySnapshot<T>;
+    targets: Array<ParsedRepositoryRow<T> | null>;
+    rowsToDelete: Array<ParsedRepositoryRow<T>>;
+  },
+): Promise<Array<T | null>> {
+  const { input, snapshot, targets, rowsToDelete } = params;
+  const { adapter, sheetName, key, columns } = input;
+
+  if (adapter.deleteRowsByKey === undefined) {
+    throw new Error("Adapter does not support locked key-based deletes");
+  }
+
+  const deleteResult = await adapter.deleteRowsByKey(sheetName, {
+    expectedHeaders: snapshot.headers,
+    keyHeader: key,
+    versionHeader: "_version",
+    ids: rowsToDelete.map((target) => String(target.row[key])),
+    versionsById: Object.fromEntries(
+      rowsToDelete.map((target) => [
+        String(target.row[key]),
+        Number(target.row["_version"]),
+      ]),
+    ),
+  });
+  const deletedRowsById = new Map(
+    deleteResult.deletedRows.map((deletedRow) => [
+      deletedRow.id,
+      parseAdapterResultRow<T>({
+        headers: snapshot.headers,
+        cells: deletedRow.cells,
+        columns,
+      }),
+    ]),
+  );
+
+  for (const target of rowsToDelete) {
+    const id = String(target.row[key]);
+
+    if (!deletedRowsById.has(id)) {
+      throw new ConflictError(`Row "${id}" changed before delete`);
+    }
+  }
+
+  return targets.map((target) =>
+    target === null
+      ? null
+      : deletedRowsById.get(String(target.row[key])) ?? null,
+  );
+}
+
+async function applyDirectRowNumberDeletes<T extends Record<string, unknown>>(
+  params: {
+    input: RepositoryWriteBatcherContext<T>;
+    targets: Array<ParsedRepositoryRow<T> | null>;
+    rowsToDelete: Array<ParsedRepositoryRow<T>>;
+  },
+): Promise<Array<T | null>> {
+  const { input, targets, rowsToDelete } = params;
+  const { adapter, sheetName, key } = input;
   const latestSnapshot = await readRepositorySnapshot(input);
 
   for (const target of rowsToDelete) {
@@ -299,7 +377,9 @@ async function deleteRepositoryRowsById<T extends Record<string, unknown>>(
       throw new ConflictError(`Row "${id}" changed before delete`);
     }
 
-    if (Number(latestSheetRow.row["_version"]) !== Number(target.row["_version"])) {
+    if (
+      Number(latestSheetRow.row["_version"]) !== Number(target.row["_version"])
+    ) {
       throw new ConflictError(`Stale delete for key "${id}"`);
     }
   }
