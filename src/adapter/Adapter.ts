@@ -51,9 +51,8 @@ export interface SheetAdapter {
   readSheet(sheetName: string): Promise<SheetSnapshot>;
   appendRow(sheetName: string, row: SheetCell[]): Promise<void>;
   /**
-   * Append multiple rows in one adapter call when the backing transport supports
-   * it. Repository code treats this as an atomic transport optimization: if the
-   * method rejects, none of the queued inserts are reported as successful.
+   * Append one or more rows in one adapter call. Repository writes always flow
+   * through this batch-shaped contract, even when the batch contains one row.
    */
   appendRows?(sheetName: string, input: AppendRowsInput): Promise<void>;
   updateRow(
@@ -62,8 +61,9 @@ export interface SheetAdapter {
     row: SheetCell[],
   ): Promise<void>;
   /**
-   * Update rows by key under one transport-level lock when supported. The
-   * adapter validates headers and expected versions immediately before writing.
+   * Update rows by key after validating headers and expected versions
+   * immediately before writing. Gateway adapters should perform this under the
+   * backing document lock.
    */
   updateRowsByKey?(
     sheetName: string,
@@ -78,9 +78,9 @@ export interface SheetAdapter {
    */
   deleteRows?(sheetName: string, rowNumbers: number[]): Promise<void>;
   /**
-   * Delete rows by key under one transport-level lock when supported. The
-   * adapter validates the key and version immediately before deleting so the
-   * repository can avoid an extra readSheet round trip.
+   * Delete rows by key after validating headers and expected versions
+   * immediately before deleting. Gateway adapters should perform this under the
+   * backing document lock.
    */
   deleteRowsByKey?(
     sheetName: string,
