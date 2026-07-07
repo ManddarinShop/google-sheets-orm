@@ -128,8 +128,7 @@ export class GoogleSheetsAdapter implements SheetAdapter {
     });
   }
 
-  // Deletes a physical Google Sheets row; repository-level locking happens
-  // before this adapter method is called.
+  // Deletes a physical Google Sheets row after the caller has chosen the target.
   async deleteRow(sheetName: string, rowNumber: number): Promise<void> {
     if (!Number.isInteger(rowNumber) || rowNumber < 2) {
       throw new RangeError(`Invalid data row number "${rowNumber}"`);
