@@ -1,0 +1,77 @@
+name: Bug report
+description: Report behavior that is incorrect or unexpectedly unsafe.
+title: "fix: "
+labels:
+  - "type: bug"
+  - "status: needs triage"
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug. Please include enough detail to reproduce the repository, adapter, or setup behavior.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What went wrong?
+      placeholder: A stale write is not rejected when...
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - core repository
+        - adapter
+        - Apps Script gateway
+        - setup/config
+        - documentation
+        - performance
+        - other
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Provide code, config, sheet shape, or test steps.
+      placeholder: |
+        1. Create a sheet with headers...
+        2. Run...
+        3. Observe...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What should typed-sheets do instead?
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: What happened?
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include package version, Node version, adapter path, and relevant config shape.
+      placeholder: |
+        typed-sheets:
+        Node:
+        Adapter: Apps Script gateway / service account
+        Auth/config:
+    validations:
+      required: false
+  - type: textarea
+    id: notes
+    attributes:
+      label: Additional context
+      description: Logs, screenshots, links, or related issues.
+    validations:
+      required: false

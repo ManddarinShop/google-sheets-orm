@@ -1,0 +1,54 @@
+name: Feature request
+description: Propose a new capability or API direction.
+title: "feat: "
+labels:
+  - "type: feature"
+  - "status: needs triage"
+body:
+  - type: markdown
+    attributes:
+      value: |
+        typed-sheets is a typed repository and safe write layer for Google Sheets-backed MVPs. Please frame feature requests around that scope.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What user problem or workflow does this solve?
+      placeholder: I want to avoid manual Apps Script deployment because...
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Describe the API, CLI flow, adapter behavior, or docs change you want.
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - core repository
+        - adapter
+        - Apps Script gateway
+        - setup/config
+        - documentation
+        - performance
+        - other
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: What else could solve this?
+    validations:
+      required: false
+  - type: textarea
+    id: risks
+    attributes:
+      label: Risks or constraints
+      description: Include quota, auth, schema drift, stale write, or migration concerns.
+    validations:
+      required: false

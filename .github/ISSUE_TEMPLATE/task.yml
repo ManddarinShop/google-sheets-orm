@@ -1,0 +1,47 @@
+name: Task
+description: Track scoped maintenance, refactor, documentation, or release work.
+title: "chore: "
+labels:
+  - "type: chore"
+  - "status: needs triage"
+body:
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal
+      description: What should be true when this task is done?
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope
+      description: List the files, modules, or workflows expected to change.
+      placeholder: |
+        - README quick start
+        - setup prompts
+        - gateway template
+    validations:
+      required: true
+  - type: textarea
+    id: plan
+    attributes:
+      label: Plan
+      description: Optional implementation checklist.
+      placeholder: |
+        - [ ] Update...
+        - [ ] Add tests...
+        - [ ] Run...
+    validations:
+      required: false
+  - type: textarea
+    id: validation
+    attributes:
+      label: Validation
+      description: What commands, smoke tests, or manual checks should verify this?
+      placeholder: |
+        npm test
+        npm run typecheck
+        npm run build
+    validations:
+      required: false
