@@ -1,0 +1,57 @@
+- name: "type: bug"
+  color: d73a4a
+  description: Incorrect or unexpectedly unsafe behavior.
+- name: "type: feature"
+  color: a2eeef
+  description: New capability or API proposal.
+- name: "type: docs"
+  color: 0075ca
+  description: Documentation changes.
+- name: "type: refactor"
+  color: c5def5
+  description: Internal code restructuring without behavior change.
+- name: "type: test"
+  color: bfdadc
+  description: Test coverage or test infrastructure.
+- name: "type: chore"
+  color: fef2c0
+  description: Maintenance, tooling, release, or repository operations.
+- name: "type: performance"
+  color: f9d0c4
+  description: Benchmarking or performance improvement.
+- name: "area: core"
+  color: 5319e7
+  description: Repository, schema, parsing, locking, or batching logic.
+- name: "area: adapter"
+  color: 5319e7
+  description: Sheet adapter interfaces and implementations.
+- name: "area: apps-script"
+  color: 5319e7
+  description: Apps Script gateway templates, deployment, or runtime behavior.
+- name: "area: setup"
+  color: 5319e7
+  description: CLI setup, config loading, or config writing.
+- name: "area: docs"
+  color: 5319e7
+  description: README, guides, plans, or docs site content.
+- name: "area: performance"
+  color: 5319e7
+  description: Benchmarks, cache, queue, batching, or latency work.
+- name: "status: needs triage"
+  color: fbca04
+  description: Needs initial review and prioritization.
+- name: "status: blocked"
+  color: b60205
+  description: Cannot proceed until another task, answer, or external change lands.
+- name: "status: ready"
+  color: 0e8a16
+  description: Ready for implementation or review.
+- name: "priority: high"
+  color: b60205
+  description: Important and time-sensitive.
+- name: "priority: medium"
+  color: fbca04
+  description: Normal priority.
+- name: "priority: low"
+  color: cfd3d7
+  description: Nice to have or low urgency.
