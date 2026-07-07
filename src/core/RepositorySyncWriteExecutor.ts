@@ -38,18 +38,6 @@ interface RepositorySnapshot<T extends Record<string, unknown>> {
   parsedRows: Array<ParsedRepositoryRow<T>>;
 }
 
-interface ResolvedUpdates<T extends Record<string, unknown>> {
-  snapshot: RepositorySnapshot<T>;
-  resolvedUpdates: Array<ResolvedUpdate<T> | null>;
-  rowsToUpdate: Array<ResolvedUpdate<T>>;
-}
-
-interface ResolvedDeletes<T extends Record<string, unknown>> {
-  snapshot: RepositorySnapshot<T>;
-  targets: Array<ParsedRepositoryRow<T> | null>;
-  rowsToDelete: Array<ParsedRepositoryRow<T>>;
-}
-
 /**
  * Creates the strict synchronous write executor. It preserves today's sheet
  * semantics while giving the repository batcher a replaceable executor boundary
@@ -105,115 +93,12 @@ async function updateRepositoryRows<T extends Record<string, unknown>>(
   input: RepositoryWriteBatcherContext<T>,
   requests: Array<RepositoryUpdateRequest<T>>,
 ): Promise<Array<T | null>> {
-  const { adapter } = input;
+  const { adapter, sheetName, key, columns } = input;
 
   if (requests.length === 0) {
     return [];
   }
 
-  if (adapter.updateRowsByKey !== undefined) {
-    return updateRowsWithLockedKeyAdapter(input, requests);
-  }
-
-  return updateRowsWithDirectRowNumberAdapter(input, requests);
-}
-
-async function deleteRepositoryRowsById<T extends Record<string, unknown>>(
-  input: RepositoryWriteBatcherContext<T>,
-  ids: string[],
-): Promise<Array<T | null>> {
-  const { adapter } = input;
-
-  if (ids.length === 0) {
-    return [];
-  }
-
-  if (adapter.deleteRowsByKey !== undefined) {
-    return deleteRowsWithLockedKeyAdapter(input, ids);
-  }
-
-  return deleteRowsWithDirectRowNumberAdapter(input, ids);
-}
-
-async function updateRowsWithLockedKeyAdapter<
-  T extends Record<string, unknown>,
->(
-  input: RepositoryWriteBatcherContext<T>,
-  requests: Array<RepositoryUpdateRequest<T>>,
-): Promise<Array<T | null>> {
-  const resolved = await resolveUpdateRequests(input, requests);
-
-  if (resolved.rowsToUpdate.length === 0) {
-    return requests.map(() => null);
-  }
-
-  return applyLockedKeyBasedUpdates({
-    input,
-    ...resolved,
-  });
-}
-
-async function updateRowsWithDirectRowNumberAdapter<
-  T extends Record<string, unknown>,
->(
-  input: RepositoryWriteBatcherContext<T>,
-  requests: Array<RepositoryUpdateRequest<T>>,
-): Promise<Array<T | null>> {
-  const resolved = await resolveUpdateRequests(input, requests);
-
-  if (resolved.rowsToUpdate.length === 0) {
-    return requests.map(() => null);
-  }
-
-  return applyDirectRowNumberUpdates({
-    input,
-    resolvedUpdates: resolved.resolvedUpdates,
-    rowsToUpdate: resolved.rowsToUpdate,
-  });
-}
-
-async function deleteRowsWithLockedKeyAdapter<
-  T extends Record<string, unknown>,
->(
-  input: RepositoryWriteBatcherContext<T>,
-  ids: string[],
-): Promise<Array<T | null>> {
-  const resolved = await resolveDeleteRequests(input, ids);
-
-  if (resolved.rowsToDelete.length === 0) {
-    return ids.map(() => null);
-  }
-
-  return applyLockedKeyBasedDeletes({
-    input,
-    ...resolved,
-  });
-}
-
-async function deleteRowsWithDirectRowNumberAdapter<
-  T extends Record<string, unknown>,
->(
-  input: RepositoryWriteBatcherContext<T>,
-  ids: string[],
-): Promise<Array<T | null>> {
-  const resolved = await resolveDeleteRequests(input, ids);
-
-  if (resolved.rowsToDelete.length === 0) {
-    return ids.map(() => null);
-  }
-
-  return applyDirectRowNumberDeletes({
-    input,
-    targets: resolved.targets,
-    rowsToDelete: resolved.rowsToDelete,
-  });
-}
-
-async function resolveUpdateRequests<T extends Record<string, unknown>>(
-  input: RepositoryWriteBatcherContext<T>,
-  requests: Array<RepositoryUpdateRequest<T>>,
-): Promise<ResolvedUpdates<T>> {
-  const { key, columns } = input;
   const snapshot = await readRepositorySnapshot(input);
 
   const claimedIds = new Set<string>();
@@ -258,18 +143,36 @@ async function resolveUpdateRequests<T extends Record<string, unknown>>(
     (update): update is ResolvedUpdate<T> => update !== null,
   );
 
-  return {
-    snapshot,
+  if (rowsToUpdate.length === 0) {
+    return requests.map(() => null);
+  }
+
+  if (adapter.updateRowsByKey !== undefined) {
+    return applyLockedKeyBasedUpdates({
+      input,
+      snapshot,
+      resolvedUpdates,
+      rowsToUpdate,
+    });
+  }
+
+  return applyDirectRowNumberUpdates({
+    input,
     resolvedUpdates,
     rowsToUpdate,
-  };
+  });
 }
 
-async function resolveDeleteRequests<T extends Record<string, unknown>>(
+async function deleteRepositoryRowsById<T extends Record<string, unknown>>(
   input: RepositoryWriteBatcherContext<T>,
   ids: string[],
-): Promise<ResolvedDeletes<T>> {
-  const { key } = input;
+): Promise<Array<T | null>> {
+  const { adapter, sheetName, key, columns } = input;
+
+  if (ids.length === 0) {
+    return [];
+  }
+
   const snapshot = await readRepositorySnapshot(input);
 
   const claimedIds = new Set<string>();
@@ -295,11 +198,24 @@ async function resolveDeleteRequests<T extends Record<string, unknown>>(
     (target): target is ParsedRepositoryRow<T> => target !== null,
   );
 
-  return {
-    snapshot,
+  if (rowsToDelete.length === 0) {
+    return ids.map(() => null);
+  }
+
+  if (adapter.deleteRowsByKey !== undefined) {
+    return applyLockedKeyBasedDeletes({
+      input,
+      snapshot,
+      targets,
+      rowsToDelete,
+    });
+  }
+
+  return applyDirectRowNumberDeletes({
+    input,
     targets,
     rowsToDelete,
-  };
+  });
 }
 
 async function applyLockedKeyBasedUpdates<T extends Record<string, unknown>>(
