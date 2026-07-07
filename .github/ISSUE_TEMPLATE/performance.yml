@@ -1,0 +1,52 @@
+name: Performance benchmark
+description: Record or request a reproducible benchmark.
+title: "perf: "
+labels:
+  - "type: performance"
+  - "status: needs triage"
+body:
+  - type: textarea
+    id: scenario
+    attributes:
+      label: Scenario
+      description: What workflow is being benchmarked?
+      placeholder: Insert 10 users, query even ids, delete odd ids, list remaining users.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include branch, backend, script URL type, server, and dataset size.
+      placeholder: |
+        Date:
+        Branch:
+        Backend:
+        Dataset:
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Command or script
+      description: Paste the exact command or benchmark script used.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: results
+    attributes:
+      label: Results
+      description: Include setup and no-setup/steady-state timings separately.
+      placeholder: |
+        | Step | Total | No setup |
+        | --- | ---: | ---: |
+    validations:
+      required: true
+  - type: textarea
+    id: comparison
+    attributes:
+      label: Comparison and caveats
+      description: Compare with previous runs and note Apps Script/network/manual-step variance.
+    validations:
+      required: false
