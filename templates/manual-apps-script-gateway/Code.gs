@@ -5,18 +5,30 @@
 
 const TYPED_SHEETS_CONFIG_PROPERTY = "typedSheetsConfig";
 const TYPED_SHEETS_META_SHEET_NAME = "_typed_sheets_meta";
-
-/**
- * Adds the typed-sheets setup menu to the bound Google Sheet.
- *
- * @returns {void}
- */
-function onOpen() {
-  SpreadsheetApp.getUi()
-    .createMenu("typed-sheets")
-    .addItem("Setup gateway", "setupTypedSheets")
-    .addToUi();
-}
+const TYPED_SHEETS_GATEWAY_URL = "";
+const TYPED_SHEETS_INTERNAL_PREFIX = "_typed_sheets_";
+const TYPED_SHEETS_DATA_SHEET_PREFIX = "_typed_sheets_data_";
+const TYPED_SHEETS_META_MAPPING_KEY_PREFIX = "sheetMapping:";
+const TYPED_SHEETS_MAX_SHEET_NAME_LENGTH = 100;
+const TYPED_SHEETS_TASK_QUEUE_SHEET_NAME = "_typed_sheets_task_queue";
+const TYPED_SHEETS_TASK_QUEUE_HEADERS = [
+  "taskId",
+  "transactionId",
+  "transactionIndex",
+  "sequence",
+  "status",
+  "operation",
+  "sheetName",
+  "keyHeader",
+  "keyValue",
+  "expectedVersion",
+  "payloadJson",
+  "attempts",
+  "lastErrorCode",
+  "lastErrorMessage",
+  "createdAt",
+  "updatedAt",
+];
 
 /**
  * Generates and stores the gateway config for this spreadsheet.
@@ -28,9 +40,6 @@ function setupTypedSheets() {
   const configJson = JSON.stringify(config, null, 2);
 
   Logger.log(configJson);
-  SpreadsheetApp.getUi().alert(
-    "typed-sheets is ready for this Sheet. Open Apps Script execution logs, copy the generated JSON, and paste it back into the typed-sheets setup prompt.",
-  );
 
   return config;
 }
@@ -74,6 +83,21 @@ function doPost(e) {
       if (operation === "initializeSheet") {
         initializeSheet_(spreadsheet, request);
         return json_({ ok: true });
+      }
+
+      if (operation === "initializeSystemSheets") {
+        return json_({
+          ok: true,
+          systemSheets: initializeSystemSheets_(spreadsheet, request),
+        });
+      }
+
+      if (operation === "enqueueTasks") {
+        return json_(enqueueTasks_(spreadsheet, request));
+      }
+
+      if (operation === "processTaskQueue") {
+        return json_(processTaskQueue_(spreadsheet, request));
       }
 
       if (operation === "writeHeader") {
@@ -154,6 +178,9 @@ function validateOperation_(request) {
     "ping",
     "ensureSheet",
     "initializeSheet",
+    "initializeSystemSheets",
+    "enqueueTasks",
+    "processTaskQueue",
     "writeHeader",
     "readSheet",
     "appendRow",
@@ -173,9 +200,23 @@ function validateOperation_(request) {
     return operation;
   }
 
+  if (operation === "enqueueTasks") {
+    requireQueueTasks_(request.tasks, "tasks");
+    return operation;
+  }
+
+  if (operation === "processTaskQueue") {
+    requireProcessTaskQueueOptions_(request);
+    return operation;
+  }
+
   requireString_(request.sheetName, "sheetName");
 
   if (operation === "initializeSheet" || operation === "writeHeader") {
+    requireStringArray_(request.headers, "headers");
+  }
+
+  if (operation === "initializeSystemSheets") {
     requireStringArray_(request.headers, "headers");
   }
 
@@ -240,6 +281,949 @@ function initializeSheet_(spreadsheet, request) {
 
   if (isHeaderRowEmpty_(sheet)) {
     sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+  }
+}
+
+/**
+ * Creates hidden/protected system sheets for a logical repository table.
+ *
+ * The canonical sheet stores trusted row state while the visible sheet remains
+ * a projection. Protection is best-effort because Apps Script can deny it for
+ * some spreadsheet or account configurations, and Sheet owners can still edit
+ * protected sheets. Creation still succeeds and logs that protection could not
+ * be applied.
+ */
+function initializeSystemSheets_(spreadsheet, request) {
+  const logicalSheetName = requireProjectionSheetName_(
+    request.sheetName,
+    "sheetName",
+  );
+  const headers = requireStringArray_(request.headers, "headers");
+  const canonicalSheetName = getOrCreateCanonicalSheetName_(
+    spreadsheet,
+    logicalSheetName,
+  );
+
+  ensureProjectionSheet_(spreadsheet, logicalSheetName, headers);
+  ensureInternalSheet_(spreadsheet, canonicalSheetName, headers);
+  ensureInternalSheet_(
+    spreadsheet,
+    TYPED_SHEETS_TASK_QUEUE_SHEET_NAME,
+    TYPED_SHEETS_TASK_QUEUE_HEADERS,
+  );
+
+  return {
+    logicalSheetName: logicalSheetName,
+    canonicalSheetName: canonicalSheetName,
+    projectionSheetName: logicalSheetName,
+    taskQueueSheetName: TYPED_SHEETS_TASK_QUEUE_SHEET_NAME,
+  };
+}
+
+/**
+ * Appends one transaction worth of write tasks to the durable internal queue.
+ *
+ * The caller supplies stable task ids and transaction ids. The gateway assigns
+ * monotonic sequence values under the document lock so processors can replay
+ * write intent in enqueue order.
+ */
+function enqueueTasks_(spreadsheet, request) {
+  const tasks = requireQueueTasks_(request.tasks, "tasks");
+  const queueSheet = ensureTaskQueueSheet_(spreadsheet);
+  const queueState = readTaskQueueState_(queueSheet);
+  const now = new Date().toISOString();
+  const seenTaskIds = Object.create(null);
+  const rows = [];
+  const enqueuedTasks = [];
+
+  tasks.forEach(function(task, index) {
+    if (seenTaskIds[task.taskId]) {
+      throw gatewayError_(
+        "invalid_request",
+        "tasks must not contain duplicate taskId values",
+      );
+    }
+
+    const existingTask = queueState.tasksById[task.taskId];
+
+    if (existingTask && isSameQueuedTask_(existingTask, task)) {
+      enqueuedTasks.push({
+        taskId: task.taskId,
+        sequence: existingTask.sequence,
+      });
+      seenTaskIds[task.taskId] = true;
+      return;
+    }
+
+    if (existingTask) {
+      throw gatewayError_(
+        "duplicate_task",
+        "Task already exists: " + task.taskId,
+      );
+    }
+
+    seenTaskIds[task.taskId] = true;
+
+    const sequence = queueState.maxSequence + rows.length + 1;
+
+    rows.push([
+      task.taskId,
+      task.transactionId,
+      task.transactionIndex,
+      sequence,
+      "pending",
+      task.operation,
+      task.sheetName,
+      task.keyHeader,
+      task.keyValue,
+      task.expectedVersion === null ? "" : task.expectedVersion,
+      task.payloadJson,
+      0,
+      "",
+      "",
+      now,
+      now,
+    ]);
+    enqueuedTasks.push({
+      taskId: task.taskId,
+      sequence: sequence,
+    });
+  });
+
+  if (rows.length > 0) {
+    queueSheet
+      .getRange(
+        queueSheet.getLastRow() + 1,
+        1,
+        rows.length,
+        TYPED_SHEETS_TASK_QUEUE_HEADERS.length,
+      )
+      .setValues(rows);
+  }
+
+  return {
+    ok: true,
+    tasks: enqueuedTasks,
+  };
+}
+
+function ensureTaskQueueSheet_(spreadsheet) {
+  ensureInternalSheet_(
+    spreadsheet,
+    TYPED_SHEETS_TASK_QUEUE_SHEET_NAME,
+    TYPED_SHEETS_TASK_QUEUE_HEADERS,
+  );
+
+  const queueSheet = getSheet_(
+    spreadsheet,
+    TYPED_SHEETS_TASK_QUEUE_SHEET_NAME,
+  );
+  const headerValues = queueSheet
+    .getRange(1, 1, 1, TYPED_SHEETS_TASK_QUEUE_HEADERS.length)
+    .getValues()[0]
+    .map(function(value) {
+      return String(value);
+    });
+
+  assertExpectedHeaders_(
+    headerValues,
+    TYPED_SHEETS_TASK_QUEUE_HEADERS,
+    "enqueueTasks",
+  );
+
+  return queueSheet;
+}
+
+function readTaskQueueState_(queueSheet) {
+  const lastRow = queueSheet.getLastRow();
+  const state = {
+    maxSequence: 0,
+    tasksById: Object.create(null),
+  };
+
+  if (lastRow < 2) {
+    return state;
+  }
+
+  const taskIdIndex = TYPED_SHEETS_TASK_QUEUE_HEADERS.indexOf("taskId");
+  const transactionIdIndex =
+    TYPED_SHEETS_TASK_QUEUE_HEADERS.indexOf("transactionId");
+  const transactionIndexIndex =
+    TYPED_SHEETS_TASK_QUEUE_HEADERS.indexOf("transactionIndex");
+  const sequenceIndex = TYPED_SHEETS_TASK_QUEUE_HEADERS.indexOf("sequence");
+  const operationIndex = TYPED_SHEETS_TASK_QUEUE_HEADERS.indexOf("operation");
+  const sheetNameIndex = TYPED_SHEETS_TASK_QUEUE_HEADERS.indexOf("sheetName");
+  const keyHeaderIndex = TYPED_SHEETS_TASK_QUEUE_HEADERS.indexOf("keyHeader");
+  const keyValueIndex = TYPED_SHEETS_TASK_QUEUE_HEADERS.indexOf("keyValue");
+  const expectedVersionIndex =
+    TYPED_SHEETS_TASK_QUEUE_HEADERS.indexOf("expectedVersion");
+  const payloadJsonIndex =
+    TYPED_SHEETS_TASK_QUEUE_HEADERS.indexOf("payloadJson");
+  const rows = queueSheet
+    .getRange(
+      2,
+      1,
+      lastRow - 1,
+      TYPED_SHEETS_TASK_QUEUE_HEADERS.length,
+    )
+    .getValues();
+
+  rows.forEach(function(row) {
+    const taskId = String(row[taskIdIndex] || "");
+    const sequence = Number(row[sequenceIndex]);
+
+    if (taskId !== "") {
+      state.tasksById[taskId] = {
+        taskId: taskId,
+        transactionId: String(row[transactionIdIndex] || ""),
+        transactionIndex: Number(row[transactionIndexIndex]),
+        sequence: sequence,
+        operation: String(row[operationIndex] || ""),
+        sheetName: String(row[sheetNameIndex] || ""),
+        keyHeader: String(row[keyHeaderIndex] || ""),
+        keyValue: String(row[keyValueIndex] || ""),
+        expectedVersion: row[expectedVersionIndex] === ""
+          || row[expectedVersionIndex] === null
+          ? null
+          : Number(row[expectedVersionIndex]),
+        payloadJson: String(row[payloadJsonIndex] || ""),
+      };
+    }
+
+    if (Number.isFinite(sequence) && sequence > state.maxSequence) {
+      state.maxSequence = sequence;
+    }
+  });
+
+  return state;
+}
+
+function isSameQueuedTask_(existingTask, task) {
+  return existingTask.transactionId === task.transactionId
+    && existingTask.transactionIndex === task.transactionIndex
+    && existingTask.operation === task.operation
+    && existingTask.sheetName === task.sheetName
+    && existingTask.keyHeader === task.keyHeader
+    && existingTask.keyValue === task.keyValue
+    && existingTask.expectedVersion === task.expectedVersion
+    && existingTask.payloadJson === task.payloadJson;
+}
+
+/**
+ * Processes pending queue transaction groups into canonical sheets.
+ *
+ * This first processor intentionally keeps the lock for the full claim, apply,
+ * and status update cycle. It applies complete pending groups in sequence
+ * order, rewrites affected canonical sheets in bulk, and leaves projection sync
+ * and stale processing recovery for later queue branches.
+ */
+function processTaskQueue_(spreadsheet, request) {
+  const options = requireProcessTaskQueueOptions_(request);
+  const queueSheet = ensureTaskQueueSheet_(spreadsheet);
+  const queuedTasks = readQueuedTasks_(queueSheet);
+  const pendingGroups = groupPendingTasksByTransaction_(queuedTasks)
+    .slice(0, options.maxTransactions);
+  const now = new Date().toISOString();
+  const result = {
+    ok: true,
+    processedTransactions: 0,
+    failedTransactions: 0,
+    processedTasks: 0,
+    failedTasks: 0,
+    remainingPendingTasks: 0,
+  };
+
+  pendingGroups.forEach(function(group) {
+    markQueueTasks_(queueSheet, group.tasks, {
+      status: "processing",
+      updatedAt: now,
+    });
+
+    try {
+      applyQueueTransaction_(spreadsheet, group.tasks);
+      markQueueTasks_(queueSheet, group.tasks, {
+        status: "done",
+        payloadJson: JSON.stringify({ redacted: true }),
+        lastErrorCode: "",
+        lastErrorMessage: "",
+        updatedAt: new Date().toISOString(),
+      });
+
+      result.processedTransactions += 1;
+      result.processedTasks += group.tasks.length;
+    } catch (error) {
+      const code = error && error.code ? error.code : "internal_error";
+      const message = error && error.message ? error.message : String(error);
+
+      markQueueTasks_(queueSheet, group.tasks, {
+        status: "failed",
+        lastErrorCode: code,
+        lastErrorMessage: message,
+        updatedAt: new Date().toISOString(),
+      });
+
+      result.failedTransactions += 1;
+      result.failedTasks += group.tasks.length;
+    }
+  });
+
+  result.remainingPendingTasks = readQueuedTasks_(queueSheet).filter(function(task) {
+    return task.status === "pending";
+  }).length;
+
+  return result;
+}
+
+function readQueuedTasks_(queueSheet) {
+  const lastRow = queueSheet.getLastRow();
+
+  if (lastRow < 2) {
+    return [];
+  }
+
+  const rows = queueSheet
+    .getRange(
+      2,
+      1,
+      lastRow - 1,
+      TYPED_SHEETS_TASK_QUEUE_HEADERS.length,
+    )
+    .getValues();
+
+  return rows.map(function(row, index) {
+    return parseQueuedTaskRow_(row, index + 2);
+  }).sort(function(left, right) {
+    return left.sequence - right.sequence
+      || left.transactionIndex - right.transactionIndex;
+  });
+}
+
+function parseQueuedTaskRow_(row, rowNumber) {
+  const task = {
+    rowNumber: rowNumber,
+    taskId: String(row[0] || ""),
+    transactionId: String(row[1] || ""),
+    transactionIndex: Number(row[2]),
+    sequence: Number(row[3]),
+    status: String(row[4] || ""),
+    operation: String(row[5] || ""),
+    sheetName: String(row[6] || ""),
+    keyHeader: String(row[7] || ""),
+    keyValue: String(row[8] || ""),
+    expectedVersion: row[9] === "" || row[9] === null ? null : Number(row[9]),
+    payloadJson: String(row[10] || ""),
+    attempts: Number(row[11] || 0),
+  };
+
+  if (
+    task.taskId === ""
+    || task.transactionId === ""
+    || !Number.isInteger(task.transactionIndex)
+    || task.transactionIndex < 0
+    || !Number.isInteger(task.sequence)
+    || task.sequence < 1
+    || ["pending", "processing", "done", "failed"].indexOf(task.status) === -1
+    || ["insert", "update", "delete"].indexOf(task.operation) === -1
+    || task.sheetName === ""
+    || task.keyHeader === ""
+    || task.keyValue === ""
+    || (task.operation === "insert" && task.expectedVersion !== null)
+    || (task.operation !== "insert" && !Number.isFinite(task.expectedVersion))
+  ) {
+    throw gatewayError_(
+      "invalid_task",
+      "Invalid task queue row at " + rowNumber,
+    );
+  }
+
+  return task;
+}
+
+function groupPendingTasksByTransaction_(queuedTasks) {
+  const groupsById = Object.create(null);
+  const groups = [];
+
+  queuedTasks.forEach(function(task) {
+    if (!groupsById[task.transactionId]) {
+      groupsById[task.transactionId] = {
+        transactionId: task.transactionId,
+        firstSequence: task.sequence,
+        allPending: true,
+        tasks: [],
+      };
+      groups.push(groupsById[task.transactionId]);
+    }
+
+    if (task.status !== "pending") {
+      groupsById[task.transactionId].allPending = false;
+    }
+
+    groupsById[task.transactionId].firstSequence = Math.min(
+      groupsById[task.transactionId].firstSequence,
+      task.sequence,
+    );
+    groupsById[task.transactionId].tasks.push(task);
+  });
+
+  groups.forEach(function(group) {
+    group.tasks.sort(function(left, right) {
+      return left.transactionIndex - right.transactionIndex
+        || left.sequence - right.sequence;
+    });
+  });
+
+  return groups
+    .filter(function(group) {
+      return group.allPending;
+    })
+    .sort(function(left, right) {
+      return left.firstSequence - right.firstSequence;
+    });
+}
+
+function applyQueueTransaction_(spreadsheet, tasks) {
+  const tables = Object.create(null);
+  const affectedSheetNames = [];
+
+  tasks.forEach(function(task) {
+    if (!tables[task.sheetName]) {
+      tables[task.sheetName] = readCanonicalTableForTask_(spreadsheet, task);
+      affectedSheetNames.push(task.sheetName);
+    }
+
+    applyTaskToCanonicalTable_(tables[task.sheetName], task);
+  });
+
+  affectedSheetNames.sort().forEach(function(sheetName) {
+    writeCanonicalTable_(tables[sheetName]);
+  });
+}
+
+function readCanonicalTableForTask_(spreadsheet, task) {
+  const mapping = getCanonicalSheetMapping_(spreadsheet, task.sheetName);
+
+  if (!mapping) {
+    throw gatewayError_(
+      "invalid_task",
+      "Missing canonical sheet mapping for " + task.sheetName,
+    );
+  }
+
+  const sheet = getSheet_(spreadsheet, mapping.canonicalSheetName);
+  const lastRow = sheet.getLastRow();
+  const lastColumn = sheet.getLastColumn();
+
+  if (lastRow === 0 || lastColumn === 0) {
+    throw gatewayError_(
+      "schema_drift",
+      "Canonical sheet is empty for " + task.sheetName,
+    );
+  }
+
+  const values = sheet.getRange(1, 1, lastRow, lastColumn).getValues();
+  const headers = (values[0] || []).map(function(value) {
+    return String(value);
+  });
+  const keyIndex = headers.indexOf(task.keyHeader);
+  const versionIndex = headers.indexOf("_version");
+
+  if (keyIndex === -1) {
+    throw gatewayError_("schema_drift", "Missing key header: " + task.keyHeader);
+  }
+
+  if (versionIndex === -1) {
+    throw gatewayError_("schema_drift", "Missing version header: _version");
+  }
+
+  const rows = values.slice(1).map(function(row) {
+    return row.map(toSheetCell_);
+  });
+  const rowsByKey = Object.create(null);
+
+  rows.forEach(function(row, index) {
+    const keyValue = String(row[keyIndex]);
+
+    if (rowsByKey[keyValue] !== undefined) {
+      throw gatewayError_("schema_drift", "Duplicate key \"" + keyValue + "\"");
+    }
+
+    rowsByKey[keyValue] = index;
+  });
+
+  return {
+    sheet: sheet,
+    headers: headers,
+    keyIndex: keyIndex,
+    versionIndex: versionIndex,
+    rows: rows,
+    rowsByKey: rowsByKey,
+  };
+}
+
+function applyTaskToCanonicalTable_(table, task) {
+  if (task.operation === "insert") {
+    applyInsertTask_(table, task);
+    return;
+  }
+
+  if (task.operation === "update") {
+    applyUpdateTask_(table, task);
+    return;
+  }
+
+  applyDeleteTask_(table, task);
+}
+
+function applyInsertTask_(table, task) {
+  if (table.rowsByKey[task.keyValue] !== undefined) {
+    throw gatewayError_("conflict", "Row \"" + task.keyValue + "\" already exists");
+  }
+
+  const payload = requireTaskPayloadObject_(task);
+  const rowObject = requirePayloadObject_(payload.row, "payload.row");
+  const row = rowObjectToCanonicalCells_(table, rowObject, null);
+
+  assertTaskRowMatchesKey_(table, row, task);
+  table.rowsByKey[task.keyValue] = table.rows.length;
+  table.rows.push(row);
+}
+
+function applyUpdateTask_(table, task) {
+  const rowIndex = table.rowsByKey[task.keyValue];
+
+  if (rowIndex === undefined) {
+    throw gatewayError_("conflict", "Row \"" + task.keyValue + "\" is missing");
+  }
+
+  assertCurrentVersion_(table, rowIndex, task);
+
+  const payload = requireTaskPayloadObject_(task);
+  const rowToWrite = requirePayloadObject_(
+    payload.rowToWrite,
+    "payload.rowToWrite",
+  );
+  const versionToWrite = requireTaskFiniteNumber_(
+    rowToWrite._version,
+    "payload.rowToWrite._version",
+  );
+
+  if (versionToWrite <= task.expectedVersion) {
+    throw gatewayError_(
+      "invalid_task",
+      "payload.rowToWrite._version must advance expectedVersion",
+    );
+  }
+
+  table.rows[rowIndex] = rowObjectToCanonicalCells_(
+    table,
+    rowToWrite,
+    table.rows[rowIndex],
+  );
+  assertTaskRowMatchesKey_(table, table.rows[rowIndex], task);
+}
+
+function applyDeleteTask_(table, task) {
+  const rowIndex = table.rowsByKey[task.keyValue];
+
+  if (rowIndex === undefined) {
+    throw gatewayError_("conflict", "Row \"" + task.keyValue + "\" is missing");
+  }
+
+  assertCurrentVersion_(table, rowIndex, task);
+  assertDeletePayloadMatchesTask_(task);
+
+  table.rows.splice(rowIndex, 1);
+  table.rowsByKey = Object.create(null);
+  table.rows.forEach(function(row, index) {
+    table.rowsByKey[String(row[table.keyIndex])] = index;
+  });
+}
+
+function assertDeletePayloadMatchesTask_(task) {
+  const payload = requireTaskPayloadObject_(task);
+  const rowToDelete = requirePayloadObject_(
+    payload.rowToDelete,
+    "payload.rowToDelete",
+  );
+  const versionToDelete = requireTaskFiniteNumber_(
+    rowToDelete._version,
+    "payload.rowToDelete._version",
+  );
+
+  if (String(rowToDelete[task.keyHeader]) !== task.keyValue) {
+    throw gatewayError_(
+      "invalid_task",
+      "payload.rowToDelete key must match queued key",
+    );
+  }
+
+  if (versionToDelete !== task.expectedVersion) {
+    throw gatewayError_(
+      "invalid_task",
+      "payload.rowToDelete._version must match expectedVersion",
+    );
+  }
+}
+
+function assertCurrentVersion_(table, rowIndex, task) {
+  const currentVersion = Number(table.rows[rowIndex][table.versionIndex]);
+
+  if (currentVersion !== task.expectedVersion) {
+    throw gatewayError_(
+      "conflict",
+      "Stale task for key \"" + task.keyValue + "\"",
+    );
+  }
+}
+
+function assertTaskRowMatchesKey_(table, row, task) {
+  if (String(row[table.keyIndex]) !== task.keyValue) {
+    throw gatewayError_(
+      "invalid_task",
+      "Task payload key does not match queued key for " + task.taskId,
+    );
+  }
+}
+
+function requireTaskPayloadObject_(task) {
+  try {
+    return requirePayloadObject_(
+      JSON.parse(task.payloadJson),
+      "payloadJson",
+    );
+  } catch (error) {
+    if (error && error.code) {
+      throw error;
+    }
+
+    throw gatewayError_("invalid_task", "Invalid payloadJson for " + task.taskId);
+  }
+}
+
+function requirePayloadObject_(value, name) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw gatewayError_("invalid_task", name + " must be an object");
+  }
+
+  return value;
+}
+
+function requireTaskFiniteNumber_(value, name) {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw gatewayError_("invalid_task", name + " must be a number");
+  }
+
+  return value;
+}
+
+function rowObjectToCanonicalCells_(table, rowObject, existingRow) {
+  return table.headers.map(function(header, index) {
+    if (Object.prototype.hasOwnProperty.call(rowObject, header)) {
+      return toSheetCell_(rowObject[header]);
+    }
+
+    return existingRow ? existingRow[index] : null;
+  });
+}
+
+function writeCanonicalTable_(table) {
+  table.sheet
+    .getRange(1, 1, 1, table.headers.length)
+    .setValues([table.headers]);
+
+  if (table.rows.length > 0) {
+    table.sheet
+      .getRange(2, 1, table.rows.length, table.headers.length)
+      .setValues(table.rows);
+  }
+
+  clearTrailingCanonicalRows_(table.sheet, table.rows.length + 2);
+  clearTrailingCanonicalColumns_(table.sheet, table.headers.length + 1);
+}
+
+function clearTrailingCanonicalRows_(sheet, firstTrailingRow) {
+  const lastRow = sheet.getLastRow();
+  const lastColumn = sheet.getLastColumn();
+
+  if (lastRow >= firstTrailingRow && lastColumn > 0) {
+    sheet
+      .getRange(firstTrailingRow, 1, lastRow - firstTrailingRow + 1, lastColumn)
+      .clearContent();
+  }
+}
+
+function clearTrailingCanonicalColumns_(sheet, firstTrailingColumn) {
+  const lastRow = sheet.getLastRow();
+  const lastColumn = sheet.getLastColumn();
+
+  if (lastColumn >= firstTrailingColumn && lastRow > 0) {
+    sheet
+      .getRange(1, firstTrailingColumn, lastRow, lastColumn - firstTrailingColumn + 1)
+      .clearContent();
+  }
+}
+
+function markQueueTasks_(queueSheet, tasks, patch) {
+  const statusIndex = TYPED_SHEETS_TASK_QUEUE_HEADERS.indexOf("status") + 1;
+  const payloadJsonIndex =
+    TYPED_SHEETS_TASK_QUEUE_HEADERS.indexOf("payloadJson") + 1;
+  const lastErrorCodeIndex =
+    TYPED_SHEETS_TASK_QUEUE_HEADERS.indexOf("lastErrorCode") + 1;
+  const lastErrorMessageIndex =
+    TYPED_SHEETS_TASK_QUEUE_HEADERS.indexOf("lastErrorMessage") + 1;
+  const updatedAtIndex =
+    TYPED_SHEETS_TASK_QUEUE_HEADERS.indexOf("updatedAt") + 1;
+
+  tasks.forEach(function(task) {
+    if (patch.status !== undefined) {
+      queueSheet.getRange(task.rowNumber, statusIndex, 1, 1).setValues([
+        [patch.status],
+      ]);
+    }
+
+    if (patch.payloadJson !== undefined) {
+      queueSheet.getRange(task.rowNumber, payloadJsonIndex, 1, 1).setValues([
+        [patch.payloadJson],
+      ]);
+    }
+
+    if (patch.lastErrorCode !== undefined) {
+      queueSheet.getRange(task.rowNumber, lastErrorCodeIndex, 1, 1).setValues([
+        [patch.lastErrorCode],
+      ]);
+    }
+
+    if (patch.lastErrorMessage !== undefined) {
+      queueSheet
+        .getRange(task.rowNumber, lastErrorMessageIndex, 1, 1)
+        .setValues([[patch.lastErrorMessage]]);
+    }
+
+    if (patch.updatedAt !== undefined) {
+      queueSheet.getRange(task.rowNumber, updatedAtIndex, 1, 1).setValues([
+        [patch.updatedAt],
+      ]);
+    }
+  });
+}
+
+function getOrCreateCanonicalSheetName_(spreadsheet, logicalSheetName) {
+  const existingMapping = getCanonicalSheetMapping_(
+    spreadsheet,
+    logicalSheetName,
+  );
+
+  if (existingMapping) {
+    return existingMapping.canonicalSheetName;
+  }
+
+  const hash = createShortHash_(logicalSheetName);
+  let collisionIndex = 0;
+
+  while (collisionIndex < 100) {
+    const canonicalSheetName = createCanonicalSheetName_(
+      logicalSheetName,
+      hash,
+      collisionIndex,
+    );
+
+    if (!spreadsheet.getSheetByName(canonicalSheetName)) {
+      persistCanonicalSheetMapping_(spreadsheet, {
+        logicalSheetName: logicalSheetName,
+        canonicalSheetName: canonicalSheetName,
+        projectionSheetName: logicalSheetName,
+      });
+
+      return canonicalSheetName;
+    }
+
+    collisionIndex += 1;
+  }
+
+  throw gatewayError_(
+    "system_sheet_name_collision",
+    "Could not allocate a canonical sheet name for " + logicalSheetName,
+  );
+}
+
+function createCanonicalSheetName_(logicalSheetName, hash, collisionIndex) {
+  const suffix = "_" + hash + (collisionIndex === 0 ? "" : "_" + collisionIndex);
+  const maxSlugLength =
+    TYPED_SHEETS_MAX_SHEET_NAME_LENGTH
+    - TYPED_SHEETS_DATA_SHEET_PREFIX.length
+    - suffix.length;
+  const slug = createSheetNameSlug_(logicalSheetName).slice(
+    0,
+    Math.max(1, maxSlugLength),
+  );
+
+  return TYPED_SHEETS_DATA_SHEET_PREFIX + slug + suffix;
+}
+
+function createSheetNameSlug_(value) {
+  const slug = value
+    .replace(/[^A-Za-z0-9_-]/g, "_")
+    .replace(/_+/g, "_")
+    .replace(/^_+|_+$/g, "");
+
+  return slug || "sheet";
+}
+
+function createShortHash_(value) {
+  const bytes = Utilities.computeDigest(
+    Utilities.DigestAlgorithm.SHA_256,
+    value,
+  );
+  let hex = "";
+
+  for (let index = 0; index < bytes.length; index += 1) {
+    const byte = bytes[index];
+    const unsignedByte = byte < 0 ? byte + 256 : byte;
+    hex += ("0" + unsignedByte.toString(16)).slice(-2);
+  }
+
+  return hex.slice(0, 12);
+}
+
+function getCanonicalSheetMapping_(spreadsheet, logicalSheetName) {
+  const sheet = spreadsheet.getSheetByName(TYPED_SHEETS_META_SHEET_NAME);
+
+  if (!sheet) {
+    return null;
+  }
+
+  const rows = readMetaRows_(sheet);
+  const key = TYPED_SHEETS_META_MAPPING_KEY_PREFIX + logicalSheetName;
+
+  for (let index = 0; index < rows.length; index += 1) {
+    if (rows[index][0] !== key) {
+      continue;
+    }
+
+    try {
+      const mapping = JSON.parse(String(rows[index][1]));
+
+      if (
+        mapping
+        && mapping.logicalSheetName === logicalSheetName
+        && typeof mapping.canonicalSheetName === "string"
+        && mapping.canonicalSheetName.trim() !== ""
+      ) {
+        return mapping;
+      }
+    } catch (error) {
+      throw gatewayError_(
+        "invalid_meta",
+        "Invalid canonical sheet mapping for " + logicalSheetName,
+      );
+    }
+  }
+
+  return null;
+}
+
+function persistCanonicalSheetMapping_(spreadsheet, mapping) {
+  const sheet = ensureMetaSheetStructure_(spreadsheet);
+  const rows = readMetaRows_(sheet);
+  const key = TYPED_SHEETS_META_MAPPING_KEY_PREFIX + mapping.logicalSheetName;
+  const value = JSON.stringify(mapping);
+
+  for (let index = 0; index < rows.length; index += 1) {
+    if (rows[index][0] === key) {
+      sheet.getRange(index + 2, 2, 1, 1).setValues([[value]]);
+      return;
+    }
+  }
+
+  sheet.getRange(sheet.getLastRow() + 1, 1, 1, 2).setValues([[key, value]]);
+}
+
+function readMetaRows_(sheet) {
+  const lastRow = sheet.getLastRow();
+
+  if (lastRow < 2) {
+    return [];
+  }
+
+  return sheet.getRange(2, 1, lastRow - 1, 2).getValues().map(function(row) {
+    return [String(row[0] || ""), String(row[1] || "")];
+  });
+}
+
+function requireProjectionSheetName_(value, name) {
+  const sheetName = requireString_(value, name);
+
+  if (sheetName.indexOf(TYPED_SHEETS_INTERNAL_PREFIX) === 0) {
+    throw gatewayError_(
+      "invalid_request",
+      name + " must not start with " + TYPED_SHEETS_INTERNAL_PREFIX,
+    );
+  }
+
+  return sheetName;
+}
+
+function ensureProjectionSheet_(spreadsheet, sheetName, headers) {
+  let sheet = spreadsheet.getSheetByName(sheetName);
+
+  if (!sheet) {
+    sheet = spreadsheet.insertSheet(sheetName);
+  }
+
+  if (isHeaderRowEmpty_(sheet)) {
+    sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+  }
+}
+
+function ensureInternalSheet_(spreadsheet, sheetName, headers) {
+  let sheet = spreadsheet.getSheetByName(sheetName);
+
+  if (!sheet) {
+    sheet = spreadsheet.insertSheet(sheetName);
+  }
+
+  if (isHeaderRowEmpty_(sheet)) {
+    sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+  }
+
+  hideInternalSheet_(sheet);
+  protectInternalSheet_(sheet, sheetName);
+}
+
+function hideInternalSheet_(sheet) {
+  sheet.hideSheet();
+}
+
+function protectInternalSheet_(sheet, sheetName) {
+  try {
+    const protection = sheet.protect();
+    protection.setDescription("typed-sheets internal sheet: " + sheetName);
+
+    if (typeof protection.setWarningOnly === "function") {
+      protection.setWarningOnly(false);
+    }
+
+    if (
+      typeof protection.getEditors === "function"
+      && typeof protection.removeEditors === "function"
+    ) {
+      protection.removeEditors(protection.getEditors());
+    }
+
+    if (
+      typeof protection.canDomainEdit === "function"
+      && protection.canDomainEdit()
+      && typeof protection.setDomainEdit === "function"
+    ) {
+      protection.setDomainEdit(false);
+    }
+  } catch (error) {
+    Logger.log(
+      "typed-sheets could not protect internal sheet "
+        + sheetName
+        + ": "
+        + (error && error.message ? error.message : String(error)),
+    );
   }
 }
 
@@ -696,6 +1680,108 @@ function requireUpdateRows_(value, name) {
   return value;
 }
 
+function requireQueueTasks_(value, name) {
+  if (!Array.isArray(value) || value.length === 0) {
+    throw gatewayError_("invalid_request", name + " must be a non-empty array");
+  }
+
+  return value.map(function(task, index) {
+    const taskName = name + "[" + index + "]";
+
+    if (!task || typeof task !== "object" || Array.isArray(task)) {
+      throw gatewayError_("invalid_request", taskName + " must be an object");
+    }
+
+    const operation = requireQueueOperation_(
+      task.operation,
+      taskName + ".operation",
+    );
+
+    return {
+      taskId: requireString_(task.taskId, taskName + ".taskId"),
+      transactionId: requireString_(
+        task.transactionId,
+        taskName + ".transactionId",
+      ),
+      transactionIndex: requireNonNegativeInteger_(
+        task.transactionIndex,
+        taskName + ".transactionIndex",
+      ),
+      operation: operation,
+      sheetName: requireProjectionSheetName_(
+        task.sheetName,
+        taskName + ".sheetName",
+      ),
+      keyHeader: requireString_(task.keyHeader, taskName + ".keyHeader"),
+      keyValue: requireString_(task.keyValue, taskName + ".keyValue"),
+      expectedVersion: requireQueueExpectedVersion_(
+        task.expectedVersion,
+        operation,
+        taskName + ".expectedVersion",
+      ),
+      payloadJson: requireJsonObjectString_(
+        task.payloadJson,
+        taskName + ".payloadJson",
+      ),
+    };
+  });
+}
+
+function requireProcessTaskQueueOptions_(request) {
+  const maxTransactions = request.maxTransactions === undefined
+    ? 1
+    : requirePositiveInteger_(request.maxTransactions, "maxTransactions");
+
+  return {
+    maxTransactions: maxTransactions,
+  };
+}
+
+function requireQueueOperation_(value, name) {
+  const operation = requireString_(value, name);
+
+  if (["insert", "update", "delete"].indexOf(operation) === -1) {
+    throw gatewayError_(
+      "invalid_request",
+      name + " must be insert, update, or delete",
+    );
+  }
+
+  return operation;
+}
+
+function requireQueueExpectedVersion_(value, operation, name) {
+  if (operation === "insert") {
+    if (value === null || value === "" || value === undefined) {
+      return null;
+    }
+
+    throw gatewayError_(
+      "invalid_request",
+      name + " must be null or blank for insert tasks",
+    );
+  }
+
+  return requireFiniteNumber_(value, name);
+}
+
+function requireJsonObjectString_(value, name) {
+  const json = requireString_(value, name);
+  let parsed;
+
+  try {
+    parsed = JSON.parse(json);
+  } catch (error) {
+    throw gatewayError_("invalid_request", name + " must be valid JSON");
+  }
+
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw gatewayError_("invalid_request", name + " must encode an object");
+  }
+
+  return json;
+}
+
 function requirePositiveInteger_(value, name) {
   const numberValue = Number(value);
 
@@ -704,6 +1790,17 @@ function requirePositiveInteger_(value, name) {
   }
 
   return numberValue;
+}
+
+function requireNonNegativeInteger_(value, name) {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
+    throw gatewayError_(
+      "invalid_request",
+      name + " must be a non-negative integer",
+    );
+  }
+
+  return value;
 }
 
 function requirePositiveIntegerArray_(value, name) {
@@ -805,12 +1902,12 @@ function createTypedSheetsConfig_() {
   const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
   const activeSheet = spreadsheet.getActiveSheet();
   const lock = LockService.getDocumentLock();
-  const gatewayUrl = promptGatewayUrl_();
 
   lock.waitLock(30000);
 
   try {
     const existing = getTypedSheetsConfig_();
+    const gatewayUrl = getGatewayUrl_(existing);
     const gatewaySecret = existing && existing.auth.gatewaySecret
       ? existing.auth.gatewaySecret
       : Utilities.getUuid();
@@ -847,39 +1944,62 @@ function getTypedSheetsConfig_() {
 }
 
 function ensureMetaSheet_(spreadsheet, config) {
-  const sheet = spreadsheet.getSheetByName(TYPED_SHEETS_META_SHEET_NAME)
-    || spreadsheet.insertSheet(TYPED_SHEETS_META_SHEET_NAME);
-
-  sheet.clear();
-  sheet.hideSheet();
-  sheet.getRange(1, 1, 1, 2).setValues([["key", "value"]]);
-  sheet.getRange(2, 1, 5, 2).setValues([
+  const sheet = ensureMetaSheetStructure_(spreadsheet);
+  const preservedRows = readMetaRows_(sheet).filter(function(row) {
+    return row[0].indexOf(TYPED_SHEETS_META_MAPPING_KEY_PREFIX) === 0;
+  });
+  const rows = [
     ["spreadsheetUrl", config.spreadsheetUrl],
     ["defaultSheetName", config.defaultSheetName],
     ["gatewayUrl", config.auth.gatewayUrl],
     ["authType", config.auth.type],
     ["connectedAt", new Date().toISOString()],
-  ]);
+  ].concat(preservedRows);
+
+  sheet.clear();
+  sheet.hideSheet();
+  sheet.getRange(1, 1, 1, 2).setValues([["key", "value"]]);
+  sheet.getRange(2, 1, rows.length, 2).setValues(rows);
 }
 
-function promptGatewayUrl_() {
-  const ui = SpreadsheetApp.getUi();
-  const response = ui.prompt(
-    "typed-sheets: Paste Web App URL",
-    "Use the deployed Apps Script Web App URL that ends with /exec. You can copy it from Deploy > Manage deployments.",
-    ui.ButtonSet.OK_CANCEL,
-  );
+function ensureMetaSheetStructure_(spreadsheet) {
+  const sheet = spreadsheet.getSheetByName(TYPED_SHEETS_META_SHEET_NAME)
+    || spreadsheet.insertSheet(TYPED_SHEETS_META_SHEET_NAME);
 
-  if (response.getSelectedButton() !== ui.Button.OK) {
-    throw gatewayError_("setup_cancelled", "Gateway setup was cancelled");
+  sheet.hideSheet();
+
+  if (isHeaderRowEmpty_(sheet)) {
+    sheet.getRange(1, 1, 1, 2).setValues([["key", "value"]]);
   }
 
-  const gatewayUrl = response.getResponseText().trim();
+  return sheet;
+}
 
+function getGatewayUrl_(existingConfig) {
+  if (TYPED_SHEETS_GATEWAY_URL.trim() !== "") {
+    return requireGatewayUrl_(TYPED_SHEETS_GATEWAY_URL.trim());
+  }
+
+  if (
+    existingConfig
+    && existingConfig.auth
+    && typeof existingConfig.auth.gatewayUrl === "string"
+    && existingConfig.auth.gatewayUrl.trim() !== ""
+  ) {
+    return requireGatewayUrl_(existingConfig.auth.gatewayUrl.trim());
+  }
+
+  throw gatewayError_(
+    "missing_gateway_url",
+    "Set TYPED_SHEETS_GATEWAY_URL to the deployed Web App URL that ends with /exec before running setupTypedSheets()",
+  );
+}
+
+function requireGatewayUrl_(gatewayUrl) {
   if (!/^https:\/\/script\.google\.com\/macros\/s\/[^/]+\/exec$/.test(gatewayUrl)) {
     throw gatewayError_(
       "invalid_gateway_url",
-      "Paste the deployed Apps Script Web App URL that ends with /exec",
+      "TYPED_SHEETS_GATEWAY_URL must be a deployed Apps Script Web App URL that ends with /exec",
     );
   }
 

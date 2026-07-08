@@ -13,12 +13,26 @@ export type { GoogleSheetsAdapterOptions } from "./adapter/GoogleSheetsAdapter.j
 export type { AppsScriptGatewayAdapterOptions } from "./adapter/AppsScriptGatewayAdapter.js";
 export type {
   AppsScriptGatewayAuthenticatedRequest,
+  AppsScriptGatewayEnqueueTasksResponse,
+  AppsScriptGatewayInitializeSystemSheetsResponse,
+  AppsScriptGatewayProcessTaskQueueResponse,
   AppsScriptGatewayReadSheetResponse,
   AppsScriptGatewayRequest,
   AppsScriptGatewayResponse,
 } from "./adapter/AppsScriptGatewayProtocol.js";
 
-export type { SheetAdapter, SheetCell, SheetSnapshot } from "./adapter/Adapter.js";
+export type {
+  EnqueueTaskInput,
+  EnqueueTaskOperation,
+  EnqueueTasksInput,
+  EnqueueTasksResult,
+  InitializeSystemSheetsResult,
+  ProcessTaskQueueInput,
+  ProcessTaskQueueResult,
+  SheetAdapter,
+  SheetCell,
+  SheetSnapshot,
+} from "./adapter/Adapter.js";
 export type { Column } from "./core/Columns.js";
 export type { TypedSheetsConfig } from "./setup/Config.js";
 export type { LoadTypedSheetsConfigOptions } from "./setup/ConfigLoader.js";

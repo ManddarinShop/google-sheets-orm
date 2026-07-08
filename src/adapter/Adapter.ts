@@ -47,6 +47,58 @@ export interface UpdateRowsByKeyResult {
   }>;
 }
 
+export interface InitializeSystemSheetsResult {
+  logicalSheetName: string;
+  canonicalSheetName: string;
+  projectionSheetName: string;
+  taskQueueSheetName: string;
+}
+
+export type EnqueueTaskOperation = "insert" | "update" | "delete";
+
+interface EnqueueTaskBaseInput {
+  taskId: string;
+  transactionId: string;
+  transactionIndex: number;
+  sheetName: string;
+  keyHeader: string;
+  keyValue: string;
+  payloadJson: string;
+}
+
+export type EnqueueTaskInput =
+  | (EnqueueTaskBaseInput & {
+      operation: "insert";
+      expectedVersion: null;
+    })
+  | (EnqueueTaskBaseInput & {
+      operation: "update" | "delete";
+      expectedVersion: number;
+    });
+
+export interface EnqueueTasksInput {
+  tasks: EnqueueTaskInput[];
+}
+
+export interface EnqueueTasksResult {
+  tasks: Array<{
+    taskId: string;
+    sequence: number;
+  }>;
+}
+
+export interface ProcessTaskQueueInput {
+  maxTransactions?: number;
+}
+
+export interface ProcessTaskQueueResult {
+  processedTransactions: number;
+  failedTransactions: number;
+  processedTasks: number;
+  failedTasks: number;
+  remainingPendingTasks: number;
+}
+
 export interface SheetAdapter {
   readSheet(sheetName: string): Promise<SheetSnapshot>;
   appendRow(sheetName: string, row: SheetCell[]): Promise<void>;
@@ -89,4 +141,27 @@ export interface SheetAdapter {
   ensureSheet?(sheetName: string): Promise<void>;
   writeHeader?(sheetName: string, headers: string[]): Promise<void>;
   initializeSheet?(sheetName: string, headers: string[]): Promise<void>;
+  /**
+   * Initialize the gateway-owned sheet set for queued writes when supported.
+   * Implementations should create or reuse the visible projection sheet,
+   * canonical data sheet, task queue sheet, and logical-to-canonical mapping.
+   */
+  initializeSystemSheets?(
+    sheetName: string,
+    headers: string[],
+  ): Promise<InitializeSystemSheetsResult>;
+  /**
+   * Append one transaction worth of write tasks to the internal queue. The
+   * gateway assigns monotonic sequence values while the caller supplies stable
+   * task and transaction ids for idempotency.
+   */
+  enqueueTasks?(input: EnqueueTasksInput): Promise<EnqueueTasksResult>;
+  /**
+   * Process a bounded set of pending queue transaction groups into canonical
+   * sheets. This is an explicit gateway operation; repository writes do not
+   * implicitly process the queue.
+   */
+  processTaskQueue?(
+    input?: ProcessTaskQueueInput,
+  ): Promise<ProcessTaskQueueResult>;
 }

@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { ConflictError, SchemaDriftError } from "../src/core/Errors.js";
-import { AppsScriptGatewayAdapter } from "../src/index.js";
+import { AppsScriptGatewayAdapter, type SheetAdapter } from "../src/index.js";
 
 function createJsonResponse(value: unknown): Response {
   return {
@@ -317,6 +317,287 @@ describe("AppsScriptGatewayAdapter", () => {
       sheetName: "Users",
       headers: ["id", "email", "_version"],
     });
+  });
+
+  it("initializes system sheets through one Apps Script gateway request", async () => {
+    const fetch = vi.fn().mockResolvedValue(
+      createJsonResponse({
+        ok: true,
+        systemSheets: {
+          logicalSheetName: "Users",
+          canonicalSheetName: "_typed_sheets_data_Users_a1b2c3d4e5f6",
+          projectionSheetName: "Users",
+          taskQueueSheetName: "_typed_sheets_task_queue",
+        },
+      }),
+    );
+    const adapter = new AppsScriptGatewayAdapter({
+      gatewayUrl: "https://script.google.com/macros/s/deployment-id/exec",
+      gatewaySecret: "gateway-secret",
+      fetch,
+    });
+
+    await expect(
+      adapter.initializeSystemSheets("Users", ["id", "email", "_version"]),
+    ).resolves.toEqual({
+      logicalSheetName: "Users",
+      canonicalSheetName: "_typed_sheets_data_Users_a1b2c3d4e5f6",
+      projectionSheetName: "Users",
+      taskQueueSheetName: "_typed_sheets_task_queue",
+    });
+    expectGatewayRequest(fetch, {
+      operation: "initializeSystemSheets",
+      secret: "gateway-secret",
+      sheetName: "Users",
+      headers: ["id", "email", "_version"],
+    });
+  });
+
+  it("exposes system sheet initialization through the SheetAdapter boundary", async () => {
+    const fetch = vi.fn().mockResolvedValue(
+      createJsonResponse({
+        ok: true,
+        systemSheets: {
+          logicalSheetName: "Users",
+          canonicalSheetName: "_typed_sheets_data_Users_a1b2c3d4e5f6",
+          projectionSheetName: "Users",
+          taskQueueSheetName: "_typed_sheets_task_queue",
+        },
+      }),
+    );
+    const adapter: SheetAdapter = new AppsScriptGatewayAdapter({
+      gatewayUrl: "https://script.google.com/macros/s/deployment-id/exec",
+      gatewaySecret: "gateway-secret",
+      fetch,
+    });
+
+    await expect(
+      adapter.initializeSystemSheets?.("Users", ["id", "_version"]),
+    ).resolves.toEqual({
+      logicalSheetName: "Users",
+      canonicalSheetName: "_typed_sheets_data_Users_a1b2c3d4e5f6",
+      projectionSheetName: "Users",
+      taskQueueSheetName: "_typed_sheets_task_queue",
+    });
+  });
+
+  it("rejects invalid initializeSystemSheets response payloads", async () => {
+    const fetch = vi.fn().mockResolvedValue(
+      createJsonResponse({
+        ok: true,
+        systemSheets: {
+          logicalSheetName: "Users",
+          canonicalSheetName: "_typed_sheets_data_Users_a1b2c3d4e5f6",
+          projectionSheetName: "Users",
+        },
+      }),
+    );
+    const adapter = new AppsScriptGatewayAdapter({
+      gatewayUrl: "https://script.google.com/macros/s/deployment-id/exec",
+      gatewaySecret: "gateway-secret",
+      fetch,
+    });
+
+    await expect(
+      adapter.initializeSystemSheets("Users", ["id", "email", "_version"]),
+    ).rejects.toThrow(
+      /Apps Script gateway returned an invalid initializeSystemSheets response/,
+    );
+  });
+
+  it("enqueues write tasks through one Apps Script gateway request", async () => {
+    const fetch = vi.fn().mockResolvedValue(
+      createJsonResponse({
+        ok: true,
+        tasks: [
+          { taskId: "task-1", sequence: 41 },
+          { taskId: "task-2", sequence: 42 },
+        ],
+      }),
+    );
+    const adapter: SheetAdapter = new AppsScriptGatewayAdapter({
+      gatewayUrl: "https://script.google.com/macros/s/deployment-id/exec",
+      gatewaySecret: "gateway-secret",
+      fetch,
+    });
+
+    await expect(
+      adapter.enqueueTasks?.({
+        tasks: [
+          {
+            taskId: "task-1",
+            transactionId: "tx-1",
+            transactionIndex: 0,
+            operation: "insert",
+            sheetName: "Users",
+            keyHeader: "id",
+            keyValue: "u1",
+            expectedVersion: null,
+            payloadJson: JSON.stringify({
+              row: {
+                id: "u1",
+                email: "a@test.com",
+                _version: 1,
+              },
+            }),
+          },
+          {
+            taskId: "task-2",
+            transactionId: "tx-1",
+            transactionIndex: 1,
+            operation: "update",
+            sheetName: "Orders",
+            keyHeader: "id",
+            keyValue: "o1",
+            expectedVersion: 1,
+            payloadJson: JSON.stringify({
+              expectedVersion: 1,
+              rowToWrite: {
+                id: "o1",
+                total: 20,
+                _version: 2,
+              },
+            }),
+          },
+        ],
+      }),
+    ).resolves.toEqual({
+      tasks: [
+        { taskId: "task-1", sequence: 41 },
+        { taskId: "task-2", sequence: 42 },
+      ],
+    });
+
+    expectGatewayRequest(fetch, {
+      operation: "enqueueTasks",
+      secret: "gateway-secret",
+      tasks: [
+        {
+          taskId: "task-1",
+          transactionId: "tx-1",
+          transactionIndex: 0,
+          operation: "insert",
+          sheetName: "Users",
+          keyHeader: "id",
+          keyValue: "u1",
+          expectedVersion: null,
+          payloadJson: JSON.stringify({
+            row: {
+              id: "u1",
+              email: "a@test.com",
+              _version: 1,
+            },
+          }),
+        },
+        {
+          taskId: "task-2",
+          transactionId: "tx-1",
+          transactionIndex: 1,
+          operation: "update",
+          sheetName: "Orders",
+          keyHeader: "id",
+          keyValue: "o1",
+          expectedVersion: 1,
+          payloadJson: JSON.stringify({
+            expectedVersion: 1,
+            rowToWrite: {
+              id: "o1",
+              total: 20,
+              _version: 2,
+            },
+          }),
+        },
+      ],
+    });
+  });
+
+  it("rejects invalid enqueueTasks response payloads", async () => {
+    const fetch = vi.fn().mockResolvedValue(
+      createJsonResponse({
+        ok: true,
+        tasks: [{ taskId: "task-1", sequence: "1" }],
+      }),
+    );
+    const adapter = new AppsScriptGatewayAdapter({
+      gatewayUrl: "https://script.google.com/macros/s/deployment-id/exec",
+      gatewaySecret: "gateway-secret",
+      fetch,
+    });
+
+    await expect(
+      adapter.enqueueTasks({
+        tasks: [
+          {
+            taskId: "task-1",
+            transactionId: "tx-1",
+            transactionIndex: 0,
+            operation: "insert",
+            sheetName: "Users",
+            keyHeader: "id",
+            keyValue: "u1",
+            expectedVersion: null,
+            payloadJson: JSON.stringify({ row: { id: "u1", _version: 1 } }),
+          },
+        ],
+      }),
+    ).rejects.toThrow(
+      /Apps Script gateway returned an invalid enqueueTasks response/,
+    );
+  });
+
+  it("processes queued tasks through one Apps Script gateway request", async () => {
+    const fetch = vi.fn().mockResolvedValue(
+      createJsonResponse({
+        ok: true,
+        processedTransactions: 2,
+        failedTransactions: 1,
+        processedTasks: 4,
+        failedTasks: 2,
+        remainingPendingTasks: 3,
+      }),
+    );
+    const adapter: SheetAdapter = new AppsScriptGatewayAdapter({
+      gatewayUrl: "https://script.google.com/macros/s/deployment-id/exec",
+      gatewaySecret: "gateway-secret",
+      fetch,
+    });
+
+    await expect(
+      adapter.processTaskQueue?.({ maxTransactions: 3 }),
+    ).resolves.toEqual({
+      processedTransactions: 2,
+      failedTransactions: 1,
+      processedTasks: 4,
+      failedTasks: 2,
+      remainingPendingTasks: 3,
+    });
+    expectGatewayRequest(fetch, {
+      operation: "processTaskQueue",
+      secret: "gateway-secret",
+      maxTransactions: 3,
+    });
+  });
+
+  it("rejects invalid processTaskQueue response payloads", async () => {
+    const fetch = vi.fn().mockResolvedValue(
+      createJsonResponse({
+        ok: true,
+        processedTransactions: 1,
+        failedTransactions: 0,
+        processedTasks: 1,
+        failedTasks: 0,
+        remainingPendingTasks: "0",
+      }),
+    );
+    const adapter = new AppsScriptGatewayAdapter({
+      gatewayUrl: "https://script.google.com/macros/s/deployment-id/exec",
+      gatewaySecret: "gateway-secret",
+      fetch,
+    });
+
+    await expect(adapter.processTaskQueue()).rejects.toThrow(
+      /Apps Script gateway returned an invalid processTaskQueue response/,
+    );
   });
 
   it("throws the gateway error when the gateway returns ok false", async () => {

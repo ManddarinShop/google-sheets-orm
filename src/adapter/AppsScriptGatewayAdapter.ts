@@ -2,6 +2,11 @@ import type {
   AppendRowsInput,
   DeleteRowsByKeyInput,
   DeleteRowsByKeyResult,
+  EnqueueTasksInput,
+  EnqueueTasksResult,
+  InitializeSystemSheetsResult,
+  ProcessTaskQueueInput,
+  ProcessTaskQueueResult,
   SheetAdapter,
   SheetCell,
   SheetSnapshot,
@@ -12,6 +17,9 @@ import { ConflictError, SchemaDriftError } from "../core/Errors.js";
 import type {
   AppsScriptGatewayAuthenticatedRequest,
   AppsScriptGatewayDeleteRowsByKeyResponse,
+  AppsScriptGatewayEnqueueTasksResponse,
+  AppsScriptGatewayInitializeSystemSheetsResponse,
+  AppsScriptGatewayProcessTaskQueueResponse,
   AppsScriptGatewayReadSheetResponse,
   AppsScriptGatewayRequest,
   AppsScriptGatewayResponse,
@@ -175,6 +183,71 @@ export class AppsScriptGatewayAdapter implements SheetAdapter {
     });
   }
 
+  /**
+   * Initializes the gateway-owned sheet set for queued writes. The Apps Script
+   * gateway creates the visible projection sheet, hidden canonical data sheet,
+   * and hidden task queue sheet while persisting the canonical mapping in meta.
+   */
+  async initializeSystemSheets(
+    sheetName: string,
+    headers: string[],
+  ): Promise<InitializeSystemSheetsResult> {
+    const response = requireInitializeSystemSheetsResponse(
+      await this.request({
+        operation: "initializeSystemSheets",
+        sheetName,
+        headers,
+      }),
+    );
+
+    return response.systemSheets;
+  }
+
+  /**
+   * Appends prepared repository write tasks to the gateway queue. The gateway
+   * owns sequence assignment under the Apps Script document lock.
+   */
+  async enqueueTasks(input: EnqueueTasksInput): Promise<EnqueueTasksResult> {
+    const response = requireEnqueueTasksResponse(
+      await this.request({
+        operation: "enqueueTasks",
+        tasks: input.tasks,
+      }),
+    );
+
+    return {
+      tasks: response.tasks,
+    };
+  }
+
+  /**
+   * Runs the Apps Script queue processor for a bounded number of transaction
+   * groups. The processor applies pending tasks to canonical sheets.
+   */
+  async processTaskQueue(
+    input: ProcessTaskQueueInput = {},
+  ): Promise<ProcessTaskQueueResult> {
+    const request: AppsScriptGatewayRequest = {
+      operation: "processTaskQueue",
+    };
+
+    if (input.maxTransactions !== undefined) {
+      request.maxTransactions = input.maxTransactions;
+    }
+
+    const response = requireProcessTaskQueueResponse(
+      await this.request(request),
+    );
+
+    return {
+      processedTransactions: response.processedTransactions,
+      failedTransactions: response.failedTransactions,
+      processedTasks: response.processedTasks,
+      failedTasks: response.failedTasks,
+      remainingPendingTasks: response.remainingPendingTasks,
+    };
+  }
+
   private async request(
     payload: AppsScriptGatewayRequest,
   ): Promise<AppsScriptGatewayResponse> {
@@ -245,6 +318,64 @@ function requireReadSheetResponse(
     ...value,
     headers: value.headers,
     rows: value.rows,
+  };
+}
+
+function requireInitializeSystemSheetsResponse(
+  value: AppsScriptGatewayResponse,
+): AppsScriptGatewayInitializeSystemSheetsResponse {
+  if (!isSystemSheetsResult(value.systemSheets)) {
+    throw new Error(
+      "Apps Script gateway returned an invalid initializeSystemSheets response",
+    );
+  }
+
+  return {
+    ...value,
+    systemSheets: value.systemSheets,
+  };
+}
+
+function requireEnqueueTasksResponse(
+  value: AppsScriptGatewayResponse,
+): AppsScriptGatewayEnqueueTasksResponse {
+  if (
+    !Array.isArray(value.tasks) ||
+    !value.tasks.every(isEnqueuedTaskResult)
+  ) {
+    throw new Error(
+      "Apps Script gateway returned an invalid enqueueTasks response",
+    );
+  }
+
+  return {
+    ...value,
+    tasks: value.tasks,
+  };
+}
+
+function requireProcessTaskQueueResponse(
+  value: AppsScriptGatewayResponse,
+): AppsScriptGatewayProcessTaskQueueResponse {
+  if (
+    !isNonNegativeInteger(value.processedTransactions) ||
+    !isNonNegativeInteger(value.failedTransactions) ||
+    !isNonNegativeInteger(value.processedTasks) ||
+    !isNonNegativeInteger(value.failedTasks) ||
+    !isNonNegativeInteger(value.remainingPendingTasks)
+  ) {
+    throw new Error(
+      "Apps Script gateway returned an invalid processTaskQueue response",
+    );
+  }
+
+  return {
+    ...value,
+    processedTransactions: value.processedTransactions,
+    failedTransactions: value.failedTransactions,
+    processedTasks: value.processedTasks,
+    failedTasks: value.failedTasks,
+    remainingPendingTasks: value.remainingPendingTasks,
   };
 }
 
@@ -329,6 +460,38 @@ function isSheetCell(value: unknown): value is SheetCell {
     typeof value === "number" ||
     typeof value === "boolean" ||
     value === null
+  );
+}
+
+function isSystemSheetsResult(
+  value: unknown,
+): value is InitializeSystemSheetsResult {
+  return (
+    isRecord(value) &&
+    typeof value.logicalSheetName === "string" &&
+    typeof value.canonicalSheetName === "string" &&
+    typeof value.projectionSheetName === "string" &&
+    typeof value.taskQueueSheetName === "string"
+  );
+}
+
+function isEnqueuedTaskResult(
+  value: unknown,
+): value is EnqueueTasksResult["tasks"][number] {
+  return (
+    isRecord(value) &&
+    typeof value.taskId === "string" &&
+    typeof value.sequence === "number" &&
+    Number.isInteger(value.sequence) &&
+    value.sequence >= 1
+  );
+}
+
+function isNonNegativeInteger(value: unknown): value is number {
+  return (
+    typeof value === "number" &&
+    Number.isInteger(value) &&
+    value >= 0
   );
 }
 
