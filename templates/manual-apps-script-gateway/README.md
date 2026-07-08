@@ -109,6 +109,7 @@ The gateway supports these operations:
 - `ensureSheet`
 - `initializeSheet`
 - `initializeSystemSheets`
+- `enqueueTasks`
 - `writeHeader`
 - `readSheet`
 - `appendRow`
@@ -125,6 +126,9 @@ creates the visible projection sheet plus the hidden/protected canonical data
 sheet and hidden/protected task queue sheet used by the queued write model.
 Apps Script sheet protection is best-effort and spreadsheet owners can still
 edit protected sheets, so queued writes must still validate internal rows.
+`enqueueTasks` appends one transaction worth of caller-supplied write tasks to
+the hidden task queue and assigns monotonic sequence values while holding the
+document lock; it does not process or materialize queued tasks.
 `writeHeader` refuses to overwrite a non-empty header row. `appendRows` writes a
 burst of rows through one gateway request so repository inserts can avoid
 per-row Apps Script calls. `deleteRows` deletes data rows from bottom to top in
