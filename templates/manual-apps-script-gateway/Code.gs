@@ -96,6 +96,10 @@ function doPost(e) {
         return json_(enqueueTasks_(spreadsheet, request));
       }
 
+      if (operation === "processTaskQueue") {
+        return json_(processTaskQueue_(spreadsheet, request));
+      }
+
       if (operation === "writeHeader") {
         writeHeader_(spreadsheet, request);
         return json_({ ok: true });
@@ -176,6 +180,7 @@ function validateOperation_(request) {
     "initializeSheet",
     "initializeSystemSheets",
     "enqueueTasks",
+    "processTaskQueue",
     "writeHeader",
     "readSheet",
     "appendRow",
@@ -197,6 +202,11 @@ function validateOperation_(request) {
 
   if (operation === "enqueueTasks") {
     requireQueueTasks_(request.tasks, "tasks");
+    return operation;
+  }
+
+  if (operation === "processTaskQueue") {
+    requireProcessTaskQueueOptions_(request);
     return operation;
   }
 
@@ -497,6 +507,474 @@ function isSameQueuedTask_(existingTask, task) {
     && existingTask.keyValue === task.keyValue
     && existingTask.expectedVersion === task.expectedVersion
     && existingTask.payloadJson === task.payloadJson;
+}
+
+/**
+ * Processes pending queue transaction groups into canonical sheets.
+ *
+ * This first processor intentionally keeps the lock for the full claim, apply,
+ * and status update cycle. It applies complete pending groups in sequence
+ * order, rewrites affected canonical sheets in bulk, and leaves projection sync
+ * and stale processing recovery for later queue branches.
+ */
+function processTaskQueue_(spreadsheet, request) {
+  const options = requireProcessTaskQueueOptions_(request);
+  const queueSheet = ensureTaskQueueSheet_(spreadsheet);
+  const queuedTasks = readQueuedTasks_(queueSheet);
+  const pendingGroups = groupPendingTasksByTransaction_(queuedTasks)
+    .slice(0, options.maxTransactions);
+  const now = new Date().toISOString();
+  const result = {
+    ok: true,
+    processedTransactions: 0,
+    failedTransactions: 0,
+    processedTasks: 0,
+    failedTasks: 0,
+    remainingPendingTasks: 0,
+  };
+
+  pendingGroups.forEach(function(group) {
+    markQueueTasks_(queueSheet, group.tasks, {
+      status: "processing",
+      updatedAt: now,
+    });
+
+    try {
+      applyQueueTransaction_(spreadsheet, group.tasks);
+      markQueueTasks_(queueSheet, group.tasks, {
+        status: "done",
+        payloadJson: JSON.stringify({ redacted: true }),
+        lastErrorCode: "",
+        lastErrorMessage: "",
+        updatedAt: new Date().toISOString(),
+      });
+
+      result.processedTransactions += 1;
+      result.processedTasks += group.tasks.length;
+    } catch (error) {
+      const code = error && error.code ? error.code : "internal_error";
+      const message = error && error.message ? error.message : String(error);
+
+      markQueueTasks_(queueSheet, group.tasks, {
+        status: "failed",
+        lastErrorCode: code,
+        lastErrorMessage: message,
+        updatedAt: new Date().toISOString(),
+      });
+
+      result.failedTransactions += 1;
+      result.failedTasks += group.tasks.length;
+    }
+  });
+
+  result.remainingPendingTasks = readQueuedTasks_(queueSheet).filter(function(task) {
+    return task.status === "pending";
+  }).length;
+
+  return result;
+}
+
+function readQueuedTasks_(queueSheet) {
+  const lastRow = queueSheet.getLastRow();
+
+  if (lastRow < 2) {
+    return [];
+  }
+
+  const rows = queueSheet
+    .getRange(
+      2,
+      1,
+      lastRow - 1,
+      TYPED_SHEETS_TASK_QUEUE_HEADERS.length,
+    )
+    .getValues();
+
+  return rows.map(function(row, index) {
+    return parseQueuedTaskRow_(row, index + 2);
+  }).sort(function(left, right) {
+    return left.sequence - right.sequence
+      || left.transactionIndex - right.transactionIndex;
+  });
+}
+
+function parseQueuedTaskRow_(row, rowNumber) {
+  const task = {
+    rowNumber: rowNumber,
+    taskId: String(row[0] || ""),
+    transactionId: String(row[1] || ""),
+    transactionIndex: Number(row[2]),
+    sequence: Number(row[3]),
+    status: String(row[4] || ""),
+    operation: String(row[5] || ""),
+    sheetName: String(row[6] || ""),
+    keyHeader: String(row[7] || ""),
+    keyValue: String(row[8] || ""),
+    expectedVersion: row[9] === "" || row[9] === null ? null : Number(row[9]),
+    payloadJson: String(row[10] || ""),
+    attempts: Number(row[11] || 0),
+  };
+
+  if (
+    task.taskId === ""
+    || task.transactionId === ""
+    || !Number.isInteger(task.transactionIndex)
+    || task.transactionIndex < 0
+    || !Number.isInteger(task.sequence)
+    || task.sequence < 1
+    || ["pending", "processing", "done", "failed"].indexOf(task.status) === -1
+    || ["insert", "update", "delete"].indexOf(task.operation) === -1
+    || task.sheetName === ""
+    || task.keyHeader === ""
+    || task.keyValue === ""
+    || (task.operation === "insert" && task.expectedVersion !== null)
+    || (task.operation !== "insert" && !Number.isFinite(task.expectedVersion))
+  ) {
+    throw gatewayError_(
+      "invalid_task",
+      "Invalid task queue row at " + rowNumber,
+    );
+  }
+
+  return task;
+}
+
+function groupPendingTasksByTransaction_(queuedTasks) {
+  const groupsById = Object.create(null);
+  const groups = [];
+
+  queuedTasks.forEach(function(task) {
+    if (!groupsById[task.transactionId]) {
+      groupsById[task.transactionId] = {
+        transactionId: task.transactionId,
+        firstSequence: task.sequence,
+        allPending: true,
+        tasks: [],
+      };
+      groups.push(groupsById[task.transactionId]);
+    }
+
+    if (task.status !== "pending") {
+      groupsById[task.transactionId].allPending = false;
+    }
+
+    groupsById[task.transactionId].firstSequence = Math.min(
+      groupsById[task.transactionId].firstSequence,
+      task.sequence,
+    );
+    groupsById[task.transactionId].tasks.push(task);
+  });
+
+  groups.forEach(function(group) {
+    group.tasks.sort(function(left, right) {
+      return left.transactionIndex - right.transactionIndex
+        || left.sequence - right.sequence;
+    });
+  });
+
+  return groups
+    .filter(function(group) {
+      return group.allPending;
+    })
+    .sort(function(left, right) {
+      return left.firstSequence - right.firstSequence;
+    });
+}
+
+function applyQueueTransaction_(spreadsheet, tasks) {
+  const tables = Object.create(null);
+  const affectedSheetNames = [];
+
+  tasks.forEach(function(task) {
+    if (!tables[task.sheetName]) {
+      tables[task.sheetName] = readCanonicalTableForTask_(spreadsheet, task);
+      affectedSheetNames.push(task.sheetName);
+    }
+
+    applyTaskToCanonicalTable_(tables[task.sheetName], task);
+  });
+
+  affectedSheetNames.sort().forEach(function(sheetName) {
+    writeCanonicalTable_(tables[sheetName]);
+  });
+}
+
+function readCanonicalTableForTask_(spreadsheet, task) {
+  const mapping = getCanonicalSheetMapping_(spreadsheet, task.sheetName);
+
+  if (!mapping) {
+    throw gatewayError_(
+      "invalid_task",
+      "Missing canonical sheet mapping for " + task.sheetName,
+    );
+  }
+
+  const sheet = getSheet_(spreadsheet, mapping.canonicalSheetName);
+  const lastRow = sheet.getLastRow();
+  const lastColumn = sheet.getLastColumn();
+
+  if (lastRow === 0 || lastColumn === 0) {
+    throw gatewayError_(
+      "schema_drift",
+      "Canonical sheet is empty for " + task.sheetName,
+    );
+  }
+
+  const values = sheet.getRange(1, 1, lastRow, lastColumn).getValues();
+  const headers = (values[0] || []).map(function(value) {
+    return String(value);
+  });
+  const keyIndex = headers.indexOf(task.keyHeader);
+  const versionIndex = headers.indexOf("_version");
+
+  if (keyIndex === -1) {
+    throw gatewayError_("schema_drift", "Missing key header: " + task.keyHeader);
+  }
+
+  if (versionIndex === -1) {
+    throw gatewayError_("schema_drift", "Missing version header: _version");
+  }
+
+  const rows = values.slice(1).map(function(row) {
+    return row.map(toSheetCell_);
+  });
+  const rowsByKey = Object.create(null);
+
+  rows.forEach(function(row, index) {
+    const keyValue = String(row[keyIndex]);
+
+    if (rowsByKey[keyValue] !== undefined) {
+      throw gatewayError_("schema_drift", "Duplicate key \"" + keyValue + "\"");
+    }
+
+    rowsByKey[keyValue] = index;
+  });
+
+  return {
+    sheet: sheet,
+    headers: headers,
+    keyIndex: keyIndex,
+    versionIndex: versionIndex,
+    rows: rows,
+    rowsByKey: rowsByKey,
+  };
+}
+
+function applyTaskToCanonicalTable_(table, task) {
+  if (task.operation === "insert") {
+    applyInsertTask_(table, task);
+    return;
+  }
+
+  if (task.operation === "update") {
+    applyUpdateTask_(table, task);
+    return;
+  }
+
+  applyDeleteTask_(table, task);
+}
+
+function applyInsertTask_(table, task) {
+  if (table.rowsByKey[task.keyValue] !== undefined) {
+    throw gatewayError_("conflict", "Row \"" + task.keyValue + "\" already exists");
+  }
+
+  const payload = requireTaskPayloadObject_(task);
+  const rowObject = requirePayloadObject_(payload.row, "payload.row");
+  const row = rowObjectToCanonicalCells_(table, rowObject, null);
+
+  assertTaskRowMatchesKey_(table, row, task);
+  table.rowsByKey[task.keyValue] = table.rows.length;
+  table.rows.push(row);
+}
+
+function applyUpdateTask_(table, task) {
+  const rowIndex = table.rowsByKey[task.keyValue];
+
+  if (rowIndex === undefined) {
+    throw gatewayError_("conflict", "Row \"" + task.keyValue + "\" is missing");
+  }
+
+  assertCurrentVersion_(table, rowIndex, task);
+
+  const payload = requireTaskPayloadObject_(task);
+  const nextRow = requirePayloadObject_(payload.nextRow, "payload.nextRow");
+  const nextVersion = requireTaskFiniteNumber_(
+    nextRow._version,
+    "payload.nextRow._version",
+  );
+
+  if (nextVersion <= task.expectedVersion) {
+    throw gatewayError_(
+      "invalid_task",
+      "payload.nextRow._version must advance expectedVersion",
+    );
+  }
+
+  table.rows[rowIndex] = rowObjectToCanonicalCells_(
+    table,
+    nextRow,
+    table.rows[rowIndex],
+  );
+  assertTaskRowMatchesKey_(table, table.rows[rowIndex], task);
+}
+
+function applyDeleteTask_(table, task) {
+  const rowIndex = table.rowsByKey[task.keyValue];
+
+  if (rowIndex === undefined) {
+    throw gatewayError_("conflict", "Row \"" + task.keyValue + "\" is missing");
+  }
+
+  assertCurrentVersion_(table, rowIndex, task);
+
+  table.rows.splice(rowIndex, 1);
+  table.rowsByKey = Object.create(null);
+  table.rows.forEach(function(row, index) {
+    table.rowsByKey[String(row[table.keyIndex])] = index;
+  });
+}
+
+function assertCurrentVersion_(table, rowIndex, task) {
+  const currentVersion = Number(table.rows[rowIndex][table.versionIndex]);
+
+  if (currentVersion !== task.expectedVersion) {
+    throw gatewayError_(
+      "conflict",
+      "Stale task for key \"" + task.keyValue + "\"",
+    );
+  }
+}
+
+function assertTaskRowMatchesKey_(table, row, task) {
+  if (String(row[table.keyIndex]) !== task.keyValue) {
+    throw gatewayError_(
+      "invalid_task",
+      "Task payload key does not match queued key for " + task.taskId,
+    );
+  }
+}
+
+function requireTaskPayloadObject_(task) {
+  try {
+    return requirePayloadObject_(
+      JSON.parse(task.payloadJson),
+      "payloadJson",
+    );
+  } catch (error) {
+    if (error && error.code) {
+      throw error;
+    }
+
+    throw gatewayError_("invalid_task", "Invalid payloadJson for " + task.taskId);
+  }
+}
+
+function requirePayloadObject_(value, name) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw gatewayError_("invalid_task", name + " must be an object");
+  }
+
+  return value;
+}
+
+function requireTaskFiniteNumber_(value, name) {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw gatewayError_("invalid_task", name + " must be a number");
+  }
+
+  return value;
+}
+
+function rowObjectToCanonicalCells_(table, rowObject, existingRow) {
+  return table.headers.map(function(header, index) {
+    if (Object.prototype.hasOwnProperty.call(rowObject, header)) {
+      return toSheetCell_(rowObject[header]);
+    }
+
+    return existingRow ? existingRow[index] : null;
+  });
+}
+
+function writeCanonicalTable_(table) {
+  table.sheet
+    .getRange(1, 1, 1, table.headers.length)
+    .setValues([table.headers]);
+
+  if (table.rows.length > 0) {
+    table.sheet
+      .getRange(2, 1, table.rows.length, table.headers.length)
+      .setValues(table.rows);
+  }
+
+  clearTrailingCanonicalRows_(table.sheet, table.rows.length + 2);
+  clearTrailingCanonicalColumns_(table.sheet, table.headers.length + 1);
+}
+
+function clearTrailingCanonicalRows_(sheet, firstTrailingRow) {
+  const lastRow = sheet.getLastRow();
+  const lastColumn = sheet.getLastColumn();
+
+  if (lastRow >= firstTrailingRow && lastColumn > 0) {
+    sheet
+      .getRange(firstTrailingRow, 1, lastRow - firstTrailingRow + 1, lastColumn)
+      .clearContent();
+  }
+}
+
+function clearTrailingCanonicalColumns_(sheet, firstTrailingColumn) {
+  const lastRow = sheet.getLastRow();
+  const lastColumn = sheet.getLastColumn();
+
+  if (lastColumn >= firstTrailingColumn && lastRow > 0) {
+    sheet
+      .getRange(1, firstTrailingColumn, lastRow, lastColumn - firstTrailingColumn + 1)
+      .clearContent();
+  }
+}
+
+function markQueueTasks_(queueSheet, tasks, patch) {
+  const statusIndex = TYPED_SHEETS_TASK_QUEUE_HEADERS.indexOf("status") + 1;
+  const payloadJsonIndex =
+    TYPED_SHEETS_TASK_QUEUE_HEADERS.indexOf("payloadJson") + 1;
+  const lastErrorCodeIndex =
+    TYPED_SHEETS_TASK_QUEUE_HEADERS.indexOf("lastErrorCode") + 1;
+  const lastErrorMessageIndex =
+    TYPED_SHEETS_TASK_QUEUE_HEADERS.indexOf("lastErrorMessage") + 1;
+  const updatedAtIndex =
+    TYPED_SHEETS_TASK_QUEUE_HEADERS.indexOf("updatedAt") + 1;
+
+  tasks.forEach(function(task) {
+    if (patch.status !== undefined) {
+      queueSheet.getRange(task.rowNumber, statusIndex, 1, 1).setValues([
+        [patch.status],
+      ]);
+    }
+
+    if (patch.payloadJson !== undefined) {
+      queueSheet.getRange(task.rowNumber, payloadJsonIndex, 1, 1).setValues([
+        [patch.payloadJson],
+      ]);
+    }
+
+    if (patch.lastErrorCode !== undefined) {
+      queueSheet.getRange(task.rowNumber, lastErrorCodeIndex, 1, 1).setValues([
+        [patch.lastErrorCode],
+      ]);
+    }
+
+    if (patch.lastErrorMessage !== undefined) {
+      queueSheet
+        .getRange(task.rowNumber, lastErrorMessageIndex, 1, 1)
+        .setValues([[patch.lastErrorMessage]]);
+    }
+
+    if (patch.updatedAt !== undefined) {
+      queueSheet.getRange(task.rowNumber, updatedAtIndex, 1, 1).setValues([
+        [patch.updatedAt],
+      ]);
+    }
+  });
 }
 
 function getOrCreateCanonicalSheetName_(spreadsheet, logicalSheetName) {
@@ -1217,6 +1695,16 @@ function requireQueueTasks_(value, name) {
       ),
     };
   });
+}
+
+function requireProcessTaskQueueOptions_(request) {
+  const maxTransactions = request.maxTransactions === undefined
+    ? 1
+    : requirePositiveInteger_(request.maxTransactions, "maxTransactions");
+
+  return {
+    maxTransactions: maxTransactions,
+  };
 }
 
 function requireQueueOperation_(value, name) {

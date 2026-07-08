@@ -110,6 +110,7 @@ The gateway supports these operations:
 - `initializeSheet`
 - `initializeSystemSheets`
 - `enqueueTasks`
+- `processTaskQueue`
 - `writeHeader`
 - `readSheet`
 - `appendRow`
@@ -129,6 +130,9 @@ edit protected sheets, so queued writes must still validate internal rows.
 `enqueueTasks` appends one transaction worth of caller-supplied write tasks to
 the hidden task queue and assigns monotonic sequence values while holding the
 document lock; it does not process or materialize queued tasks.
+`processTaskQueue` processes a bounded number of pending transaction groups
+into hidden canonical sheets and marks each group `done` or `failed`; projection
+sync and stale `processing` recovery are still future work.
 `writeHeader` refuses to overwrite a non-empty header row. `appendRows` writes a
 burst of rows through one gateway request so repository inserts can avoid
 per-row Apps Script calls. `deleteRows` deletes data rows from bottom to top in
