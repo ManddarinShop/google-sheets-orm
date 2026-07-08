@@ -89,13 +89,9 @@ Web App gateway.
 
 6. Copy the Web App URL shown after deployment. It must end with `/exec`.
 
-7. Run `setupTypedSheets()` or reload the Google Sheet and click:
+7. Paste that URL into `TYPED_SHEETS_GATEWAY_URL` near the top of `Code.gs`.
 
-   ```txt
-   typed-sheets > Setup gateway
-   ```
-
-8. Paste that `/exec` URL into the Apps Script prompt.
+8. Run `setupTypedSheets()` from the Apps Script editor.
 
 9. Open Apps Script execution logs and copy the generated JSON.
 
@@ -112,6 +108,9 @@ The gateway supports these operations:
 - `ping`
 - `ensureSheet`
 - `initializeSheet`
+- `initializeSystemSheets`
+- `enqueueTasks`
+- `processTaskQueue`
 - `writeHeader`
 - `readSheet`
 - `appendRow`
@@ -123,16 +122,27 @@ The gateway supports these operations:
 - `deleteRowsByKey`
 
 `initializeSheet` creates the sheet when missing and writes headers when the
-header row is empty while holding the document lock. `writeHeader` refuses to
-overwrite a non-empty header row. `appendRows` writes a burst of rows through one
-gateway request so repository inserts can avoid per-row Apps Script calls.
-`deleteRows` deletes data rows from bottom to top in one gateway request so
-batched repository deletes do not corrupt row numbers as Google Sheets shifts
-rows upward. `deleteRowsByKey` lets gateway-backed repositories validate keys
-and `_version` under the Apps Script document lock before deleting, avoiding an
-extra client-side read round trip. `updateRowsByKey` applies the same locked
-key and `_version` validation before updating rows, avoiding an extra
-client-side read round trip for gateway-backed updates.
+header row is empty while holding the document lock. `initializeSystemSheets`
+creates the visible projection sheet plus the hidden/protected canonical data
+sheet and hidden/protected task queue sheet used by the queued write model.
+Apps Script sheet protection is best-effort and spreadsheet owners can still
+edit protected sheets, so queued writes must still validate internal rows.
+`enqueueTasks` appends one transaction worth of caller-supplied write tasks to
+the hidden task queue and assigns monotonic sequence values while holding the
+document lock; it does not process or materialize queued tasks.
+`processTaskQueue` processes a bounded number of pending transaction groups
+into hidden canonical sheets and marks each group `done` or `failed`; projection
+sync and stale `processing` recovery are still future work.
+`writeHeader` refuses to overwrite a non-empty header row. `appendRows` writes a
+burst of rows through one gateway request so repository inserts can avoid
+per-row Apps Script calls. `deleteRows` deletes data rows from bottom to top in
+one gateway request so batched repository deletes do not corrupt row numbers as
+Google Sheets shifts rows upward. `deleteRowsByKey` lets gateway-backed
+repositories validate keys and `_version` under the Apps Script document lock
+before deleting, avoiding an extra client-side read round trip.
+`updateRowsByKey` applies the same locked key and `_version` validation before
+updating rows, avoiding an extra client-side read round trip for gateway-backed
+updates.
 
 Invalid requests return a JSON response with `ok: false`, an error `code`, and
 a human-readable `message`.
