@@ -545,6 +545,61 @@ describe("AppsScriptGatewayAdapter", () => {
     );
   });
 
+  it("processes queued tasks through one Apps Script gateway request", async () => {
+    const fetch = vi.fn().mockResolvedValue(
+      createJsonResponse({
+        ok: true,
+        processedTransactions: 2,
+        failedTransactions: 1,
+        processedTasks: 4,
+        failedTasks: 2,
+        remainingPendingTasks: 3,
+      }),
+    );
+    const adapter: SheetAdapter = new AppsScriptGatewayAdapter({
+      gatewayUrl: "https://script.google.com/macros/s/deployment-id/exec",
+      gatewaySecret: "gateway-secret",
+      fetch,
+    });
+
+    await expect(
+      adapter.processTaskQueue?.({ maxTransactions: 3 }),
+    ).resolves.toEqual({
+      processedTransactions: 2,
+      failedTransactions: 1,
+      processedTasks: 4,
+      failedTasks: 2,
+      remainingPendingTasks: 3,
+    });
+    expectGatewayRequest(fetch, {
+      operation: "processTaskQueue",
+      secret: "gateway-secret",
+      maxTransactions: 3,
+    });
+  });
+
+  it("rejects invalid processTaskQueue response payloads", async () => {
+    const fetch = vi.fn().mockResolvedValue(
+      createJsonResponse({
+        ok: true,
+        processedTransactions: 1,
+        failedTransactions: 0,
+        processedTasks: 1,
+        failedTasks: 0,
+        remainingPendingTasks: "0",
+      }),
+    );
+    const adapter = new AppsScriptGatewayAdapter({
+      gatewayUrl: "https://script.google.com/macros/s/deployment-id/exec",
+      gatewaySecret: "gateway-secret",
+      fetch,
+    });
+
+    await expect(adapter.processTaskQueue()).rejects.toThrow(
+      /Apps Script gateway returned an invalid processTaskQueue response/,
+    );
+  });
+
   it("throws the gateway error when the gateway returns ok false", async () => {
     const fetch = vi.fn().mockResolvedValue(
       createJsonResponse({

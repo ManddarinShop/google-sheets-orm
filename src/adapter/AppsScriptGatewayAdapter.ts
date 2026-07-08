@@ -5,6 +5,8 @@ import type {
   EnqueueTasksInput,
   EnqueueTasksResult,
   InitializeSystemSheetsResult,
+  ProcessTaskQueueInput,
+  ProcessTaskQueueResult,
   SheetAdapter,
   SheetCell,
   SheetSnapshot,
@@ -17,6 +19,7 @@ import type {
   AppsScriptGatewayDeleteRowsByKeyResponse,
   AppsScriptGatewayEnqueueTasksResponse,
   AppsScriptGatewayInitializeSystemSheetsResponse,
+  AppsScriptGatewayProcessTaskQueueResponse,
   AppsScriptGatewayReadSheetResponse,
   AppsScriptGatewayRequest,
   AppsScriptGatewayResponse,
@@ -217,6 +220,34 @@ export class AppsScriptGatewayAdapter implements SheetAdapter {
     };
   }
 
+  /**
+   * Runs the Apps Script queue processor for a bounded number of transaction
+   * groups. The processor applies pending tasks to canonical sheets.
+   */
+  async processTaskQueue(
+    input: ProcessTaskQueueInput = {},
+  ): Promise<ProcessTaskQueueResult> {
+    const request: AppsScriptGatewayRequest = {
+      operation: "processTaskQueue",
+    };
+
+    if (input.maxTransactions !== undefined) {
+      request.maxTransactions = input.maxTransactions;
+    }
+
+    const response = requireProcessTaskQueueResponse(
+      await this.request(request),
+    );
+
+    return {
+      processedTransactions: response.processedTransactions,
+      failedTransactions: response.failedTransactions,
+      processedTasks: response.processedTasks,
+      failedTasks: response.failedTasks,
+      remainingPendingTasks: response.remainingPendingTasks,
+    };
+  }
+
   private async request(
     payload: AppsScriptGatewayRequest,
   ): Promise<AppsScriptGatewayResponse> {
@@ -320,6 +351,31 @@ function requireEnqueueTasksResponse(
   return {
     ...value,
     tasks: value.tasks,
+  };
+}
+
+function requireProcessTaskQueueResponse(
+  value: AppsScriptGatewayResponse,
+): AppsScriptGatewayProcessTaskQueueResponse {
+  if (
+    !isNonNegativeInteger(value.processedTransactions) ||
+    !isNonNegativeInteger(value.failedTransactions) ||
+    !isNonNegativeInteger(value.processedTasks) ||
+    !isNonNegativeInteger(value.failedTasks) ||
+    !isNonNegativeInteger(value.remainingPendingTasks)
+  ) {
+    throw new Error(
+      "Apps Script gateway returned an invalid processTaskQueue response",
+    );
+  }
+
+  return {
+    ...value,
+    processedTransactions: value.processedTransactions,
+    failedTransactions: value.failedTransactions,
+    processedTasks: value.processedTasks,
+    failedTasks: value.failedTasks,
+    remainingPendingTasks: value.remainingPendingTasks,
   };
 }
 
@@ -428,6 +484,14 @@ function isEnqueuedTaskResult(
     typeof value.sequence === "number" &&
     Number.isInteger(value.sequence) &&
     value.sequence >= 1
+  );
+}
+
+function isNonNegativeInteger(value: unknown): value is number {
+  return (
+    typeof value === "number" &&
+    Number.isInteger(value) &&
+    value >= 0
   );
 }
 
