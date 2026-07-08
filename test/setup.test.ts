@@ -31,6 +31,9 @@ describe("interactive setup flow", () => {
       readFile("templates/manual-apps-script-gateway/Code.gs", "utf8"),
     ).resolves.toContain("function setupTypedSheets()");
     await expect(
+      readFile("templates/manual-apps-script-gateway/Code.gs", "utf8"),
+    ).resolves.toContain("initializeSystemSheets");
+    await expect(
       readFile("templates/manual-apps-script-gateway/SheetInfo.gs", "utf8"),
     ).resolves.toContain("function setupTypedSheetsSheetInfo()");
   });
