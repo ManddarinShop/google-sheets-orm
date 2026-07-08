@@ -198,6 +198,7 @@ const users = createSheetRepository<User>({
 - [Safety model and adapters](docs/safety-and-adapters.md)
 - [Manual Apps Script gateway setup](templates/manual-apps-script-gateway/README.md)
 - [Integration smoke test](docs/integration-smoke-test.md)
+- [Task queue write model](docs/task-queue-write-model.md)
 - [Setup layer plan](docs/setup-layer-plan.md)
 - [SQL layer plan](docs/sql-layer-plan.md)
 
