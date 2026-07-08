@@ -1,5 +1,6 @@
 import type {
   DeleteRowsByKeyResult,
+  InitializeSystemSheetsResult,
   SheetCell,
   SheetSnapshot,
   UpdateRowsByKeyResult,
@@ -9,6 +10,7 @@ export type AppsScriptGatewayRequest =
   | { operation: "ping" }
   | { operation: "ensureSheet"; sheetName: string }
   | { operation: "initializeSheet"; sheetName: string; headers: string[] }
+  | { operation: "initializeSystemSheets"; sheetName: string; headers: string[] }
   | { operation: "writeHeader"; sheetName: string; headers: string[] }
   | { operation: "readSheet"; sheetName: string }
   | { operation: "appendRow"; sheetName: string; row: SheetCell[] }
@@ -57,6 +59,11 @@ export type AppsScriptGatewayResponse = {
 
 export type AppsScriptGatewayReadSheetResponse = AppsScriptGatewayResponse &
   SheetSnapshot;
+
+export type AppsScriptGatewayInitializeSystemSheetsResponse =
+  AppsScriptGatewayResponse & {
+    systemSheets: InitializeSystemSheetsResult;
+  };
 
 export type AppsScriptGatewayDeleteRowsByKeyResponse =
   AppsScriptGatewayResponse & DeleteRowsByKeyResult;

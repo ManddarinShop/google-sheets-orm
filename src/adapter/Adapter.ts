@@ -47,6 +47,13 @@ export interface UpdateRowsByKeyResult {
   }>;
 }
 
+export interface InitializeSystemSheetsResult {
+  logicalSheetName: string;
+  canonicalSheetName: string;
+  projectionSheetName: string;
+  taskQueueSheetName: string;
+}
+
 export interface SheetAdapter {
   readSheet(sheetName: string): Promise<SheetSnapshot>;
   appendRow(sheetName: string, row: SheetCell[]): Promise<void>;
@@ -89,4 +96,13 @@ export interface SheetAdapter {
   ensureSheet?(sheetName: string): Promise<void>;
   writeHeader?(sheetName: string, headers: string[]): Promise<void>;
   initializeSheet?(sheetName: string, headers: string[]): Promise<void>;
+  /**
+   * Initialize the gateway-owned sheet set for queued writes when supported.
+   * Implementations should create or reuse the visible projection sheet,
+   * canonical data sheet, task queue sheet, and logical-to-canonical mapping.
+   */
+  initializeSystemSheets?(
+    sheetName: string,
+    headers: string[],
+  ): Promise<InitializeSystemSheetsResult>;
 }

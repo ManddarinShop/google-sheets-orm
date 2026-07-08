@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { ConflictError, SchemaDriftError } from "../src/core/Errors.js";
-import { AppsScriptGatewayAdapter } from "../src/index.js";
+import { AppsScriptGatewayAdapter, type SheetAdapter } from "../src/index.js";
 
 function createJsonResponse(value: unknown): Response {
   return {
@@ -317,6 +317,92 @@ describe("AppsScriptGatewayAdapter", () => {
       sheetName: "Users",
       headers: ["id", "email", "_version"],
     });
+  });
+
+  it("initializes system sheets through one Apps Script gateway request", async () => {
+    const fetch = vi.fn().mockResolvedValue(
+      createJsonResponse({
+        ok: true,
+        systemSheets: {
+          logicalSheetName: "Users",
+          canonicalSheetName: "_typed_sheets_data_Users_a1b2c3d4e5f6",
+          projectionSheetName: "Users",
+          taskQueueSheetName: "_typed_sheets_task_queue",
+        },
+      }),
+    );
+    const adapter = new AppsScriptGatewayAdapter({
+      gatewayUrl: "https://script.google.com/macros/s/deployment-id/exec",
+      gatewaySecret: "gateway-secret",
+      fetch,
+    });
+
+    await expect(
+      adapter.initializeSystemSheets("Users", ["id", "email", "_version"]),
+    ).resolves.toEqual({
+      logicalSheetName: "Users",
+      canonicalSheetName: "_typed_sheets_data_Users_a1b2c3d4e5f6",
+      projectionSheetName: "Users",
+      taskQueueSheetName: "_typed_sheets_task_queue",
+    });
+    expectGatewayRequest(fetch, {
+      operation: "initializeSystemSheets",
+      secret: "gateway-secret",
+      sheetName: "Users",
+      headers: ["id", "email", "_version"],
+    });
+  });
+
+  it("exposes system sheet initialization through the SheetAdapter boundary", async () => {
+    const fetch = vi.fn().mockResolvedValue(
+      createJsonResponse({
+        ok: true,
+        systemSheets: {
+          logicalSheetName: "Users",
+          canonicalSheetName: "_typed_sheets_data_Users_a1b2c3d4e5f6",
+          projectionSheetName: "Users",
+          taskQueueSheetName: "_typed_sheets_task_queue",
+        },
+      }),
+    );
+    const adapter: SheetAdapter = new AppsScriptGatewayAdapter({
+      gatewayUrl: "https://script.google.com/macros/s/deployment-id/exec",
+      gatewaySecret: "gateway-secret",
+      fetch,
+    });
+
+    await expect(
+      adapter.initializeSystemSheets?.("Users", ["id", "_version"]),
+    ).resolves.toEqual({
+      logicalSheetName: "Users",
+      canonicalSheetName: "_typed_sheets_data_Users_a1b2c3d4e5f6",
+      projectionSheetName: "Users",
+      taskQueueSheetName: "_typed_sheets_task_queue",
+    });
+  });
+
+  it("rejects invalid initializeSystemSheets response payloads", async () => {
+    const fetch = vi.fn().mockResolvedValue(
+      createJsonResponse({
+        ok: true,
+        systemSheets: {
+          logicalSheetName: "Users",
+          canonicalSheetName: "_typed_sheets_data_Users_a1b2c3d4e5f6",
+          projectionSheetName: "Users",
+        },
+      }),
+    );
+    const adapter = new AppsScriptGatewayAdapter({
+      gatewayUrl: "https://script.google.com/macros/s/deployment-id/exec",
+      gatewaySecret: "gateway-secret",
+      fetch,
+    });
+
+    await expect(
+      adapter.initializeSystemSheets("Users", ["id", "email", "_version"]),
+    ).rejects.toThrow(
+      /Apps Script gateway returned an invalid initializeSystemSheets response/,
+    );
   });
 
   it("throws the gateway error when the gateway returns ok false", async () => {
