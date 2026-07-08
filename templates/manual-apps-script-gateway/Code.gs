@@ -798,22 +798,25 @@ function applyUpdateTask_(table, task) {
   assertCurrentVersion_(table, rowIndex, task);
 
   const payload = requireTaskPayloadObject_(task);
-  const nextRow = requirePayloadObject_(payload.nextRow, "payload.nextRow");
-  const nextVersion = requireTaskFiniteNumber_(
-    nextRow._version,
-    "payload.nextRow._version",
+  const rowToWrite = requirePayloadObject_(
+    payload.rowToWrite,
+    "payload.rowToWrite",
+  );
+  const versionToWrite = requireTaskFiniteNumber_(
+    rowToWrite._version,
+    "payload.rowToWrite._version",
   );
 
-  if (nextVersion <= task.expectedVersion) {
+  if (versionToWrite <= task.expectedVersion) {
     throw gatewayError_(
       "invalid_task",
-      "payload.nextRow._version must advance expectedVersion",
+      "payload.rowToWrite._version must advance expectedVersion",
     );
   }
 
   table.rows[rowIndex] = rowObjectToCanonicalCells_(
     table,
-    nextRow,
+    rowToWrite,
     table.rows[rowIndex],
   );
   assertTaskRowMatchesKey_(table, table.rows[rowIndex], task);
@@ -827,12 +830,39 @@ function applyDeleteTask_(table, task) {
   }
 
   assertCurrentVersion_(table, rowIndex, task);
+  assertDeletePayloadMatchesTask_(task);
 
   table.rows.splice(rowIndex, 1);
   table.rowsByKey = Object.create(null);
   table.rows.forEach(function(row, index) {
     table.rowsByKey[String(row[table.keyIndex])] = index;
   });
+}
+
+function assertDeletePayloadMatchesTask_(task) {
+  const payload = requireTaskPayloadObject_(task);
+  const rowToDelete = requirePayloadObject_(
+    payload.rowToDelete,
+    "payload.rowToDelete",
+  );
+  const versionToDelete = requireTaskFiniteNumber_(
+    rowToDelete._version,
+    "payload.rowToDelete._version",
+  );
+
+  if (String(rowToDelete[task.keyHeader]) !== task.keyValue) {
+    throw gatewayError_(
+      "invalid_task",
+      "payload.rowToDelete key must match queued key",
+    );
+  }
+
+  if (versionToDelete !== task.expectedVersion) {
+    throw gatewayError_(
+      "invalid_task",
+      "payload.rowToDelete._version must match expectedVersion",
+    );
+  }
 }
 
 function assertCurrentVersion_(table, rowIndex, task) {
