@@ -3,6 +3,7 @@ import type {
   EnqueueTaskInput,
   EnqueueTasksResult,
   InitializeSystemSheetsResult,
+  ProcessTaskQueueResult,
   SheetCell,
   SheetSnapshot,
   UpdateRowsByKeyResult,
@@ -16,6 +17,10 @@ export type AppsScriptGatewayRequest =
   | {
       operation: "enqueueTasks";
       tasks: EnqueueTaskInput[];
+    }
+  | {
+      operation: "processTaskQueue";
+      maxTransactions?: number;
     }
   | { operation: "writeHeader"; sheetName: string; headers: string[] }
   | { operation: "readSheet"; sheetName: string }
@@ -73,6 +78,9 @@ export type AppsScriptGatewayInitializeSystemSheetsResponse =
 
 export type AppsScriptGatewayEnqueueTasksResponse =
   AppsScriptGatewayResponse & EnqueueTasksResult;
+
+export type AppsScriptGatewayProcessTaskQueueResponse =
+  AppsScriptGatewayResponse & ProcessTaskQueueResult;
 
 export type AppsScriptGatewayDeleteRowsByKeyResponse =
   AppsScriptGatewayResponse & DeleteRowsByKeyResult;

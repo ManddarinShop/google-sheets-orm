@@ -87,6 +87,18 @@ export interface EnqueueTasksResult {
   }>;
 }
 
+export interface ProcessTaskQueueInput {
+  maxTransactions?: number;
+}
+
+export interface ProcessTaskQueueResult {
+  processedTransactions: number;
+  failedTransactions: number;
+  processedTasks: number;
+  failedTasks: number;
+  remainingPendingTasks: number;
+}
+
 export interface SheetAdapter {
   readSheet(sheetName: string): Promise<SheetSnapshot>;
   appendRow(sheetName: string, row: SheetCell[]): Promise<void>;
@@ -144,4 +156,12 @@ export interface SheetAdapter {
    * task and transaction ids for idempotency.
    */
   enqueueTasks?(input: EnqueueTasksInput): Promise<EnqueueTasksResult>;
+  /**
+   * Process a bounded set of pending queue transaction groups into canonical
+   * sheets. This is an explicit gateway operation; repository writes do not
+   * implicitly process the queue.
+   */
+  processTaskQueue?(
+    input?: ProcessTaskQueueInput,
+  ): Promise<ProcessTaskQueueResult>;
 }
