@@ -462,7 +462,7 @@ describe("manual Apps Script gateway template system sheets", () => {
           expectedVersion: 1,
           payloadJson: JSON.stringify({
             expectedVersion: 1,
-            nextRow: {
+            rowToWrite: {
               id: "o1",
               total: 20,
               _version: 2,
@@ -484,7 +484,7 @@ describe("manual Apps Script gateway template system sheets", () => {
           expectedVersion: 2,
           payloadJson: JSON.stringify({
             expectedVersion: 2,
-            previousRow: {
+            rowToDelete: {
               id: "u2",
               email: "b@test.com",
               _version: 2,
@@ -549,7 +549,7 @@ describe("manual Apps Script gateway template system sheets", () => {
         1,
         JSON.stringify({
           expectedVersion: 1,
-          nextRow: {
+          rowToWrite: {
             id: "o1",
             total: 20,
             _version: 2,
@@ -574,7 +574,7 @@ describe("manual Apps Script gateway template system sheets", () => {
         2,
         JSON.stringify({
           expectedVersion: 2,
-          previousRow: {
+          rowToDelete: {
             id: "u2",
             email: "b@test.com",
             _version: 2,
@@ -695,7 +695,7 @@ describe("manual Apps Script gateway template system sheets", () => {
       expectedVersion: null,
       payloadJson: JSON.stringify({
         expectedVersion: 1,
-        nextRow: { id: "u1", _version: 2 },
+        rowToWrite: { id: "u1", _version: 2 },
       }),
     };
     const deleteTask = {
@@ -709,7 +709,7 @@ describe("manual Apps Script gateway template system sheets", () => {
       expectedVersion: null,
       payloadJson: JSON.stringify({
         expectedVersion: 1,
-        previousRow: { id: "u2", _version: 1 },
+        rowToDelete: { id: "u2", _version: 1 },
       }),
     };
 
@@ -793,7 +793,7 @@ describe("manual Apps Script gateway template system sheets", () => {
           expectedVersion: 1,
           payloadJson: JSON.stringify({
             expectedVersion: 1,
-            nextRow: {
+            rowToWrite: {
               id: "u2",
               email: "new@test.com",
               active: true,
@@ -812,7 +812,7 @@ describe("manual Apps Script gateway template system sheets", () => {
           expectedVersion: 2,
           payloadJson: JSON.stringify({
             expectedVersion: 2,
-            previousRow: {
+            rowToDelete: {
               id: "u3",
               email: "delete@test.com",
               active: true,
@@ -877,7 +877,7 @@ describe("manual Apps Script gateway template system sheets", () => {
           expectedVersion: 99,
           payloadJson: JSON.stringify({
             expectedVersion: 99,
-            nextRow: {
+            rowToWrite: {
               id: "u1",
               email: "stale@test.com",
               _version: 100,
@@ -973,7 +973,7 @@ describe("manual Apps Script gateway template system sheets", () => {
           expectedVersion: 1,
           payloadJson: JSON.stringify({
             expectedVersion: 1,
-            nextRow: {
+            rowToWrite: {
               id: "u1",
               email: "new@test.com",
               _version: 1,
@@ -1003,7 +1003,7 @@ describe("manual Apps Script gateway template system sheets", () => {
     expect(queue?.values[1]?.[13]).toMatch(/must advance expectedVersion/);
   });
 
-  it("fails update tasks with a missing next row version", async () => {
+  it("fails update tasks with a missing rowToWrite version", async () => {
     const gateway = await loadGatewayTemplate();
     const spreadsheet = new FakeSpreadsheet();
     const systemSheets = gateway.initializeSystemSheets_(spreadsheet, {
@@ -1027,7 +1027,7 @@ describe("manual Apps Script gateway template system sheets", () => {
           expectedVersion: 1,
           payloadJson: JSON.stringify({
             expectedVersion: 1,
-            nextRow: {
+            rowToWrite: {
               id: "u1",
               email: "new@test.com",
             },
@@ -1053,7 +1053,164 @@ describe("manual Apps Script gateway template system sheets", () => {
 
     expect(queue?.values[1]?.[4]).toBe("failed");
     expect(queue?.values[1]?.[12]).toBe("invalid_task");
-    expect(queue?.values[1]?.[13]).toMatch(/payload.nextRow._version/);
+    expect(queue?.values[1]?.[13]).toMatch(/payload.rowToWrite._version/);
+  });
+
+  it("fails delete tasks with a missing rowToDelete payload", async () => {
+    const gateway = await loadGatewayTemplate();
+    const spreadsheet = new FakeSpreadsheet();
+    const systemSheets = gateway.initializeSystemSheets_(spreadsheet, {
+      sheetName: "Users",
+      headers: ["id", "email", "_version"],
+    });
+    const canonical = spreadsheet.sheets.get(systemSheets.canonicalSheetName);
+
+    canonical?.values.push(["u1", "a@test.com", 1]);
+
+    gateway.enqueueTasks_(spreadsheet, {
+      tasks: [
+        {
+          taskId: "task-1",
+          transactionId: "tx-1",
+          transactionIndex: 0,
+          operation: "delete",
+          sheetName: "Users",
+          keyHeader: "id",
+          keyValue: "u1",
+          expectedVersion: 1,
+          payloadJson: JSON.stringify({
+            expectedVersion: 1,
+          }),
+        },
+      ],
+    });
+
+    expect(gateway.processTaskQueue_(spreadsheet, {})).toEqual({
+      ok: true,
+      processedTransactions: 0,
+      failedTransactions: 1,
+      processedTasks: 0,
+      failedTasks: 1,
+      remainingPendingTasks: 0,
+    });
+    expect(canonical?.values).toEqual([
+      ["id", "email", "_version"],
+      ["u1", "a@test.com", 1],
+    ]);
+
+    const queue = spreadsheet.sheets.get("_typed_sheets_task_queue");
+
+    expect(queue?.values[1]?.[4]).toBe("failed");
+    expect(queue?.values[1]?.[12]).toBe("invalid_task");
+    expect(queue?.values[1]?.[13]).toMatch(/payload.rowToDelete/);
+  });
+
+  it("fails delete tasks when rowToDelete mismatches the queued key", async () => {
+    const gateway = await loadGatewayTemplate();
+    const spreadsheet = new FakeSpreadsheet();
+    const systemSheets = gateway.initializeSystemSheets_(spreadsheet, {
+      sheetName: "Users",
+      headers: ["id", "email", "_version"],
+    });
+    const canonical = spreadsheet.sheets.get(systemSheets.canonicalSheetName);
+
+    canonical?.values.push(["u1", "a@test.com", 1]);
+
+    gateway.enqueueTasks_(spreadsheet, {
+      tasks: [
+        {
+          taskId: "task-1",
+          transactionId: "tx-1",
+          transactionIndex: 0,
+          operation: "delete",
+          sheetName: "Users",
+          keyHeader: "id",
+          keyValue: "u1",
+          expectedVersion: 1,
+          payloadJson: JSON.stringify({
+            expectedVersion: 1,
+            rowToDelete: {
+              id: "u2",
+              email: "a@test.com",
+              _version: 1,
+            },
+          }),
+        },
+      ],
+    });
+
+    expect(gateway.processTaskQueue_(spreadsheet, {})).toEqual({
+      ok: true,
+      processedTransactions: 0,
+      failedTransactions: 1,
+      processedTasks: 0,
+      failedTasks: 1,
+      remainingPendingTasks: 0,
+    });
+    expect(canonical?.values).toEqual([
+      ["id", "email", "_version"],
+      ["u1", "a@test.com", 1],
+    ]);
+
+    const queue = spreadsheet.sheets.get("_typed_sheets_task_queue");
+
+    expect(queue?.values[1]?.[4]).toBe("failed");
+    expect(queue?.values[1]?.[12]).toBe("invalid_task");
+    expect(queue?.values[1]?.[13]).toMatch(/rowToDelete key/);
+  });
+
+  it("fails delete tasks when rowToDelete mismatches expectedVersion", async () => {
+    const gateway = await loadGatewayTemplate();
+    const spreadsheet = new FakeSpreadsheet();
+    const systemSheets = gateway.initializeSystemSheets_(spreadsheet, {
+      sheetName: "Users",
+      headers: ["id", "email", "_version"],
+    });
+    const canonical = spreadsheet.sheets.get(systemSheets.canonicalSheetName);
+
+    canonical?.values.push(["u1", "a@test.com", 1]);
+
+    gateway.enqueueTasks_(spreadsheet, {
+      tasks: [
+        {
+          taskId: "task-1",
+          transactionId: "tx-1",
+          transactionIndex: 0,
+          operation: "delete",
+          sheetName: "Users",
+          keyHeader: "id",
+          keyValue: "u1",
+          expectedVersion: 1,
+          payloadJson: JSON.stringify({
+            expectedVersion: 1,
+            rowToDelete: {
+              id: "u1",
+              email: "a@test.com",
+              _version: 2,
+            },
+          }),
+        },
+      ],
+    });
+
+    expect(gateway.processTaskQueue_(spreadsheet, {})).toEqual({
+      ok: true,
+      processedTransactions: 0,
+      failedTransactions: 1,
+      processedTasks: 0,
+      failedTasks: 1,
+      remainingPendingTasks: 0,
+    });
+    expect(canonical?.values).toEqual([
+      ["id", "email", "_version"],
+      ["u1", "a@test.com", 1],
+    ]);
+
+    const queue = spreadsheet.sheets.get("_typed_sheets_task_queue");
+
+    expect(queue?.values[1]?.[4]).toBe("failed");
+    expect(queue?.values[1]?.[12]).toBe("invalid_task");
+    expect(queue?.values[1]?.[13]).toMatch(/rowToDelete._version/);
   });
 
   it("clears only trailing canonical rows after replacement rows are written", async () => {
@@ -1080,7 +1237,7 @@ describe("manual Apps Script gateway template system sheets", () => {
           expectedVersion: 1,
           payloadJson: JSON.stringify({
             expectedVersion: 1,
-            previousRow: { id: "u2", _version: 1 },
+            rowToDelete: { id: "u2", _version: 1 },
           }),
         },
       ],

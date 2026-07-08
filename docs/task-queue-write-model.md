@@ -190,7 +190,7 @@ visible in the canonical sheet:
 - insert is already applied when the key exists and the row matches the queued
   row/version
 - update is already applied when the key exists and the row matches
-  `nextRow`/next `_version`
+  `rowToWrite` and the written `_version`
 - delete is already applied when the key is absent and the task has enough
   prior-version evidence to prove this delete removed it
 
@@ -242,7 +242,7 @@ Update payload:
 ```json
 {
   "expectedVersion": 1,
-  "nextRow": {
+  "rowToWrite": {
     "id": "u1",
     "email": "a@test.com",
     "age": 21,
@@ -257,7 +257,7 @@ Delete payload:
 ```json
 {
   "expectedVersion": 2,
-  "previousRow": {
+  "rowToDelete": {
     "id": "u1",
     "email": "a@test.com",
     "age": 21,
@@ -271,6 +271,32 @@ The queue row duplicates `operation`, `sheetName`, `keyHeader`, `keyValue`, and
 `expectedVersion` outside the JSON payload so the processor can filter and
 diagnose tasks without parsing every payload first.
 
+## Repository Cache Policy
+
+Queued writes split "accepted into the queue" from "applied to canonical data".
+Repository cache entries must therefore represent confirmed canonical state
+only. A queued write must not update the confirmed cache with the submitted
+payload just because the task append succeeded.
+
+First implementation policy:
+
+- cache implementation is out of scope for the first task queue branches
+- queued write success means the task was durably appended, not that canonical
+  data changed
+- after a queued write is appended, invalidate cache entries for the affected
+  keys instead of mutating them optimistically
+- do not expose queued payload values as confirmed repository reads
+- a later read should refresh from the canonical sheet when the affected key was
+  invalidated
+- failed transactions must not require cache rollback because pending payloads
+  were never written into confirmed cache
+
+Future pending-aware APIs may keep a separate pending layer for user
+experience, but that layer must stay distinct from confirmed canonical cache.
+For example, `save(entity)` may report that a write was queued, while
+`findById()` continues to return confirmed canonical data unless an explicit
+pending-read mode is designed.
+
 ## Queue Data Retention and Redaction
 
 Queue sheets are hidden internal sheets, but they are still part of the user's
@@ -278,7 +304,7 @@ spreadsheet and can contain sensitive application data. Treat
 `_typed_sheets_task_queue` as part of the sensitive data surface.
 
 Because `payloadJson` may contain full row data, including deleted values in
-`previousRow`, the queue must not retain successful task payloads indefinitely.
+`rowToDelete`, the queue must not retain successful task payloads indefinitely.
 
 First implementation retention policy:
 

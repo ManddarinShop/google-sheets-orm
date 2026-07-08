@@ -452,7 +452,7 @@ describe("AppsScriptGatewayAdapter", () => {
             expectedVersion: 1,
             payloadJson: JSON.stringify({
               expectedVersion: 1,
-              nextRow: {
+              rowToWrite: {
                 id: "o1",
                 total: 20,
                 _version: 2,
@@ -500,7 +500,7 @@ describe("AppsScriptGatewayAdapter", () => {
           expectedVersion: 1,
           payloadJson: JSON.stringify({
             expectedVersion: 1,
-            nextRow: {
+            rowToWrite: {
               id: "o1",
               total: 20,
               _version: 2,
