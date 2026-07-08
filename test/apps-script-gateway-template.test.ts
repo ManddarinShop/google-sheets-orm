@@ -16,6 +16,28 @@ interface GatewayTemplate {
       gatewayUrl?: string;
     };
   } | null): string;
+  enqueueTasks_(
+    spreadsheet: FakeSpreadsheet,
+    request: {
+      tasks: Array<{
+        taskId: string;
+        transactionId: string;
+        transactionIndex: number;
+        operation: "insert" | "update" | "delete";
+        sheetName: string;
+        keyHeader: string;
+        keyValue: string;
+        expectedVersion: number | null;
+        payloadJson: string;
+      }>;
+    },
+  ): {
+    ok: true;
+    tasks: Array<{
+      taskId: string;
+      sequence: number;
+    }>;
+  };
   initializeSystemSheets_(
     spreadsheet: FakeSpreadsheet,
     request: { sheetName: string; headers: string[] },
@@ -179,6 +201,7 @@ describe("manual Apps Script gateway template system sheets", () => {
         "  createCanonicalSheetName_,",
         "  createShortHash_,",
         "  getGatewayUrl_,",
+        "  enqueueTasks_,",
         "  initializeSystemSheets_,",
         "};",
       ].join("\n"),
@@ -360,6 +383,325 @@ describe("manual Apps Script gateway template system sheets", () => {
     expect(queue?.values[1]).toEqual(["task-1"]);
     expect(canonical?.hideCalls).toBe(2);
     expect(queue?.protectCalls).toBe(2);
+  });
+
+  it("appends pending tasks to the hidden task queue with gateway-assigned sequences", async () => {
+    const gateway = await loadGatewayTemplate();
+    const spreadsheet = new FakeSpreadsheet();
+    const firstResult = gateway.enqueueTasks_(spreadsheet, {
+      tasks: [
+        {
+          taskId: "task-1",
+          transactionId: "tx-1",
+          transactionIndex: 0,
+          operation: "insert",
+          sheetName: "Users",
+          keyHeader: "id",
+          keyValue: "u1",
+          expectedVersion: null,
+          payloadJson: JSON.stringify({
+            row: {
+              id: "u1",
+              email: "a@test.com",
+              _version: 1,
+            },
+          }),
+        },
+        {
+          taskId: "task-2",
+          transactionId: "tx-1",
+          transactionIndex: 1,
+          operation: "update",
+          sheetName: "Orders",
+          keyHeader: "id",
+          keyValue: "o1",
+          expectedVersion: 1,
+          payloadJson: JSON.stringify({
+            expectedVersion: 1,
+            nextRow: {
+              id: "o1",
+              total: 20,
+              _version: 2,
+            },
+          }),
+        },
+      ],
+    });
+    const secondResult = gateway.enqueueTasks_(spreadsheet, {
+      tasks: [
+        {
+          taskId: "task-3",
+          transactionId: "tx-2",
+          transactionIndex: 0,
+          operation: "delete",
+          sheetName: "Users",
+          keyHeader: "id",
+          keyValue: "u2",
+          expectedVersion: 2,
+          payloadJson: JSON.stringify({
+            expectedVersion: 2,
+            previousRow: {
+              id: "u2",
+              email: "b@test.com",
+              _version: 2,
+            },
+          }),
+        },
+      ],
+    });
+
+    expect(firstResult).toEqual({
+      ok: true,
+      tasks: [
+        { taskId: "task-1", sequence: 1 },
+        { taskId: "task-2", sequence: 2 },
+      ],
+    });
+    expect(secondResult).toEqual({
+      ok: true,
+      tasks: [{ taskId: "task-3", sequence: 3 }],
+    });
+
+    const queue = spreadsheet.sheets.get("_typed_sheets_task_queue");
+
+    expect(queue?.values[0]).toEqual(gateway.TYPED_SHEETS_TASK_QUEUE_HEADERS);
+    expect(queue?.hideCalls).toBe(2);
+    expect(queue?.protectCalls).toBe(2);
+    expect(queue?.values.slice(1)).toEqual([
+      [
+        "task-1",
+        "tx-1",
+        0,
+        1,
+        "pending",
+        "insert",
+        "Users",
+        "id",
+        "u1",
+        "",
+        JSON.stringify({
+          row: {
+            id: "u1",
+            email: "a@test.com",
+            _version: 1,
+          },
+        }),
+        0,
+        "",
+        "",
+        expect.any(String),
+        expect.any(String),
+      ],
+      [
+        "task-2",
+        "tx-1",
+        1,
+        2,
+        "pending",
+        "update",
+        "Orders",
+        "id",
+        "o1",
+        1,
+        JSON.stringify({
+          expectedVersion: 1,
+          nextRow: {
+            id: "o1",
+            total: 20,
+            _version: 2,
+          },
+        }),
+        0,
+        "",
+        "",
+        expect.any(String),
+        expect.any(String),
+      ],
+      [
+        "task-3",
+        "tx-2",
+        0,
+        3,
+        "pending",
+        "delete",
+        "Users",
+        "id",
+        "u2",
+        2,
+        JSON.stringify({
+          expectedVersion: 2,
+          previousRow: {
+            id: "u2",
+            email: "b@test.com",
+            _version: 2,
+          },
+        }),
+        0,
+        "",
+        "",
+        expect.any(String),
+        expect.any(String),
+      ],
+    ]);
+  });
+
+  it("returns existing queued tasks for idempotent task id replays", async () => {
+    const gateway = await loadGatewayTemplate();
+    const spreadsheet = new FakeSpreadsheet();
+    const task = {
+      taskId: "task-1",
+      transactionId: "tx-1",
+      transactionIndex: 0,
+      operation: "insert" as const,
+      sheetName: "Users",
+      keyHeader: "id",
+      keyValue: "u1",
+      expectedVersion: null,
+      payloadJson: JSON.stringify({ row: { id: "u1", _version: 1 } }),
+    };
+
+    expect(
+      gateway.enqueueTasks_(spreadsheet, {
+        tasks: [task],
+      }),
+    ).toEqual({
+      ok: true,
+      tasks: [{ taskId: "task-1", sequence: 1 }],
+    });
+
+    expect(
+      gateway.enqueueTasks_(spreadsheet, {
+        tasks: [task],
+      }),
+    ).toEqual({
+      ok: true,
+      tasks: [{ taskId: "task-1", sequence: 1 }],
+    });
+
+    const queue = spreadsheet.sheets.get("_typed_sheets_task_queue");
+
+    expect(queue?.values).toHaveLength(2);
+  });
+
+  it("rejects duplicate task ids with a different payload", async () => {
+    const gateway = await loadGatewayTemplate();
+    const spreadsheet = new FakeSpreadsheet();
+    const task = {
+      taskId: "task-1",
+      transactionId: "tx-1",
+      transactionIndex: 0,
+      operation: "insert" as const,
+      sheetName: "Users",
+      keyHeader: "id",
+      keyValue: "u1",
+      expectedVersion: null,
+      payloadJson: JSON.stringify({ row: { id: "u1", _version: 1 } }),
+    };
+
+    gateway.enqueueTasks_(spreadsheet, {
+      tasks: [task],
+    });
+
+    expect(() =>
+      gateway.enqueueTasks_(spreadsheet, {
+        tasks: [
+          {
+            ...task,
+            payloadJson: JSON.stringify({ row: { id: "u1", _version: 2 } }),
+          },
+        ],
+      }),
+    ).toThrow(/Task already exists: task-1/);
+  });
+
+  it("rejects queued insert tasks with a numeric expected version", async () => {
+    const gateway = await loadGatewayTemplate();
+    const spreadsheet = new FakeSpreadsheet();
+
+    expect(() =>
+      gateway.enqueueTasks_(spreadsheet, {
+        tasks: [
+          {
+            taskId: "task-1",
+            transactionId: "tx-1",
+            transactionIndex: 0,
+            operation: "insert",
+            sheetName: "Users",
+            keyHeader: "id",
+            keyValue: "u1",
+            expectedVersion: 1,
+            payloadJson: JSON.stringify({ row: { id: "u1", _version: 1 } }),
+          },
+        ],
+      }),
+    ).toThrow(/expectedVersion must be null or blank for insert tasks/);
+  });
+
+  it("rejects queued update and delete tasks without numeric expected versions", async () => {
+    const gateway = await loadGatewayTemplate();
+    const spreadsheet = new FakeSpreadsheet();
+    const updateTask = {
+      taskId: "task-1",
+      transactionId: "tx-1",
+      transactionIndex: 0,
+      operation: "update" as const,
+      sheetName: "Users",
+      keyHeader: "id",
+      keyValue: "u1",
+      expectedVersion: null,
+      payloadJson: JSON.stringify({
+        expectedVersion: 1,
+        nextRow: { id: "u1", _version: 2 },
+      }),
+    };
+    const deleteTask = {
+      taskId: "task-2",
+      transactionId: "tx-2",
+      transactionIndex: 0,
+      operation: "delete" as const,
+      sheetName: "Users",
+      keyHeader: "id",
+      keyValue: "u2",
+      expectedVersion: null,
+      payloadJson: JSON.stringify({
+        expectedVersion: 1,
+        previousRow: { id: "u2", _version: 1 },
+      }),
+    };
+
+    expect(() =>
+      gateway.enqueueTasks_(spreadsheet, {
+        tasks: [updateTask],
+      }),
+    ).toThrow(/expectedVersion must be a number/);
+    expect(() =>
+      gateway.enqueueTasks_(spreadsheet, {
+        tasks: [deleteTask],
+      }),
+    ).toThrow(/expectedVersion must be a number/);
+  });
+
+  it("rejects queued tasks with string transaction indexes", async () => {
+    const gateway = await loadGatewayTemplate();
+    const spreadsheet = new FakeSpreadsheet();
+
+    expect(() =>
+      gateway.enqueueTasks_(spreadsheet, {
+        tasks: [
+          {
+            taskId: "task-1",
+            transactionId: "tx-1",
+            transactionIndex: "0" as unknown as number,
+            operation: "insert",
+            sheetName: "Users",
+            keyHeader: "id",
+            keyValue: "u1",
+            expectedVersion: null,
+            payloadJson: JSON.stringify({ row: { id: "u1", _version: 1 } }),
+          },
+        ],
+      }),
+    ).toThrow(/transactionIndex must be a non-negative integer/);
   });
 
   it("does not adopt a colliding internal sheet without a stored mapping", async () => {

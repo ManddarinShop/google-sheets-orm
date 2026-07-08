@@ -1,5 +1,7 @@
 import type {
   DeleteRowsByKeyResult,
+  EnqueueTaskInput,
+  EnqueueTasksResult,
   InitializeSystemSheetsResult,
   SheetCell,
   SheetSnapshot,
@@ -11,6 +13,10 @@ export type AppsScriptGatewayRequest =
   | { operation: "ensureSheet"; sheetName: string }
   | { operation: "initializeSheet"; sheetName: string; headers: string[] }
   | { operation: "initializeSystemSheets"; sheetName: string; headers: string[] }
+  | {
+      operation: "enqueueTasks";
+      tasks: EnqueueTaskInput[];
+    }
   | { operation: "writeHeader"; sheetName: string; headers: string[] }
   | { operation: "readSheet"; sheetName: string }
   | { operation: "appendRow"; sheetName: string; row: SheetCell[] }
@@ -64,6 +70,9 @@ export type AppsScriptGatewayInitializeSystemSheetsResponse =
   AppsScriptGatewayResponse & {
     systemSheets: InitializeSystemSheetsResult;
   };
+
+export type AppsScriptGatewayEnqueueTasksResponse =
+  AppsScriptGatewayResponse & EnqueueTasksResult;
 
 export type AppsScriptGatewayDeleteRowsByKeyResponse =
   AppsScriptGatewayResponse & DeleteRowsByKeyResult;
