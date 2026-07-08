@@ -405,6 +405,146 @@ describe("AppsScriptGatewayAdapter", () => {
     );
   });
 
+  it("enqueues write tasks through one Apps Script gateway request", async () => {
+    const fetch = vi.fn().mockResolvedValue(
+      createJsonResponse({
+        ok: true,
+        tasks: [
+          { taskId: "task-1", sequence: 41 },
+          { taskId: "task-2", sequence: 42 },
+        ],
+      }),
+    );
+    const adapter: SheetAdapter = new AppsScriptGatewayAdapter({
+      gatewayUrl: "https://script.google.com/macros/s/deployment-id/exec",
+      gatewaySecret: "gateway-secret",
+      fetch,
+    });
+
+    await expect(
+      adapter.enqueueTasks?.({
+        tasks: [
+          {
+            taskId: "task-1",
+            transactionId: "tx-1",
+            transactionIndex: 0,
+            operation: "insert",
+            sheetName: "Users",
+            keyHeader: "id",
+            keyValue: "u1",
+            expectedVersion: null,
+            payloadJson: JSON.stringify({
+              row: {
+                id: "u1",
+                email: "a@test.com",
+                _version: 1,
+              },
+            }),
+          },
+          {
+            taskId: "task-2",
+            transactionId: "tx-1",
+            transactionIndex: 1,
+            operation: "update",
+            sheetName: "Orders",
+            keyHeader: "id",
+            keyValue: "o1",
+            expectedVersion: 1,
+            payloadJson: JSON.stringify({
+              expectedVersion: 1,
+              nextRow: {
+                id: "o1",
+                total: 20,
+                _version: 2,
+              },
+            }),
+          },
+        ],
+      }),
+    ).resolves.toEqual({
+      tasks: [
+        { taskId: "task-1", sequence: 41 },
+        { taskId: "task-2", sequence: 42 },
+      ],
+    });
+
+    expectGatewayRequest(fetch, {
+      operation: "enqueueTasks",
+      secret: "gateway-secret",
+      tasks: [
+        {
+          taskId: "task-1",
+          transactionId: "tx-1",
+          transactionIndex: 0,
+          operation: "insert",
+          sheetName: "Users",
+          keyHeader: "id",
+          keyValue: "u1",
+          expectedVersion: null,
+          payloadJson: JSON.stringify({
+            row: {
+              id: "u1",
+              email: "a@test.com",
+              _version: 1,
+            },
+          }),
+        },
+        {
+          taskId: "task-2",
+          transactionId: "tx-1",
+          transactionIndex: 1,
+          operation: "update",
+          sheetName: "Orders",
+          keyHeader: "id",
+          keyValue: "o1",
+          expectedVersion: 1,
+          payloadJson: JSON.stringify({
+            expectedVersion: 1,
+            nextRow: {
+              id: "o1",
+              total: 20,
+              _version: 2,
+            },
+          }),
+        },
+      ],
+    });
+  });
+
+  it("rejects invalid enqueueTasks response payloads", async () => {
+    const fetch = vi.fn().mockResolvedValue(
+      createJsonResponse({
+        ok: true,
+        tasks: [{ taskId: "task-1", sequence: "1" }],
+      }),
+    );
+    const adapter = new AppsScriptGatewayAdapter({
+      gatewayUrl: "https://script.google.com/macros/s/deployment-id/exec",
+      gatewaySecret: "gateway-secret",
+      fetch,
+    });
+
+    await expect(
+      adapter.enqueueTasks({
+        tasks: [
+          {
+            taskId: "task-1",
+            transactionId: "tx-1",
+            transactionIndex: 0,
+            operation: "insert",
+            sheetName: "Users",
+            keyHeader: "id",
+            keyValue: "u1",
+            expectedVersion: null,
+            payloadJson: JSON.stringify({ row: { id: "u1", _version: 1 } }),
+          },
+        ],
+      }),
+    ).rejects.toThrow(
+      /Apps Script gateway returned an invalid enqueueTasks response/,
+    );
+  });
+
   it("throws the gateway error when the gateway returns ok false", async () => {
     const fetch = vi.fn().mockResolvedValue(
       createJsonResponse({
