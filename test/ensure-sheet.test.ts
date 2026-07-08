@@ -94,6 +94,62 @@ describe("repository sheet initialization", () => {
     ]);
   });
 
+  it("keeps repository initialization on initializeSheet until system sheet routing exists", async () => {
+    const initializedSystemSheets: Array<{
+      sheetName: string;
+      headers: string[];
+    }> = [];
+    const initializedSheets: Array<{ sheetName: string; headers: string[] }> =
+      [];
+    const snapshot: SheetSnapshot = {
+      headers: ["id", "email", "age", "active", "_version"],
+      rows: [],
+    };
+    const adapter: SheetAdapter = {
+      async initializeSystemSheets(sheetName, headers) {
+        initializedSystemSheets.push({ sheetName, headers: [...headers] });
+
+        return {
+          logicalSheetName: sheetName,
+          canonicalSheetName: "_typed_sheets_data_Users_a1b2c3d4e5f6",
+          projectionSheetName: sheetName,
+          taskQueueSheetName: "_typed_sheets_task_queue",
+        };
+      },
+      async initializeSheet(sheetName, headers) {
+        initializedSheets.push({ sheetName, headers: [...headers] });
+      },
+      async readSheet() {
+        return snapshot;
+      },
+      async appendRow() {},
+      async updateRow() {},
+      async ensureSheet() {
+        throw new Error("ensureSheet should not be called");
+      },
+      async writeHeader() {
+        throw new Error("writeHeader should not be called");
+      },
+    };
+
+    const users = createSheetRepository<User>({
+      adapter,
+      sheetName: "Users",
+      key: "id",
+      columns,
+    }) as unknown as InitializableRepository;
+
+    await users.ensureSheet();
+
+    expect(initializedSystemSheets).toEqual([]);
+    expect(initializedSheets).toEqual([
+      {
+        sheetName: "Users",
+        headers: ["id", "email", "age", "active", "_version"],
+      },
+    ]);
+  });
+
   it("does not rewrite headers when the existing schema matches", async () => {
     const adapter = new FakeSheetAdapter({
       Users: {
