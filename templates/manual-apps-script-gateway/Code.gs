@@ -92,6 +92,10 @@ function doPost(e) {
         });
       }
 
+      if (operation === "enqueueTasks") {
+        return json_(enqueueTasks_(spreadsheet, request));
+      }
+
       if (operation === "writeHeader") {
         writeHeader_(spreadsheet, request);
         return json_({ ok: true });
@@ -171,6 +175,7 @@ function validateOperation_(request) {
     "ensureSheet",
     "initializeSheet",
     "initializeSystemSheets",
+    "enqueueTasks",
     "writeHeader",
     "readSheet",
     "appendRow",
@@ -187,6 +192,11 @@ function validateOperation_(request) {
   }
 
   if (operation === "ping") {
+    return operation;
+  }
+
+  if (operation === "enqueueTasks") {
+    requireQueueTasks_(request.tasks, "tasks");
     return operation;
   }
 
@@ -298,6 +308,195 @@ function initializeSystemSheets_(spreadsheet, request) {
     projectionSheetName: logicalSheetName,
     taskQueueSheetName: TYPED_SHEETS_TASK_QUEUE_SHEET_NAME,
   };
+}
+
+/**
+ * Appends one transaction worth of write tasks to the durable internal queue.
+ *
+ * The caller supplies stable task ids and transaction ids. The gateway assigns
+ * monotonic sequence values under the document lock so processors can replay
+ * write intent in enqueue order.
+ */
+function enqueueTasks_(spreadsheet, request) {
+  const tasks = requireQueueTasks_(request.tasks, "tasks");
+  const queueSheet = ensureTaskQueueSheet_(spreadsheet);
+  const queueState = readTaskQueueState_(queueSheet);
+  const now = new Date().toISOString();
+  const seenTaskIds = Object.create(null);
+  const rows = [];
+  const enqueuedTasks = [];
+
+  tasks.forEach(function(task, index) {
+    if (seenTaskIds[task.taskId]) {
+      throw gatewayError_(
+        "invalid_request",
+        "tasks must not contain duplicate taskId values",
+      );
+    }
+
+    const existingTask = queueState.tasksById[task.taskId];
+
+    if (existingTask && isSameQueuedTask_(existingTask, task)) {
+      enqueuedTasks.push({
+        taskId: task.taskId,
+        sequence: existingTask.sequence,
+      });
+      seenTaskIds[task.taskId] = true;
+      return;
+    }
+
+    if (existingTask) {
+      throw gatewayError_(
+        "duplicate_task",
+        "Task already exists: " + task.taskId,
+      );
+    }
+
+    seenTaskIds[task.taskId] = true;
+
+    const sequence = queueState.maxSequence + rows.length + 1;
+
+    rows.push([
+      task.taskId,
+      task.transactionId,
+      task.transactionIndex,
+      sequence,
+      "pending",
+      task.operation,
+      task.sheetName,
+      task.keyHeader,
+      task.keyValue,
+      task.expectedVersion === null ? "" : task.expectedVersion,
+      task.payloadJson,
+      0,
+      "",
+      "",
+      now,
+      now,
+    ]);
+    enqueuedTasks.push({
+      taskId: task.taskId,
+      sequence: sequence,
+    });
+  });
+
+  if (rows.length > 0) {
+    queueSheet
+      .getRange(
+        queueSheet.getLastRow() + 1,
+        1,
+        rows.length,
+        TYPED_SHEETS_TASK_QUEUE_HEADERS.length,
+      )
+      .setValues(rows);
+  }
+
+  return {
+    ok: true,
+    tasks: enqueuedTasks,
+  };
+}
+
+function ensureTaskQueueSheet_(spreadsheet) {
+  ensureInternalSheet_(
+    spreadsheet,
+    TYPED_SHEETS_TASK_QUEUE_SHEET_NAME,
+    TYPED_SHEETS_TASK_QUEUE_HEADERS,
+  );
+
+  const queueSheet = getSheet_(
+    spreadsheet,
+    TYPED_SHEETS_TASK_QUEUE_SHEET_NAME,
+  );
+  const headerValues = queueSheet
+    .getRange(1, 1, 1, TYPED_SHEETS_TASK_QUEUE_HEADERS.length)
+    .getValues()[0]
+    .map(function(value) {
+      return String(value);
+    });
+
+  assertExpectedHeaders_(
+    headerValues,
+    TYPED_SHEETS_TASK_QUEUE_HEADERS,
+    "enqueueTasks",
+  );
+
+  return queueSheet;
+}
+
+function readTaskQueueState_(queueSheet) {
+  const lastRow = queueSheet.getLastRow();
+  const state = {
+    maxSequence: 0,
+    tasksById: Object.create(null),
+  };
+
+  if (lastRow < 2) {
+    return state;
+  }
+
+  const taskIdIndex = TYPED_SHEETS_TASK_QUEUE_HEADERS.indexOf("taskId");
+  const transactionIdIndex =
+    TYPED_SHEETS_TASK_QUEUE_HEADERS.indexOf("transactionId");
+  const transactionIndexIndex =
+    TYPED_SHEETS_TASK_QUEUE_HEADERS.indexOf("transactionIndex");
+  const sequenceIndex = TYPED_SHEETS_TASK_QUEUE_HEADERS.indexOf("sequence");
+  const operationIndex = TYPED_SHEETS_TASK_QUEUE_HEADERS.indexOf("operation");
+  const sheetNameIndex = TYPED_SHEETS_TASK_QUEUE_HEADERS.indexOf("sheetName");
+  const keyHeaderIndex = TYPED_SHEETS_TASK_QUEUE_HEADERS.indexOf("keyHeader");
+  const keyValueIndex = TYPED_SHEETS_TASK_QUEUE_HEADERS.indexOf("keyValue");
+  const expectedVersionIndex =
+    TYPED_SHEETS_TASK_QUEUE_HEADERS.indexOf("expectedVersion");
+  const payloadJsonIndex =
+    TYPED_SHEETS_TASK_QUEUE_HEADERS.indexOf("payloadJson");
+  const rows = queueSheet
+    .getRange(
+      2,
+      1,
+      lastRow - 1,
+      TYPED_SHEETS_TASK_QUEUE_HEADERS.length,
+    )
+    .getValues();
+
+  rows.forEach(function(row) {
+    const taskId = String(row[taskIdIndex] || "");
+    const sequence = Number(row[sequenceIndex]);
+
+    if (taskId !== "") {
+      state.tasksById[taskId] = {
+        taskId: taskId,
+        transactionId: String(row[transactionIdIndex] || ""),
+        transactionIndex: Number(row[transactionIndexIndex]),
+        sequence: sequence,
+        operation: String(row[operationIndex] || ""),
+        sheetName: String(row[sheetNameIndex] || ""),
+        keyHeader: String(row[keyHeaderIndex] || ""),
+        keyValue: String(row[keyValueIndex] || ""),
+        expectedVersion: row[expectedVersionIndex] === ""
+          || row[expectedVersionIndex] === null
+          ? null
+          : Number(row[expectedVersionIndex]),
+        payloadJson: String(row[payloadJsonIndex] || ""),
+      };
+    }
+
+    if (Number.isFinite(sequence) && sequence > state.maxSequence) {
+      state.maxSequence = sequence;
+    }
+  });
+
+  return state;
+}
+
+function isSameQueuedTask_(existingTask, task) {
+  return existingTask.transactionId === task.transactionId
+    && existingTask.transactionIndex === task.transactionIndex
+    && existingTask.operation === task.operation
+    && existingTask.sheetName === task.sheetName
+    && existingTask.keyHeader === task.keyHeader
+    && existingTask.keyValue === task.keyValue
+    && existingTask.expectedVersion === task.expectedVersion
+    && existingTask.payloadJson === task.payloadJson;
 }
 
 function getOrCreateCanonicalSheetName_(spreadsheet, logicalSheetName) {
@@ -973,6 +1172,98 @@ function requireUpdateRows_(value, name) {
   return value;
 }
 
+function requireQueueTasks_(value, name) {
+  if (!Array.isArray(value) || value.length === 0) {
+    throw gatewayError_("invalid_request", name + " must be a non-empty array");
+  }
+
+  return value.map(function(task, index) {
+    const taskName = name + "[" + index + "]";
+
+    if (!task || typeof task !== "object" || Array.isArray(task)) {
+      throw gatewayError_("invalid_request", taskName + " must be an object");
+    }
+
+    const operation = requireQueueOperation_(
+      task.operation,
+      taskName + ".operation",
+    );
+
+    return {
+      taskId: requireString_(task.taskId, taskName + ".taskId"),
+      transactionId: requireString_(
+        task.transactionId,
+        taskName + ".transactionId",
+      ),
+      transactionIndex: requireNonNegativeInteger_(
+        task.transactionIndex,
+        taskName + ".transactionIndex",
+      ),
+      operation: operation,
+      sheetName: requireProjectionSheetName_(
+        task.sheetName,
+        taskName + ".sheetName",
+      ),
+      keyHeader: requireString_(task.keyHeader, taskName + ".keyHeader"),
+      keyValue: requireString_(task.keyValue, taskName + ".keyValue"),
+      expectedVersion: requireQueueExpectedVersion_(
+        task.expectedVersion,
+        operation,
+        taskName + ".expectedVersion",
+      ),
+      payloadJson: requireJsonObjectString_(
+        task.payloadJson,
+        taskName + ".payloadJson",
+      ),
+    };
+  });
+}
+
+function requireQueueOperation_(value, name) {
+  const operation = requireString_(value, name);
+
+  if (["insert", "update", "delete"].indexOf(operation) === -1) {
+    throw gatewayError_(
+      "invalid_request",
+      name + " must be insert, update, or delete",
+    );
+  }
+
+  return operation;
+}
+
+function requireQueueExpectedVersion_(value, operation, name) {
+  if (operation === "insert") {
+    if (value === null || value === "" || value === undefined) {
+      return null;
+    }
+
+    throw gatewayError_(
+      "invalid_request",
+      name + " must be null or blank for insert tasks",
+    );
+  }
+
+  return requireFiniteNumber_(value, name);
+}
+
+function requireJsonObjectString_(value, name) {
+  const json = requireString_(value, name);
+  let parsed;
+
+  try {
+    parsed = JSON.parse(json);
+  } catch (error) {
+    throw gatewayError_("invalid_request", name + " must be valid JSON");
+  }
+
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw gatewayError_("invalid_request", name + " must encode an object");
+  }
+
+  return json;
+}
+
 function requirePositiveInteger_(value, name) {
   const numberValue = Number(value);
 
@@ -981,6 +1272,17 @@ function requirePositiveInteger_(value, name) {
   }
 
   return numberValue;
+}
+
+function requireNonNegativeInteger_(value, name) {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
+    throw gatewayError_(
+      "invalid_request",
+      name + " must be a non-negative integer",
+    );
+  }
+
+  return value;
 }
 
 function requirePositiveIntegerArray_(value, name) {

@@ -54,6 +54,39 @@ export interface InitializeSystemSheetsResult {
   taskQueueSheetName: string;
 }
 
+export type EnqueueTaskOperation = "insert" | "update" | "delete";
+
+interface EnqueueTaskBaseInput {
+  taskId: string;
+  transactionId: string;
+  transactionIndex: number;
+  sheetName: string;
+  keyHeader: string;
+  keyValue: string;
+  payloadJson: string;
+}
+
+export type EnqueueTaskInput =
+  | (EnqueueTaskBaseInput & {
+      operation: "insert";
+      expectedVersion: null;
+    })
+  | (EnqueueTaskBaseInput & {
+      operation: "update" | "delete";
+      expectedVersion: number;
+    });
+
+export interface EnqueueTasksInput {
+  tasks: EnqueueTaskInput[];
+}
+
+export interface EnqueueTasksResult {
+  tasks: Array<{
+    taskId: string;
+    sequence: number;
+  }>;
+}
+
 export interface SheetAdapter {
   readSheet(sheetName: string): Promise<SheetSnapshot>;
   appendRow(sheetName: string, row: SheetCell[]): Promise<void>;
@@ -105,4 +138,10 @@ export interface SheetAdapter {
     sheetName: string,
     headers: string[],
   ): Promise<InitializeSystemSheetsResult>;
+  /**
+   * Append one transaction worth of write tasks to the internal queue. The
+   * gateway assigns monotonic sequence values while the caller supplies stable
+   * task and transaction ids for idempotency.
+   */
+  enqueueTasks?(input: EnqueueTasksInput): Promise<EnqueueTasksResult>;
 }

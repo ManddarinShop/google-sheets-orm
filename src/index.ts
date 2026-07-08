@@ -13,6 +13,7 @@ export type { GoogleSheetsAdapterOptions } from "./adapter/GoogleSheetsAdapter.j
 export type { AppsScriptGatewayAdapterOptions } from "./adapter/AppsScriptGatewayAdapter.js";
 export type {
   AppsScriptGatewayAuthenticatedRequest,
+  AppsScriptGatewayEnqueueTasksResponse,
   AppsScriptGatewayInitializeSystemSheetsResponse,
   AppsScriptGatewayReadSheetResponse,
   AppsScriptGatewayRequest,
@@ -20,6 +21,10 @@ export type {
 } from "./adapter/AppsScriptGatewayProtocol.js";
 
 export type {
+  EnqueueTaskInput,
+  EnqueueTaskOperation,
+  EnqueueTasksInput,
+  EnqueueTasksResult,
   InitializeSystemSheetsResult,
   SheetAdapter,
   SheetCell,

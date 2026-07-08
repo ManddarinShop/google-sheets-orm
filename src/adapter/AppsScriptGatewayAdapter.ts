@@ -2,6 +2,8 @@ import type {
   AppendRowsInput,
   DeleteRowsByKeyInput,
   DeleteRowsByKeyResult,
+  EnqueueTasksInput,
+  EnqueueTasksResult,
   InitializeSystemSheetsResult,
   SheetAdapter,
   SheetCell,
@@ -13,6 +15,7 @@ import { ConflictError, SchemaDriftError } from "../core/Errors.js";
 import type {
   AppsScriptGatewayAuthenticatedRequest,
   AppsScriptGatewayDeleteRowsByKeyResponse,
+  AppsScriptGatewayEnqueueTasksResponse,
   AppsScriptGatewayInitializeSystemSheetsResponse,
   AppsScriptGatewayReadSheetResponse,
   AppsScriptGatewayRequest,
@@ -197,6 +200,23 @@ export class AppsScriptGatewayAdapter implements SheetAdapter {
     return response.systemSheets;
   }
 
+  /**
+   * Appends prepared repository write tasks to the gateway queue. The gateway
+   * owns sequence assignment under the Apps Script document lock.
+   */
+  async enqueueTasks(input: EnqueueTasksInput): Promise<EnqueueTasksResult> {
+    const response = requireEnqueueTasksResponse(
+      await this.request({
+        operation: "enqueueTasks",
+        tasks: input.tasks,
+      }),
+    );
+
+    return {
+      tasks: response.tasks,
+    };
+  }
+
   private async request(
     payload: AppsScriptGatewayRequest,
   ): Promise<AppsScriptGatewayResponse> {
@@ -282,6 +302,24 @@ function requireInitializeSystemSheetsResponse(
   return {
     ...value,
     systemSheets: value.systemSheets,
+  };
+}
+
+function requireEnqueueTasksResponse(
+  value: AppsScriptGatewayResponse,
+): AppsScriptGatewayEnqueueTasksResponse {
+  if (
+    !Array.isArray(value.tasks) ||
+    !value.tasks.every(isEnqueuedTaskResult)
+  ) {
+    throw new Error(
+      "Apps Script gateway returned an invalid enqueueTasks response",
+    );
+  }
+
+  return {
+    ...value,
+    tasks: value.tasks,
   };
 }
 
@@ -378,6 +416,18 @@ function isSystemSheetsResult(
     typeof value.canonicalSheetName === "string" &&
     typeof value.projectionSheetName === "string" &&
     typeof value.taskQueueSheetName === "string"
+  );
+}
+
+function isEnqueuedTaskResult(
+  value: unknown,
+): value is EnqueueTasksResult["tasks"][number] {
+  return (
+    isRecord(value) &&
+    typeof value.taskId === "string" &&
+    typeof value.sequence === "number" &&
+    Number.isInteger(value.sequence) &&
+    value.sequence >= 1
   );
 }
 
