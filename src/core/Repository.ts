@@ -33,8 +33,10 @@ export function createSheetRepository<T extends Record<string, unknown>>(
   const writeBatcher = createRepositoryWriteBatcher(input);
 
   async function ensureSheet(): Promise<void> {
+    const headers = Object.keys(columns);
+
     if (adapter.initializeSheet) {
-      await adapter.initializeSheet(sheetName, Object.keys(columns));
+      await adapter.initializeSheet(sheetName, headers);
 
       const snapshot = await adapter.readSheet(sheetName);
 
@@ -61,7 +63,7 @@ export function createSheetRepository<T extends Record<string, unknown>>(
     const snapshot = await adapter.readSheet(sheetName);
 
     if (snapshot.headers.length === 0) {
-      await adapter.writeHeader(sheetName, Object.keys(columns));
+      await adapter.writeHeader(sheetName, headers);
       return;
     }
 
