@@ -29,6 +29,23 @@ const TYPED_SHEETS_TASK_QUEUE_HEADERS = [
   "createdAt",
   "updatedAt",
 ];
+const TYPED_SHEETS_QUEUE_OPERATIONS = [
+  "initializeSystemSheets",
+  "enqueueTasks",
+  "processTaskQueue",
+];
+const TYPED_SHEETS_LEGACY_DIRECT_OPERATIONS = [
+  "ensureSheet",
+  "initializeSheet",
+  "writeHeader",
+  "appendRow",
+  "appendRows",
+  "updateRow",
+  "updateRowsByKey",
+  "deleteRow",
+  "deleteRows",
+  "deleteRowsByKey",
+];
 
 /**
  * Generates and stores the gateway config for this spreadsheet.
@@ -75,16 +92,6 @@ function doPost(e) {
         });
       }
 
-      if (operation === "ensureSheet") {
-        ensureSheet_(spreadsheet, request);
-        return json_({ ok: true });
-      }
-
-      if (operation === "initializeSheet") {
-        initializeSheet_(spreadsheet, request);
-        return json_({ ok: true });
-      }
-
       if (operation === "initializeSystemSheets") {
         return json_({
           ok: true,
@@ -100,13 +107,25 @@ function doPost(e) {
         return json_(processTaskQueue_(spreadsheet, request));
       }
 
-      if (operation === "writeHeader") {
-        writeHeader_(spreadsheet, request);
+      if (operation === "readSheet") {
+        return json_(readSheet_(spreadsheet, request));
+      }
+
+      // Legacy direct-write operations remain for existing gateway configs
+      // until repository writes are fully routed through the task queue.
+      if (operation === "ensureSheet") {
+        ensureSheet_(spreadsheet, request);
         return json_({ ok: true });
       }
 
-      if (operation === "readSheet") {
-        return json_(readSheet_(spreadsheet, request));
+      if (operation === "initializeSheet") {
+        initializeSheet_(spreadsheet, request);
+        return json_({ ok: true });
+      }
+
+      if (operation === "writeHeader") {
+        writeHeader_(spreadsheet, request);
+        return json_({ ok: true });
       }
 
       if (operation === "appendRow") {
@@ -174,25 +193,13 @@ function parseRequest_(e) {
 
 function validateOperation_(request) {
   const operation = requireString_(request.operation, "operation");
-  const operations = [
-    "ping",
-    "ensureSheet",
-    "initializeSheet",
-    "initializeSystemSheets",
-    "enqueueTasks",
-    "processTaskQueue",
-    "writeHeader",
-    "readSheet",
-    "appendRow",
-    "appendRows",
-    "updateRow",
-    "updateRowsByKey",
-    "deleteRow",
-    "deleteRows",
-    "deleteRowsByKey",
-  ];
 
-  if (operations.indexOf(operation) === -1) {
+  if (
+    operation !== "ping"
+      && operation !== "readSheet"
+      && TYPED_SHEETS_QUEUE_OPERATIONS.indexOf(operation) === -1
+      && TYPED_SHEETS_LEGACY_DIRECT_OPERATIONS.indexOf(operation) === -1
+  ) {
     throw gatewayError_("unknown_operation", "Unknown operation: " + operation);
   }
 
@@ -210,13 +217,21 @@ function validateOperation_(request) {
     return operation;
   }
 
+  if (operation === "initializeSystemSheets") {
+    requireString_(request.sheetName, "sheetName");
+    requireStringArray_(request.headers, "headers");
+    return operation;
+  }
+
+  if (operation === "readSheet") {
+    requireString_(request.sheetName, "sheetName");
+    return operation;
+  }
+
+  // Legacy direct-write validation stays isolated from the queued write model.
   requireString_(request.sheetName, "sheetName");
 
   if (operation === "initializeSheet" || operation === "writeHeader") {
-    requireStringArray_(request.headers, "headers");
-  }
-
-  if (operation === "initializeSystemSheets") {
     requireStringArray_(request.headers, "headers");
   }
 
@@ -1227,13 +1242,6 @@ function protectInternalSheet_(sheet, sheetName) {
   }
 }
 
-function writeHeader_(spreadsheet, request) {
-  const sheet = getSheet_(spreadsheet, request.sheetName);
-  const headers = requireStringArray_(request.headers, "headers");
-
-  writeHeaderIfEmpty_(sheet, headers);
-}
-
 function writeHeaderIfEmpty_(sheet, headers) {
   if (!isHeaderRowEmpty_(sheet)) {
     throw gatewayError_(
@@ -1284,6 +1292,16 @@ function readSheet_(spreadsheet, request) {
     headers: headers,
     rows: rows,
   };
+}
+
+// Legacy direct-write gateway helpers. They are kept only for existing
+// createRepositoryFromConfig() Apps Script users until queued repository writes
+// replace this path.
+function writeHeader_(spreadsheet, request) {
+  const sheet = getSheet_(spreadsheet, request.sheetName);
+  const headers = requireStringArray_(request.headers, "headers");
+
+  writeHeaderIfEmpty_(sheet, headers);
 }
 
 function appendRow_(spreadsheet, request) {
