@@ -22,10 +22,13 @@ interface User {
 
 class FakeQueueAdapter implements AppsScriptQueueAdapter {
   readonly enqueuedTasks: EnqueueTasksInput[] = [];
+  readonly readSheets: Array<string> = [];
 
   constructor(private readonly snapshot: SheetSnapshot) {}
 
-  async readSheet(): Promise<SheetSnapshot> {
+  async readSheet(sheetName: string): Promise<SheetSnapshot> {
+    this.readSheets.push(sheetName);
+
     return {
       headers: [...this.snapshot.headers],
       rows: this.snapshot.rows.map((row) => ({
@@ -60,7 +63,6 @@ class FakeQueueAdapter implements AppsScriptQueueAdapter {
 class BlockingQueueAdapter extends FakeQueueAdapter {
   private readIndex = 0;
   private readonly pendingEnqueueResolves: Array<() => void> = [];
-  readonly readSheets: string[] = [];
 
   constructor(private readonly snapshots: SheetSnapshot[]) {
     super(snapshots[0] ?? { headers: [], rows: [] });
@@ -262,6 +264,205 @@ describe("repository queue write executor", () => {
                 age: null,
                 active: false,
                 _version: 3,
+              },
+            }),
+          },
+        ],
+      },
+    ]);
+  });
+
+  it("enqueues mixed writes as one transaction from one snapshot", async () => {
+    const adapter = new FakeQueueAdapter(usersWithRows);
+    const executor = createQueueExecutor(adapter);
+
+    await expect(
+      executor.writeTransaction([
+        {
+          kind: "insert",
+          row: {
+            id: "u3",
+            email: "c@test.com",
+            age: 22,
+            active: true,
+            _version: 1,
+          },
+        },
+        {
+          kind: "update",
+          id: "u2",
+          updater: (current) => ({
+            ...current,
+            email: "b-next@test.com",
+          }),
+        },
+        {
+          kind: "delete",
+          id: "u1",
+        },
+      ]),
+    ).resolves.toEqual([
+      undefined,
+      {
+        id: "u2",
+        email: "b-next@test.com",
+        age: undefined,
+        active: false,
+        _version: 4,
+      },
+      {
+        id: "u1",
+        email: "a@test.com",
+        age: 20,
+        active: true,
+        _version: 1,
+      },
+    ]);
+
+    expect(adapter.readSheets).toEqual(["Users"]);
+    expect(adapter.enqueuedTasks).toEqual([
+      {
+        tasks: [
+          {
+            taskId: "tx-1-0",
+            transactionId: "tx-1",
+            transactionIndex: 0,
+            sheetName: "Users",
+            keyHeader: "id",
+            keyValue: "u3",
+            operation: "insert",
+            expectedVersion: null,
+            payloadJson: JSON.stringify({
+              row: {
+                id: "u3",
+                email: "c@test.com",
+                age: 22,
+                active: true,
+                _version: 1,
+              },
+            }),
+          },
+          {
+            taskId: "tx-1-1",
+            transactionId: "tx-1",
+            transactionIndex: 1,
+            sheetName: "Users",
+            keyHeader: "id",
+            keyValue: "u2",
+            operation: "update",
+            expectedVersion: 3,
+            payloadJson: JSON.stringify({
+              expectedVersion: 3,
+              rowToWrite: {
+                id: "u2",
+                email: "b-next@test.com",
+                age: null,
+                active: false,
+                _version: 4,
+              },
+            }),
+          },
+          {
+            taskId: "tx-1-2",
+            transactionId: "tx-1",
+            transactionIndex: 2,
+            sheetName: "Users",
+            keyHeader: "id",
+            keyValue: "u1",
+            operation: "delete",
+            expectedVersion: 1,
+            payloadJson: JSON.stringify({
+              expectedVersion: 1,
+              rowToDelete: {
+                id: "u1",
+                email: "a@test.com",
+                age: 20,
+                active: true,
+                _version: 1,
+              },
+            }),
+          },
+        ],
+      },
+    ]);
+  });
+
+  it("uses earlier transaction operations as later operation state", async () => {
+    const adapter = new FakeQueueAdapter(emptyUsers);
+    const executor = createQueueExecutor(adapter);
+
+    await expect(
+      executor.writeTransaction([
+        {
+          kind: "insert",
+          row: {
+            id: "u1",
+            email: "a@test.com",
+            age: 20,
+            active: true,
+            _version: 1,
+          },
+        },
+        {
+          kind: "update",
+          id: "u1",
+          updater: (current) => ({
+            ...current,
+            email: "a-next@test.com",
+          }),
+        },
+      ]),
+    ).resolves.toEqual([
+      undefined,
+      {
+        id: "u1",
+        email: "a-next@test.com",
+        age: 20,
+        active: true,
+        _version: 2,
+      },
+    ]);
+
+    expect(adapter.readSheets).toEqual(["Users"]);
+    expect(adapter.enqueuedTasks).toEqual([
+      {
+        tasks: [
+          {
+            taskId: "tx-1-0",
+            transactionId: "tx-1",
+            transactionIndex: 0,
+            sheetName: "Users",
+            keyHeader: "id",
+            keyValue: "u1",
+            operation: "insert",
+            expectedVersion: null,
+            payloadJson: JSON.stringify({
+              row: {
+                id: "u1",
+                email: "a@test.com",
+                age: 20,
+                active: true,
+                _version: 1,
+              },
+            }),
+          },
+          {
+            taskId: "tx-1-1",
+            transactionId: "tx-1",
+            transactionIndex: 1,
+            sheetName: "Users",
+            keyHeader: "id",
+            keyValue: "u1",
+            operation: "update",
+            expectedVersion: 1,
+            payloadJson: JSON.stringify({
+              expectedVersion: 1,
+              rowToWrite: {
+                id: "u1",
+                email: "a-next@test.com",
+                age: 20,
+                active: true,
+                _version: 2,
               },
             }),
           },
