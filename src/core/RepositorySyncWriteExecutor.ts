@@ -1,10 +1,6 @@
 import type { SheetCell } from "../adapter/Adapter.js";
 import { ConflictError } from "./Errors.js";
 import type { RepositoryWriteContext } from "./RepositoryWriteContext.js";
-import type {
-  RepositoryUpdateRequest,
-  RepositoryWriteExecutor,
-} from "./RepositoryWriteExecutor.js";
 import {
   assertUniqueKeys,
   findParsedRowByIdOrNull,
@@ -15,6 +11,19 @@ import {
   type ParsedRepositoryRow,
 } from "./RepositoryRows.js";
 import { assertSchema } from "./Schema.js";
+
+interface RepositoryUpdateRequest<T extends Record<string, unknown>> {
+  id: string;
+  updater(current: T): T;
+}
+
+interface RepositorySyncWriteExecutor<T extends Record<string, unknown>> {
+  insertRows(rows: Array<T>): Promise<Array<void>>;
+  updateRowsById(
+    requests: Array<RepositoryUpdateRequest<T>>,
+  ): Promise<Array<T | null>>;
+  deleteRowsById(ids: Array<string>): Promise<Array<T | null>>;
+}
 
 interface ResolvedUpdate<T extends Record<string, unknown>> {
   id: string;
@@ -38,7 +47,7 @@ export function createRepositorySyncWriteExecutor<
   T extends Record<string, unknown>,
 >(
   input: RepositoryWriteContext<T>,
-): RepositoryWriteExecutor<T> {
+): RepositorySyncWriteExecutor<T> {
   return {
     insertRows: (rows) => insertRepositoryRows(input, rows),
     updateRowsById: (requests) => updateRepositoryRowsById(input, requests),
