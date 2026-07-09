@@ -1,4 +1,4 @@
-import type { SheetAdapter } from "../adapter/Adapter.js";
+import type { DirectSheetAdapter } from "../adapter/Adapter.js";
 import type { ColumnMap } from "./Repository.js";
 
 /**
@@ -8,7 +8,7 @@ import type { ColumnMap } from "./Repository.js";
 export interface RepositoryWriteBatcherContext<
   T extends Record<string, unknown>,
 > {
-  adapter: SheetAdapter;
+  adapter: DirectSheetAdapter;
   sheetName: string;
   key: keyof T & string;
   columns: ColumnMap<T>;

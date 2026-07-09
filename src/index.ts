@@ -27,6 +27,8 @@ export type {
   EnqueueTasksInput,
   EnqueueTasksResult,
   InitializeSystemSheetsResult,
+  AppsScriptQueueAdapter,
+  DirectSheetAdapter,
   ProcessTaskQueueInput,
   ProcessTaskQueueResult,
   SheetAdapter,
