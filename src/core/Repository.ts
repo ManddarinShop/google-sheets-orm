@@ -1,4 +1,4 @@
-import type { SheetAdapter } from "../adapter/Adapter.js";
+import type { DirectSheetAdapter } from "../adapter/Adapter.js";
 import { Column } from "./Columns.js";
 import { SchemaDriftError } from "./Errors.js";
 import { parseRow } from "./RowParser.js";
@@ -11,7 +11,7 @@ export type ColumnMap<T extends Record<string, unknown>> = {
 };
 
 export interface CreateSheetRepositoryInput<T extends Record<string, unknown>> {
-  adapter: SheetAdapter;
+  adapter: DirectSheetAdapter;
   sheetName: string;
   key: keyof T & string;
   columns: ColumnMap<T>;
