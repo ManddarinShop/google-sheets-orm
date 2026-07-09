@@ -114,7 +114,7 @@ export function createSheetRepository<T extends Record<string, unknown>>(
     updater: (current: T) => T,
   ): Promise<T | null> {
     const [updatedRow] = await runSerializedWrite(() =>
-      writeExecutor.updateRows([{ id, updater }]),
+      writeExecutor.updateRowsById([{ id, updater }]),
     );
 
     return updatedRow ?? null;
