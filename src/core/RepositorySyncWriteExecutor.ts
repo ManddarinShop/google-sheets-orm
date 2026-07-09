@@ -1,6 +1,10 @@
 import type { SheetCell } from "../adapter/Adapter.js";
 import { ConflictError } from "./Errors.js";
 import type { RepositoryWriteContext } from "./RepositoryWriteContext.js";
+import type {
+  RepositoryUpdateRequest,
+  RepositoryWriteExecutor,
+} from "./RepositoryWriteExecutor.js";
 import {
   assertUniqueKeys,
   findParsedRowByIdOrNull,
@@ -12,29 +16,16 @@ import {
 } from "./RepositoryRows.js";
 import { assertSchema } from "./Schema.js";
 
-export interface RepositoryUpdateRequest<T extends Record<string, unknown>> {
-  id: string;
-  updater(current: T): T;
-}
-
-export interface RepositoryWriteExecutor<T extends Record<string, unknown>> {
-  insertRows(rows: T[]): Promise<void[]>;
-  updateRows(
-    requests: Array<RepositoryUpdateRequest<T>>,
-  ): Promise<Array<T | null>>;
-  deleteRowsById(ids: string[]): Promise<Array<T | null>>;
-}
-
 interface ResolvedUpdate<T extends Record<string, unknown>> {
   id: string;
   currentVersion: number;
   target: ParsedRepositoryRow<T>;
   row: T;
-  serializedRow: SheetCell[];
+  serializedRow: Array<SheetCell>;
 }
 
 interface RepositorySnapshot<T extends Record<string, unknown>> {
-  headers: string[];
+  headers: Array<string>;
   parsedRows: Array<ParsedRepositoryRow<T>>;
 }
 
@@ -50,15 +41,15 @@ export function createRepositorySyncWriteExecutor<
 ): RepositoryWriteExecutor<T> {
   return {
     insertRows: (rows) => insertRepositoryRows(input, rows),
-    updateRows: (requests) => updateRepositoryRows(input, requests),
+    updateRowsById: (requests) => updateRepositoryRowsById(input, requests),
     deleteRowsById: (ids) => deleteRepositoryRowsById(input, ids),
   };
 }
 
 async function insertRepositoryRows<T extends Record<string, unknown>>(
   input: RepositoryWriteContext<T>,
-  rows: T[],
-): Promise<void[]> {
+  rows: Array<T>,
+): Promise<Array<void>> {
   const { adapter, sheetName, key, columns } = input;
 
   if (rows.length === 0) {
@@ -89,7 +80,7 @@ async function insertRepositoryRows<T extends Record<string, unknown>>(
   return createVoidResults(rows.length);
 }
 
-async function updateRepositoryRows<T extends Record<string, unknown>>(
+async function updateRepositoryRowsById<T extends Record<string, unknown>>(
   input: RepositoryWriteContext<T>,
   requests: Array<RepositoryUpdateRequest<T>>,
 ): Promise<Array<T | null>> {
@@ -165,7 +156,7 @@ async function updateRepositoryRows<T extends Record<string, unknown>>(
 
 async function deleteRepositoryRowsById<T extends Record<string, unknown>>(
   input: RepositoryWriteContext<T>,
-  ids: string[],
+  ids: Array<string>,
 ): Promise<Array<T | null>> {
   const { adapter, sheetName, key, columns } = input;
 
@@ -426,7 +417,7 @@ async function readRepositorySnapshot<T extends Record<string, unknown>>(
   };
 }
 
-function createVoidResults(count: number): void[] {
+function createVoidResults(count: number): Array<void> {
   return Array.from({ length: count }, () => undefined);
 }
 
