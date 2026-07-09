@@ -495,7 +495,7 @@ the canonical sheet and visible projection may not show the row yet.
 
 Candidate strategies:
 
-1. `flush()` before strict reads.
+1. Explicit queue processing or status polling before strict reads.
 2. In-memory cache that applies queued tasks immediately.
 3. Pending-task overlay when reading from the canonical sheet.
 4. Expose write operation status and let users choose when to wait.
@@ -595,10 +595,9 @@ Use the existing performance issue as the durable benchmark record.
 
 - Should task queue sheets be hidden by default or only by setup option?
 - Should sequence be global or per target sheet?
-- Should `transactionId` be generated per same-tick flush, per explicit unit of
-  work, or both?
+- What should the first explicit unit-of-work API look like for generating
+  `transactionId` values?
 - Should `enqueueTasks` optionally trigger processing immediately?
-- Should `flush()` be public, internal, or only a test helper?
 - How should server memory cache behave across multiple server instances?
 - How much formatting and unknown-column preservation should bulk rewrite
   guarantee?

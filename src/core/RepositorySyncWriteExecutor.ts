@@ -1,6 +1,6 @@
 import type { SheetCell } from "../adapter/Adapter.js";
 import { ConflictError } from "./Errors.js";
-import type { RepositoryWriteBatcherContext } from "./RepositoryBatching.js";
+import type { RepositoryWriteContext } from "./RepositoryWriteContext.js";
 import {
   assertUniqueKeys,
   findParsedRowByIdOrNull,
@@ -46,7 +46,7 @@ interface RepositorySnapshot<T extends Record<string, unknown>> {
 export function createRepositorySyncWriteExecutor<
   T extends Record<string, unknown>,
 >(
-  input: RepositoryWriteBatcherContext<T>,
+  input: RepositoryWriteContext<T>,
 ): RepositoryWriteExecutor<T> {
   return {
     insertRows: (rows) => insertRepositoryRows(input, rows),
@@ -56,7 +56,7 @@ export function createRepositorySyncWriteExecutor<
 }
 
 async function insertRepositoryRows<T extends Record<string, unknown>>(
-  input: RepositoryWriteBatcherContext<T>,
+  input: RepositoryWriteContext<T>,
   rows: T[],
 ): Promise<void[]> {
   const { adapter, sheetName, key, columns } = input;
@@ -90,7 +90,7 @@ async function insertRepositoryRows<T extends Record<string, unknown>>(
 }
 
 async function updateRepositoryRows<T extends Record<string, unknown>>(
-  input: RepositoryWriteBatcherContext<T>,
+  input: RepositoryWriteContext<T>,
   requests: Array<RepositoryUpdateRequest<T>>,
 ): Promise<Array<T | null>> {
   const { adapter, sheetName, key, columns } = input;
@@ -164,7 +164,7 @@ async function updateRepositoryRows<T extends Record<string, unknown>>(
 }
 
 async function deleteRepositoryRowsById<T extends Record<string, unknown>>(
-  input: RepositoryWriteBatcherContext<T>,
+  input: RepositoryWriteContext<T>,
   ids: string[],
 ): Promise<Array<T | null>> {
   const { adapter, sheetName, key, columns } = input;
@@ -220,7 +220,7 @@ async function deleteRepositoryRowsById<T extends Record<string, unknown>>(
 
 async function applyLockedKeyBasedUpdates<T extends Record<string, unknown>>(
   params: {
-    input: RepositoryWriteBatcherContext<T>;
+    input: RepositoryWriteContext<T>;
     snapshot: RepositorySnapshot<T>;
     resolvedUpdates: Array<ResolvedUpdate<T> | null>;
     rowsToUpdate: Array<ResolvedUpdate<T>>;
@@ -267,7 +267,7 @@ async function applyLockedKeyBasedUpdates<T extends Record<string, unknown>>(
 
 async function applyDirectRowNumberUpdates<T extends Record<string, unknown>>(
   params: {
-    input: RepositoryWriteBatcherContext<T>;
+    input: RepositoryWriteContext<T>;
     resolvedUpdates: Array<ResolvedUpdate<T> | null>;
     rowsToUpdate: Array<ResolvedUpdate<T>>;
   },
@@ -304,7 +304,7 @@ async function applyDirectRowNumberUpdates<T extends Record<string, unknown>>(
 
 async function applyLockedKeyBasedDeletes<T extends Record<string, unknown>>(
   params: {
-    input: RepositoryWriteBatcherContext<T>;
+    input: RepositoryWriteContext<T>;
     snapshot: RepositorySnapshot<T>;
     targets: Array<ParsedRepositoryRow<T> | null>;
     rowsToDelete: Array<ParsedRepositoryRow<T>>;
@@ -357,7 +357,7 @@ async function applyLockedKeyBasedDeletes<T extends Record<string, unknown>>(
 
 async function applyDirectRowNumberDeletes<T extends Record<string, unknown>>(
   params: {
-    input: RepositoryWriteBatcherContext<T>;
+    input: RepositoryWriteContext<T>;
     targets: Array<ParsedRepositoryRow<T> | null>;
     rowsToDelete: Array<ParsedRepositoryRow<T>>;
   },
@@ -398,7 +398,7 @@ async function applyDirectRowNumberDeletes<T extends Record<string, unknown>>(
 }
 
 async function readRepositorySnapshot<T extends Record<string, unknown>>(
-  input: RepositoryWriteBatcherContext<T>,
+  input: RepositoryWriteContext<T>,
 ): Promise<RepositorySnapshot<T>> {
   const { adapter, sheetName, key, columns } = input;
   const snapshot = await adapter.readSheet(sheetName);
