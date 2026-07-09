@@ -2,10 +2,9 @@ import type { DirectSheetAdapter } from "../adapter/Adapter.js";
 import type { ColumnMap } from "./Repository.js";
 
 /**
- * Shared repository write context used by insert, update, and delete batchers.
- * Future write executors, such as a sheet task queue, can reuse this boundary.
+ * Direct repository write context used by the legacy synchronous executor.
  */
-export interface RepositoryWriteBatcherContext<
+export interface RepositoryWriteContext<
   T extends Record<string, unknown>,
 > {
   adapter: DirectSheetAdapter;
