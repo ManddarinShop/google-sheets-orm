@@ -1,7 +1,7 @@
 import { auth as googleAuth, sheets, type sheets_v4 } from "@googleapis/sheets";
 import type {
   AppendRowsInput,
-  SheetAdapter,
+  DirectSheetAdapter,
   SheetCell,
   SheetSnapshot,
 } from "./Adapter.js";
@@ -14,7 +14,7 @@ export interface GoogleSheetsAdapterOptions {
   sheetsClient?: sheets_v4.Sheets;
 }
 
-export class GoogleSheetsAdapter implements SheetAdapter {
+export class GoogleSheetsAdapter implements DirectSheetAdapter {
   private readonly sheetsClient: sheets_v4.Sheets;
   private readonly spreadsheetId: string;
   private readonly sheetIdCache = new Map<string, number>();

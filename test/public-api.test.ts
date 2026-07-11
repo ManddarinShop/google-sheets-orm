@@ -8,6 +8,7 @@ import {
   SchemaDriftError,
   boolean,
   createRepositoryFromConfig,
+  createQueuedSheetRepository,
   createSheetRepository,
   loadTypedSheetsConfig,
   number,
@@ -20,6 +21,7 @@ import {
 describe("public API", () => {
   it("exports repository factory, column factories, adapter, and public errors", () => {
     expect(createSheetRepository).toBeTypeOf("function");
+    expect(createQueuedSheetRepository).toBeTypeOf("function");
     expect(text).toBeTypeOf("function");
     expect(number).toBeTypeOf("function");
     expect(boolean).toBeTypeOf("function");

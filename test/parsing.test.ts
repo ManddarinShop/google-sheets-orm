@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { boolean, number, text } from "../src/core/Columns.js";
-import { ParseError } from "../src/core/Errors.js";
+import { boolean, number, text } from "../src/core/schema/index.js";
+import { ParseError } from "../src/core/errors/index.js";
 
 describe("columns", () => {
   it("parses text cells", () => {

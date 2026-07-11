@@ -1,5 +1,5 @@
-import { SheetCell } from "../adapter/Adapter.js";
-import { ParseError } from "./Errors.js";
+import { SheetCell } from "../../adapter/Adapter.js";
+import { ParseError } from "../errors/index.js";
 
 export interface Column<T> {
   readonly isOptional: boolean;

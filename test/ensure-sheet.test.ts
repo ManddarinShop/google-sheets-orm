@@ -1,9 +1,13 @@
 import { describe, expect, it } from "vitest";
 
-import { boolean, number, text } from "../src/core/Columns.js";
-import { SchemaDriftError } from "../src/core/Errors.js";
-import { createSheetRepository } from "../src/core/Repository.js";
-import type { SheetAdapter, SheetSnapshot } from "../src/adapter/Adapter.js";
+import { boolean, number, text } from "../src/core/schema/index.js";
+import { SchemaDriftError } from "../src/core/errors/index.js";
+import { createSheetRepository } from "../src/core/repository/index.js";
+import type {
+  AppsScriptQueueAdapter,
+  DirectSheetAdapter,
+  SheetSnapshot,
+} from "../src/adapter/Adapter.js";
 import { FakeSheetAdapter } from "./fake-adapter.js";
 
 interface User {
@@ -60,7 +64,7 @@ describe("repository sheet initialization", () => {
       headers: ["id", "email", "age", "active", "_version"],
       rows: [],
     };
-    const adapter: SheetAdapter = {
+    const adapter: DirectSheetAdapter = {
       async initializeSheet(sheetName, headers) {
         initializedSheets.push({ sheetName, headers: [...headers] });
       },
@@ -105,7 +109,8 @@ describe("repository sheet initialization", () => {
       headers: ["id", "email", "age", "active", "_version"],
       rows: [],
     };
-    const adapter: SheetAdapter = {
+    const adapter: DirectSheetAdapter &
+      Pick<AppsScriptQueueAdapter, "initializeSystemSheets"> = {
       async initializeSystemSheets(sheetName, headers) {
         initializedSystemSheets.push({ sheetName, headers: [...headers] });
 
