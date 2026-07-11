@@ -2,16 +2,15 @@ import type {
   AppsScriptQueueAdapter,
   ProcessTaskQueueInput,
   ProcessTaskQueueResult,
-} from "../adapter/Adapter.js";
-import { Column } from "./Columns.js";
-import { parseRow } from "./RowParser.js";
-import { assertUniqueKeys } from "./RepositoryRows.js";
+} from "../../adapter/Adapter.js";
+import { Column } from "../schema/Columns.js";
+import { parseRow, assertSchema } from "../schema/index.js";
+import { assertUniqueKeys } from "./RepositoryRowHelpers.js";
 import {
   createRepositoryQueueWriteExecutor,
   type RepositoryQueueWriteExecutor,
   type RepositoryWriteTransactionOperation,
-} from "./RepositoryQueueWriteExecutor.js";
-import { assertSchema } from "./Schema.js";
+} from "../write/index.js";
 
 export type QueuedColumnMap<T extends Record<string, unknown>> = {
   [K in keyof T]: Column<T[K]>;

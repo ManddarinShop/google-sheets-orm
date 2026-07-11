@@ -1,4 +1,4 @@
-import type { EnqueueTaskInput, EnqueueTasksInput } from "../adapter/Adapter.js";
+import type { EnqueueTaskInput, EnqueueTasksInput } from "../../adapter/Adapter.js";
 
 export type RepositoryQueuedWriteOperation<T extends Record<string, unknown>> =
   | {

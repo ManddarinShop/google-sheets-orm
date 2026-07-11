@@ -8,8 +8,8 @@ import type {
   ProcessTaskQueueResult,
   SheetSnapshot,
 } from "../src/adapter/Adapter.js";
-import { number, text } from "../src/core/Columns.js";
-import { createQueuedSheetRepository } from "../src/core/QueuedRepository.js";
+import { number, text } from "../src/core/schema/index.js";
+import { createQueuedSheetRepository } from "../src/core/repository/index.js";
 
 interface Order {
   id: string;

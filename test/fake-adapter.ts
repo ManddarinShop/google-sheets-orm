@@ -8,7 +8,7 @@ import type {
   UpdateRowsByKeyInput,
   UpdateRowsByKeyResult,
 } from "../src/adapter/Adapter.js";
-import { ConflictError, SchemaDriftError } from "../src/core/Errors.js";
+import { ConflictError, SchemaDriftError } from "../src/core/errors/index.js";
 
 export class FakeSheetAdapter implements DirectSheetAdapter {
   private readIndex = 0;
