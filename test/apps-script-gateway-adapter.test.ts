@@ -1,7 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { ConflictError, SchemaDriftError } from "../src/core/Errors.js";
-import { AppsScriptGatewayAdapter, type SheetAdapter } from "../src/index.js";
+import { ConflictError, SchemaDriftError } from "../src/core/errors/index.js";
+import {
+  AppsScriptGatewayAdapter,
+  type AppsScriptQueueAdapter,
+} from "../src/index.js";
 
 function createJsonResponse(value: unknown): Response {
   return {
@@ -353,7 +356,7 @@ describe("AppsScriptGatewayAdapter", () => {
     });
   });
 
-  it("exposes system sheet initialization through the SheetAdapter boundary", async () => {
+  it("exposes system sheet initialization through the AppsScriptQueueAdapter boundary", async () => {
     const fetch = vi.fn().mockResolvedValue(
       createJsonResponse({
         ok: true,
@@ -365,14 +368,14 @@ describe("AppsScriptGatewayAdapter", () => {
         },
       }),
     );
-    const adapter: SheetAdapter = new AppsScriptGatewayAdapter({
+    const adapter: AppsScriptQueueAdapter = new AppsScriptGatewayAdapter({
       gatewayUrl: "https://script.google.com/macros/s/deployment-id/exec",
       gatewaySecret: "gateway-secret",
       fetch,
     });
 
     await expect(
-      adapter.initializeSystemSheets?.("Users", ["id", "_version"]),
+      adapter.initializeSystemSheets("Users", ["id", "_version"]),
     ).resolves.toEqual({
       logicalSheetName: "Users",
       canonicalSheetName: "_typed_sheets_data_Users_a1b2c3d4e5f6",
@@ -415,14 +418,14 @@ describe("AppsScriptGatewayAdapter", () => {
         ],
       }),
     );
-    const adapter: SheetAdapter = new AppsScriptGatewayAdapter({
+    const adapter: AppsScriptQueueAdapter = new AppsScriptGatewayAdapter({
       gatewayUrl: "https://script.google.com/macros/s/deployment-id/exec",
       gatewaySecret: "gateway-secret",
       fetch,
     });
 
     await expect(
-      adapter.enqueueTasks?.({
+      adapter.enqueueTasks({
         tasks: [
           {
             taskId: "task-1",
@@ -556,14 +559,14 @@ describe("AppsScriptGatewayAdapter", () => {
         remainingPendingTasks: 3,
       }),
     );
-    const adapter: SheetAdapter = new AppsScriptGatewayAdapter({
+    const adapter: AppsScriptQueueAdapter = new AppsScriptGatewayAdapter({
       gatewayUrl: "https://script.google.com/macros/s/deployment-id/exec",
       gatewaySecret: "gateway-secret",
       fetch,
     });
 
     await expect(
-      adapter.processTaskQueue?.({ maxTransactions: 3 }),
+      adapter.processTaskQueue({ maxTransactions: 3 }),
     ).resolves.toEqual({
       processedTransactions: 2,
       failedTransactions: 1,

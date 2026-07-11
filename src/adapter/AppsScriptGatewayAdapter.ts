@@ -1,19 +1,20 @@
 import type {
   AppendRowsInput,
+  AppsScriptQueueAdapter,
   DeleteRowsByKeyInput,
   DeleteRowsByKeyResult,
+  DirectSheetAdapter,
   EnqueueTasksInput,
   EnqueueTasksResult,
   InitializeSystemSheetsResult,
   ProcessTaskQueueInput,
   ProcessTaskQueueResult,
-  SheetAdapter,
   SheetCell,
   SheetSnapshot,
   UpdateRowsByKeyInput,
   UpdateRowsByKeyResult,
 } from "./Adapter.js";
-import { ConflictError, SchemaDriftError } from "../core/Errors.js";
+import { ConflictError, SchemaDriftError } from "../core/errors/index.js";
 import type {
   AppsScriptGatewayAuthenticatedRequest,
   AppsScriptGatewayDeleteRowsByKeyResponse,
@@ -34,7 +35,8 @@ export interface AppsScriptGatewayAdapterOptions {
   fetch?: GatewayFetch;
 }
 
-export class AppsScriptGatewayAdapter implements SheetAdapter {
+export class AppsScriptGatewayAdapter
+  implements DirectSheetAdapter, AppsScriptQueueAdapter {
   private readonly fetch: GatewayFetch;
 
   constructor(private readonly options: AppsScriptGatewayAdapterOptions) {
