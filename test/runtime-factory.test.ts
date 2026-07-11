@@ -4,7 +4,7 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { boolean, number, text } from "../src/core/Columns.js";
+import { boolean, number, text } from "../src/core/schema/index.js";
 import { createRepositoryFromConfig } from "../src/index.js";
 import { writeTypedSheetsConfig } from "../src/setup/ConfigWriter.js";
 import { FakeSheetAdapter } from "./fake-adapter.js";

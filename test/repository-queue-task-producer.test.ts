@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { createRepositoryQueueTasks } from "../src/core/RepositoryQueueTaskProducer.js";
+import { createRepositoryQueueTasks } from "../src/core/write/index.js";
 
 interface User {
   id: string;

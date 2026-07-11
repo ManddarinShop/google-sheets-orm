@@ -1,7 +1,7 @@
-export { boolean, number, text } from "./core/Columns.js";
-export { createSheetRepository } from "./core/Repository.js";
-export { createQueuedSheetRepository } from "./core/QueuedRepository.js";
-export { ConflictError, ParseError, SchemaDriftError } from "./core/Errors.js";
+export { boolean, number, text } from "./core/schema/index.js";
+export { createSheetRepository } from "./core/repository/index.js";
+export { createQueuedSheetRepository } from "./core/repository/index.js";
+export { ConflictError, ParseError, SchemaDriftError } from "./core/errors/index.js";
 export { parseTypedSheetsConfig } from "./setup/Config.js";
 export { loadTypedSheetsConfig } from "./setup/ConfigLoader.js";
 export { writeTypedSheetsConfig } from "./setup/ConfigWriter.js";
@@ -36,7 +36,8 @@ export type {
   SheetCell,
   SheetSnapshot,
 } from "./adapter/Adapter.js";
-export type { Column } from "./core/Columns.js";
+export type { Column } from "./core/schema/index.js";
+export type { ColumnMap } from "./core/repository/index.js";
 export type { TypedSheetsConfig } from "./setup/Config.js";
 export type { LoadTypedSheetsConfigOptions } from "./setup/ConfigLoader.js";
 export type { WriteTypedSheetsConfigOptions } from "./setup/ConfigWriter.js";
@@ -45,9 +46,9 @@ export type { CreateRepositoryFromConfigOptions } from "./runtime/RepositoryFact
 export type {
   CreateSheetRepositoryInput,
   SheetRepository,
-} from "./core/Repository.js";
+} from "./core/repository/index.js";
 export type {
   CreateQueuedSheetRepositoryInput,
   QueuedRepositoryTransaction,
   QueuedSheetRepository,
-} from "./core/QueuedRepository.js";
+} from "./core/repository/index.js";
