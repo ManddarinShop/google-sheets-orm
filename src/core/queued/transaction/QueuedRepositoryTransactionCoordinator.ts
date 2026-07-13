@@ -20,7 +20,7 @@ export interface RepositoryQueueWriteTransactionOptions {
 }
 
 export interface RepositoryQueueWriteCoordinator<
-  T extends Record<string, unknown>,
+  T extends object,
 > {
   /** Creates an identity for one queue batch and its retry attempts. */
   createTransactionId(): string;
@@ -37,13 +37,13 @@ export interface RepositoryQueueWriteCoordinator<
 }
 
 interface CreateQueuedRepositoryTransactionCoordinatorInput<
-  T extends Record<string, unknown>,
+  T extends object,
 > {
   executor: RepositoryQueueWriteExecutor<T>;
   createTransactionId?(): string;
 }
 
-interface RetainedQueueWriteBatch<T extends Record<string, unknown>>
+interface RetainedQueueWriteBatch<T extends object>
   extends Omit<RepositoryQueueBatch<T>, "tasks" | "fingerprint"> {
   tasks: EnqueueTasksInput;
   fingerprint: string;
@@ -55,7 +55,7 @@ interface RetainedQueueWriteBatch<T extends Record<string, unknown>>
  * materializes, and appends queue tasks.
  */
 export function createQueuedRepositoryTransactionCoordinator<
-  T extends Record<string, unknown>,
+  T extends object,
 >(
   input: CreateQueuedRepositoryTransactionCoordinatorInput<T>,
 ): RepositoryQueueWriteCoordinator<T> {
@@ -99,7 +99,7 @@ export function createQueuedRepositoryTransactionCoordinator<
   };
 }
 
-async function retryRetainedQueueBatch<T extends Record<string, unknown>>(
+async function retryRetainedQueueBatch<T extends object>(
   executor: RepositoryQueueWriteExecutor<T>,
   transactionId: string,
   retainedBatches: Map<string, RetainedQueueWriteBatch<T>>,
@@ -123,7 +123,7 @@ async function retryRetainedQueueBatch<T extends Record<string, unknown>>(
  * the same transaction id re-materializes against the original intent only to
  * verify that a reconstructed callback describes the same immutable tasks.
  */
-async function writeRepositoryTransaction<T extends Record<string, unknown>>(
+async function writeRepositoryTransaction<T extends object>(
   input: CreateQueuedRepositoryTransactionCoordinatorInput<T>,
   operations: Array<RepositoryWriteTransactionOperation<T>>,
   transactionId: string | undefined,
@@ -197,7 +197,7 @@ async function writeRepositoryTransaction<T extends Record<string, unknown>>(
   return materialized.results;
 }
 
-function createTransactionId<T extends Record<string, unknown>>(
+function createTransactionId<T extends object>(
   input: CreateQueuedRepositoryTransactionCoordinatorInput<T>,
 ): string {
   if (input.createTransactionId !== undefined) {

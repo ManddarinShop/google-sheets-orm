@@ -19,14 +19,12 @@ import type {
 } from "./QueuedRepositoryApi.js";
 
 /**
- * Creates a queued repository facade with MikroORM-style transaction helpers.
- * Writes are collected in a transaction scope and flushed as one queue
- * transaction, while reads always use the adapter's gateway-owned canonical
- * state. Queued adapters must expose this path so processed writes and
- * optimistic-lock checks do not read the visible projection by accident.
+ * Creates the queued repository facade. Entity reads and writes are available
+ * only through the transaction callback so one service operation has one
+ * explicit unit of work and one queue transaction.
  */
 export function createQueuedSheetRepository<
-  T extends Record<string, unknown>,
+  T extends object,
 >(
   input: CreateQueuedSheetRepositoryInput<T>,
 ): QueuedSheetRepository<T> {

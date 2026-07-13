@@ -1,10 +1,10 @@
 import type { AppsScriptQueueAdapter } from "../../../adapter/queued/QueuedSheetAdapter.js";
 import type { ColumnMap } from "../../shared/RepositoryTypes.js";
 
-export type QueuedColumnMap<T extends Record<string, unknown>> = ColumnMap<T>;
+export type QueuedColumnMap<T extends object> = ColumnMap<T>;
 
 export interface CreateQueuedSheetRepositoryInput<
-  T extends Record<string, unknown>,
+  T extends object,
 > {
   adapter: AppsScriptQueueAdapter;
   sheetName: string;
@@ -12,8 +12,8 @@ export interface CreateQueuedSheetRepositoryInput<
   columns: QueuedColumnMap<T>;
 }
 
-/** Public entity-oriented repository contract for queued persistence. */
-export interface QueuedSheetRepository<T extends Record<string, unknown>> {
+/** Public queued repository contract with an explicit transaction boundary. */
+export interface QueuedSheetRepository<T extends object> {
   /** Initializes the gateway-owned canonical, projection, and queue sheets. */
   ensureSheet(): Promise<void>;
   /**
@@ -29,7 +29,7 @@ export interface QueuedSheetRepository<T extends Record<string, unknown>> {
 
 /** Public transaction callback surface; queue lifecycle stays internal. */
 export interface QueuedRepositoryTransaction<
-  T extends Record<string, unknown>,
+  T extends object,
 > {
   findAll(): Promise<Array<T>>;
   findById(id: string): Promise<T | null>;

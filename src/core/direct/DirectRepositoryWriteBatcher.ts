@@ -4,7 +4,7 @@ import {
   type RepositorySyncWriteExecutor,
 } from "./DirectSheetWriteExecutor.js";
 
-type RepositoryWriteRequest<T extends Record<string, unknown>> =
+type RepositoryWriteRequest<T extends object> =
   | {
       kind: "insert";
       row: T;
@@ -19,18 +19,18 @@ type RepositoryWriteRequest<T extends Record<string, unknown>> =
       id: string;
     };
 
-type RepositoryWriteResult<T extends Record<string, unknown>> = void | T | null;
+type RepositoryWriteResult<T extends object> = void | T | null;
 
-interface IndexedWriteRequest<T extends Record<string, unknown>> {
+interface IndexedWriteRequest<T extends object> {
   index: number;
   request: RepositoryWriteRequest<T>;
 }
 
-type WriteRequestRun<T extends Record<string, unknown>> = Array<
+type WriteRequestRun<T extends object> = Array<
   IndexedWriteRequest<T>
 >;
 
-export interface RepositoryWriteBatcher<T extends Record<string, unknown>> {
+export interface RepositoryWriteBatcher<T extends object> {
   insert(row: T): Promise<void>;
   update(id: string, updater: (current: T) => T): Promise<T | null>;
   deleteById(id: string): Promise<T | null>;
@@ -41,7 +41,7 @@ export interface RepositoryWriteBatcher<T extends Record<string, unknown>> {
  * order. Contiguous operations of the same kind use the executor's bulk path.
  */
 export function createRepositoryWriteBatcher<
-  T extends Record<string, unknown>,
+  T extends object,
 >(input: RepositoryWriteContext<T>): RepositoryWriteBatcher<T> {
   const executor = createRepositorySyncWriteExecutor(input);
   const batcher = createSameTickBatcher<
@@ -142,7 +142,7 @@ function createSameTickBatcher<TItem, TResult>(
   }
 }
 
-async function flushWriteRequests<T extends Record<string, unknown>>(
+async function flushWriteRequests<T extends object>(
   executor: RepositorySyncWriteExecutor<T>,
   requests: Array<RepositoryWriteRequest<T>>,
 ): Promise<Array<RepositoryWriteResult<T>>> {
@@ -163,7 +163,7 @@ async function flushWriteRequests<T extends Record<string, unknown>>(
   return results;
 }
 
-async function executeWriteRequestRun<T extends Record<string, unknown>>(
+async function executeWriteRequestRun<T extends object>(
   executor: RepositorySyncWriteExecutor<T>,
   run: WriteRequestRun<T>,
 ): Promise<Array<RepositoryWriteResult<T>>> {
@@ -210,7 +210,7 @@ async function executeWriteRequestRun<T extends Record<string, unknown>>(
   }
 }
 
-function createContiguousRuns<T extends Record<string, unknown>>(
+function createContiguousRuns<T extends object>(
   requests: Array<RepositoryWriteRequest<T>>,
 ): Array<WriteRequestRun<T>> {
   const runs: Array<WriteRequestRun<T>> = [];

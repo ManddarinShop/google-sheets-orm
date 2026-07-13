@@ -1,4 +1,5 @@
 import { ConflictError } from "../../errors/index.js";
+import { readRepositoryProperty } from "../../shared/RepositoryRowHelpers.js";
 import type { QueuedRepositoryTransaction } from "../public/QueuedRepositoryApi.js";
 import type { RepositoryQueueWriteCoordinator } from "./QueuedRepositoryTransactionCoordinator.js";
 import type {
@@ -6,7 +7,7 @@ import type {
 } from "../writer/QueuedSheetWriteExecutor.js";
 
 export interface InternalQueuedRepositoryTransactionScope<
-  T extends Record<string, unknown>,
+  T extends object,
 > extends QueuedRepositoryTransaction<T> {
   flush(): Promise<Array<void | T | null>>;
   /** Re-enqueues an ambiguous batch without reading the current sheet. */
@@ -15,7 +16,7 @@ export interface InternalQueuedRepositoryTransactionScope<
 }
 
 export interface CreateQueuedRepositoryTransactionScopeInput<
-  T extends Record<string, unknown>,
+  T extends object,
 > {
   findAll(): Promise<Array<T>>;
   key: keyof T & string;
@@ -24,12 +25,11 @@ export interface CreateQueuedRepositoryTransactionScopeInput<
 }
 
 /**
- * Creates the internal unit of work used by the public repository facade.
- * Pending operations, queue flushing, and retry recovery stay here so the
- * public transaction callback only exposes entity reads and mutations.
+ * Creates the explicit unit of work used by the public transaction callback.
+ * Reads and mutations stay together until flush materializes one queue batch.
  */
 export function createQueuedRepositoryTransactionScope<
-  T extends Record<string, unknown>,
+  T extends object,
 >(
   input: CreateQueuedRepositoryTransactionScopeInput<T>,
 ): InternalQueuedRepositoryTransactionScope<T> {
@@ -55,7 +55,9 @@ export function createQueuedRepositoryTransactionScope<
     pushPendingOperation({
       kind: "delete",
       id: String(rowSnapshot[input.key]),
-      expectedVersion: Number(rowSnapshot["_version"]),
+      expectedVersion: Number(
+        readRepositoryProperty(rowSnapshot, "_version"),
+      ),
     });
   }
 
@@ -213,11 +215,11 @@ export function createQueuedRepositoryTransactionScope<
   };
 }
 
-function cloneRow<T extends Record<string, unknown>>(row: T): T {
+function cloneRow<T extends object>(row: T): T {
   return { ...row };
 }
 
-function getPendingOperationId<T extends Record<string, unknown>>(
+function getPendingOperationId<T extends object>(
   operation: RepositoryWriteTransactionOperation<T>,
   key: keyof T & string,
 ): string {
@@ -228,7 +230,7 @@ function getPendingOperationId<T extends Record<string, unknown>>(
   return operation.id;
 }
 
-function mergePendingOperations<T extends Record<string, unknown>>(input: {
+function mergePendingOperations<T extends object>(input: {
   existingOperation: RepositoryWriteTransactionOperation<T>;
   operation: RepositoryWriteTransactionOperation<T>;
   key: keyof T & string;
@@ -293,8 +295,10 @@ function mergePendingOperations<T extends Record<string, unknown>>(input: {
     return {
       kind: "update",
       id: operation.id,
-      updater: (current) => operation.updater(existingOperation.row),
-      expectedVersion: Number(existingOperation.row["_version"]),
+      updater: () => operation.updater(existingOperation.row),
+      expectedVersion: Number(
+        readRepositoryProperty(existingOperation.row, "_version"),
+      ),
     };
   }
 
@@ -308,7 +312,7 @@ function mergePendingOperations<T extends Record<string, unknown>>(input: {
   );
 }
 
-function withExpectedVersion<T extends Record<string, unknown>>(
+function withExpectedVersion<T extends object>(
   operation: Extract<RepositoryWriteTransactionOperation<T>, { kind: "update" }>,
   expectedVersion: number | undefined,
 ): Extract<RepositoryWriteTransactionOperation<T>, { kind: "update" }> {

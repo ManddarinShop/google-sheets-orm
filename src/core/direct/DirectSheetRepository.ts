@@ -7,14 +7,14 @@ import { createRepositoryWriteBatcher } from "./DirectRepositoryWriteBatcher.js"
 
 export type { ColumnMap } from "../shared/RepositoryTypes.js";
 
-export interface CreateSheetRepositoryInput<T extends Record<string, unknown>> {
+export interface CreateSheetRepositoryInput<T extends object> {
   adapter: DirectSheetAdapter;
   sheetName: string;
   key: keyof T & string;
   columns: ColumnMap<T>;
 }
 
-export interface SheetRepository<T extends Record<string, unknown>> {
+export interface SheetRepository<T extends object> {
   ensureSheet(): Promise<void>;
   findAll(): Promise<T[]>;
   findById(id: string): Promise<T | null>;
@@ -23,7 +23,7 @@ export interface SheetRepository<T extends Record<string, unknown>> {
   deleteById(id: string): Promise<T | null>;
 }
 
-export function createSheetRepository<T extends Record<string, unknown>>(
+export function createSheetRepository<T extends object>(
   input: CreateSheetRepositoryInput<T>,
 ): SheetRepository<T> {
   const { adapter, sheetName, key, columns } = input;

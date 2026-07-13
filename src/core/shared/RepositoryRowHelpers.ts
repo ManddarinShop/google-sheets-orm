@@ -6,17 +6,30 @@ import { SchemaDriftError } from "../errors/index.js";
 import type { ColumnMap } from "./RepositoryTypes.js";
 import { parseRow } from "../schema/index.js";
 
-export interface ParsedRepositoryRow<T extends Record<string, unknown>> {
+export interface ParsedRepositoryRow<T extends object> {
   rowNumber: number;
   cells: SheetCell[];
   row: T;
 }
 
 /**
+ * Reads a repository field at a dynamic runtime boundary. Entity types are
+ * intentionally allowed to be ordinary interfaces, so internal code must not
+ * require a string index signature just to inspect reserved fields such as
+ * `_version`.
+ */
+export function readRepositoryProperty<T extends object>(
+  row: T,
+  property: string,
+): unknown {
+  return (row as Record<string, unknown>)[property];
+}
+
+/**
  * Parses raw sheet rows once into both typed rows and original cells. Write
  * batchers use the original cells to preserve columns outside the schema.
  */
-export function parseRepositoryRows<T extends Record<string, unknown>>(input: {
+export function parseRepositoryRows<T extends object>(input: {
   headers: string[];
   sheetRows: SheetRowSnapshot[];
   columns: ColumnMap<T>;
@@ -38,7 +51,7 @@ export function parseRepositoryRows<T extends Record<string, unknown>>(input: {
  * Converts cells returned by write-capable adapters back into repository rows.
  * This keeps fast-path results aligned with what the adapter actually changed.
  */
-export function parseAdapterResultRow<T extends Record<string, unknown>>(input: {
+export function parseAdapterResultRow<T extends object>(input: {
   headers: string[];
   cells: SheetCell[];
   columns: ColumnMap<T>;
@@ -50,7 +63,7 @@ export function parseAdapterResultRow<T extends Record<string, unknown>>(input: 
  * Fails when parsed repository rows contain duplicate key values. Duplicate keys
  * make update/delete target selection ambiguous and are treated as schema drift.
  */
-export function assertUniqueKeys<T extends Record<string, unknown>>(
+export function assertUniqueKeys<T extends object>(
   rows: T[],
   key: keyof T & string,
 ): void {
@@ -71,7 +84,7 @@ export function assertUniqueKeys<T extends Record<string, unknown>>(
  * Finds a parsed repository row by key value, returning null when the current
  * snapshot does not contain the requested id.
  */
-export function findParsedRowByIdOrNull<T extends Record<string, unknown>>(
+export function findParsedRowByIdOrNull<T extends object>(
   input: {
     parsedRows: Array<ParsedRepositoryRow<T>>;
     key: keyof T & string;
@@ -100,7 +113,7 @@ export function findSheetRowByNumberOrNull(
  * Serializes modeled columns in sheet header order. Unknown sheet headers are
  * omitted, which is appropriate for appending new rows.
  */
-export function serializeRowInHeaderOrder<T extends Record<string, unknown>>(
+export function serializeRowInHeaderOrder<T extends object>(
   input: {
     headers: string[];
     row: T;
@@ -122,7 +135,7 @@ export function serializeRowInHeaderOrder<T extends Record<string, unknown>>(
  * repository schema, so allowed extra sheet columns are not overwritten.
  */
 export function serializeRowPreservingUnknownCells<
-  T extends Record<string, unknown>,
+  T extends object,
 >(input: {
   headers: string[];
   existingCells: SheetCell[];

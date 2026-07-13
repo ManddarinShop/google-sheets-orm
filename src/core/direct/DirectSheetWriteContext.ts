@@ -5,7 +5,7 @@ import type { ColumnMap } from "../shared/RepositoryTypes.js";
  * Direct repository write context used by the legacy synchronous executor.
  */
 export interface RepositoryWriteContext<
-  T extends Record<string, unknown>,
+  T extends object,
 > {
   adapter: DirectSheetAdapter;
   sheetName: string;
