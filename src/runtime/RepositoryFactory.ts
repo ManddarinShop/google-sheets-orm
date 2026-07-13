@@ -1,6 +1,6 @@
 import { auth as googleAuth } from "@googleapis/sheets";
 import { AppsScriptGatewayAdapter } from "../adapter/AppsScriptGatewayAdapter.js";
-import type { DirectSheetAdapter } from "../adapter/Adapter.js";
+import type { DirectSheetAdapter } from "../adapter/direct/DirectSheetAdapter.js";
 import { GoogleSheetsAdapter } from "../adapter/GoogleSheetsAdapter.js";
 import {
   createSheetRepository,

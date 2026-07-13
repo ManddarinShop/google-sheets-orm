@@ -1,8 +1,8 @@
 export {
   createQueuedSheetRepository,
   summarizeProcessTaskQueueResult,
-} from "./QueuedSheetRepository.js";
-export { createSheetRepository } from "./DirectSheetRepository.js";
+} from "../queued/index.js";
+export { createSheetRepository } from "../direct/index.js";
 export type {
   CreateQueuedSheetRepositoryInput,
   QueuedColumnMap,
@@ -12,9 +12,11 @@ export type {
   QueuedRepositoryTransactionOptions,
   QueuedRepositoryTransaction,
   QueuedSheetRepository,
-} from "./QueuedSheetRepository.js";
+} from "../queued/index.js";
 export type {
   ColumnMap,
-  CreateSheetRepositoryInput,
+} from "../shared/RepositoryTypes.js";
+export type {
   SheetRepository,
-} from "./DirectSheetRepository.js";
+  CreateSheetRepositoryInput,
+} from "../direct/index.js";

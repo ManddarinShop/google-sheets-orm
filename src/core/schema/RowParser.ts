@@ -1,4 +1,4 @@
-import { SheetCell } from "../../adapter/Adapter.js";
+import type { SheetCell } from "../../adapter/shared/SheetAdapter.js";
 import { Column } from "./Columns.js";
 
 export type ColumnMap = Record<string, Column<any>>;

@@ -10,6 +10,7 @@ import type {
 } from "../src/adapter/Adapter.js";
 import { boolean, number, text } from "../src/core/schema/index.js";
 import { SchemaDriftError } from "../src/core/errors/index.js";
+import { createQueuedRepositoryTransactionCoordinator } from "../src/core/queued/QueuedRepositoryTransactionCoordinator.js";
 import { createRepositoryQueueWriteExecutor } from "../src/core/write/index.js";
 
 interface User {
@@ -140,18 +141,14 @@ describe("repository queue write executor", () => {
   };
 
   it("uses random transaction ids by default", () => {
-    const firstExecutor = createRepositoryQueueWriteExecutor<User>({
-      adapter: new FakeQueueAdapter(emptyUsers),
-      sheetName: "Users",
-      key: "id",
-      columns,
-    });
-    const secondExecutor = createRepositoryQueueWriteExecutor<User>({
-      adapter: new FakeQueueAdapter(emptyUsers),
-      sheetName: "Users",
-      key: "id",
-      columns,
-    });
+    const firstExecutor = createQueueExecutor(
+      new FakeQueueAdapter(emptyUsers),
+      null,
+    );
+    const secondExecutor = createQueueExecutor(
+      new FakeQueueAdapter(emptyUsers),
+      null,
+    );
 
     const firstId = firstExecutor.createTransactionId();
     const secondId = secondExecutor.createTransactionId();
@@ -159,6 +156,42 @@ describe("repository queue write executor", () => {
     expect(firstId).toMatch(/^tx-[0-9a-f-]{36}$/);
     expect(secondId).toMatch(/^tx-[0-9a-f-]{36}$/);
     expect(firstId).not.toBe(secondId);
+  });
+
+  it("materializes queue tasks without retaining transaction state or enqueueing", async () => {
+    const adapter = new FakeQueueAdapter(emptyUsers);
+    const executor = createRepositoryQueueWriteExecutor<User>({
+      adapter,
+      sheetName: "Users",
+      key: "id",
+      columns,
+    });
+
+    const materialized = await executor.materializeQueueBatch(
+      [
+        {
+          kind: "insert",
+          row: {
+            id: "u1",
+            email: "a@test.com",
+            age: undefined,
+            active: true,
+            _version: 1,
+          },
+        },
+      ],
+      { transactionId: "tx-low-level" },
+    );
+
+    expect(materialized.tasks).not.toBeNull();
+    expect(adapter.enqueuedTasks).toEqual([]);
+
+    if (materialized.tasks === null) {
+      throw new Error("Expected materialized queue tasks");
+    }
+
+    await executor.enqueueTasks(materialized.tasks);
+    expect(adapter.enqueuedTasks).toHaveLength(1);
   });
 
   it("enqueues inserts as one queue transaction", async () => {
@@ -573,16 +606,25 @@ describe("repository queue write executor", () => {
     expect(adapter.enqueuedTasks).toHaveLength(1);
   });
 
-  function createQueueExecutor(adapter: AppsScriptQueueAdapter) {
-    return createRepositoryQueueWriteExecutor<User>({
+  function createQueueExecutor(
+    adapter: AppsScriptQueueAdapter,
+    createTransactionId: (() => string) | null = () => "tx-1",
+  ) {
+    const executor = createRepositoryQueueWriteExecutor<User>({
       adapter,
       sheetName: "Users",
       key: "id",
       columns,
-      createTransactionId: () => "tx-1",
       createTaskId: ({ transactionId, transactionIndex }) =>
         `${transactionId}-${transactionIndex}`,
     });
+
+    return createTransactionId === null
+      ? createQueuedRepositoryTransactionCoordinator({ executor })
+      : createQueuedRepositoryTransactionCoordinator({
+          executor,
+          createTransactionId,
+        });
   }
 
   async function waitForPendingEnqueue(

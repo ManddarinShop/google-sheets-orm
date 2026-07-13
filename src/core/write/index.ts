@@ -1,14 +1,16 @@
-export { createRepositoryQueueTasks } from "./QueuedWriteTaskProducer.js";
-export { createRepositoryQueueWriteExecutor } from "./QueuedSheetWriteExecutor.js";
-export { createRepositorySyncWriteExecutor } from "./DirectSheetWriteExecutor.js";
+export { createRepositoryQueueTasks } from "../queued/index.js";
+export { createRepositoryQueueWriteExecutor } from "../queued/index.js";
+export { createRepositorySyncWriteExecutor } from "../direct/index.js";
 export type {
   CreateRepositoryQueueTasksInput,
   RepositoryQueuedWriteOperation,
   RepositoryQueuedWriteTransaction,
-} from "./QueuedWriteTaskProducer.js";
+} from "../queued/index.js";
 export type {
   RepositoryQueueWriteExecutor,
-  RepositoryQueueWriteTransactionOptions,
+  RepositoryQueueBatch,
+  RepositoryQueueBatchMaterializationOptions,
+  RepositorySnapshot,
   RepositoryWriteTransactionOperation,
   RepositoryWriteTransactionResult,
-} from "./QueuedSheetWriteExecutor.js";
+} from "../queued/index.js";
