@@ -14,7 +14,7 @@ import type {
   UpdateRowsByKeyInput,
   UpdateRowsByKeyResult,
 } from "./Adapter.js";
-import { ConflictError, SchemaDriftError } from "../core/Errors.js";
+import { ConflictError, SchemaDriftError } from "../core/errors/index.js";
 import type {
   AppsScriptGatewayAuthenticatedRequest,
   AppsScriptGatewayDeleteRowsByKeyResponse,

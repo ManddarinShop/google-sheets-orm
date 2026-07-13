@@ -1,7 +1,7 @@
-import type { SheetCell, SheetRowSnapshot } from "../adapter/Adapter.js";
-import type { ColumnMap } from "./Repository.js";
-import { SchemaDriftError } from "./Errors.js";
-import { parseRow } from "./RowParser.js";
+import type { SheetCell, SheetRowSnapshot } from "../../adapter/Adapter.js";
+import { SchemaDriftError } from "../errors/index.js";
+import type { ColumnMap } from "./DirectSheetRepository.js";
+import { parseRow } from "../schema/index.js";
 
 export interface ParsedRepositoryRow<T extends Record<string, unknown>> {
   rowNumber: number;

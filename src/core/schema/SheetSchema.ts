@@ -1,5 +1,5 @@
 import { Column } from "./Columns.js";
-import { SchemaDriftError } from "./Errors.js";
+import { SchemaDriftError } from "../errors/index.js";
 
 export type SchemaColumnMap = Record<string, Column<any>>;
 

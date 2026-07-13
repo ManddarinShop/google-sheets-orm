@@ -2,19 +2,19 @@ import type {
   AppsScriptQueueAdapter,
   SheetCell,
   SheetSnapshot,
-} from "../adapter/Adapter.js";
-import { ConflictError, SchemaDriftError } from "./Errors.js";
-import type { ColumnMap } from "./Repository.js";
+} from "../../adapter/Adapter.js";
+import { ConflictError, SchemaDriftError } from "../errors/index.js";
+import type { ColumnMap } from "../repository/DirectSheetRepository.js";
 import {
   createRepositoryQueueTasks,
   type RepositoryQueuedWriteOperation,
-} from "./RepositoryQueueTaskProducer.js";
+} from "./QueuedWriteTaskProducer.js";
 import {
   assertUniqueKeys,
   parseRepositoryRows,
   type ParsedRepositoryRow,
-} from "./RepositoryRows.js";
-import { assertSchema } from "./Schema.js";
+} from "../repository/RepositoryRowHelpers.js";
+import { assertSchema } from "../schema/index.js";
 
 interface RepositoryUpdateRequest<T extends Record<string, unknown>> {
   id: string;

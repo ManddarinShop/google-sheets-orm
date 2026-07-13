@@ -1,10 +1,9 @@
-import type { DirectSheetAdapter } from "../adapter/Adapter.js";
-import { Column } from "./Columns.js";
-import { SchemaDriftError } from "./Errors.js";
-import { parseRow } from "./RowParser.js";
-import { assertSchema } from "./Schema.js";
-import { assertUniqueKeys } from "./RepositoryRows.js";
-import { createRepositorySyncWriteExecutor } from "./RepositorySyncWriteExecutor.js";
+import type { DirectSheetAdapter } from "../../adapter/Adapter.js";
+import { Column } from "../schema/Columns.js";
+import { SchemaDriftError } from "../errors/index.js";
+import { parseRow, assertSchema } from "../schema/index.js";
+import { assertUniqueKeys } from "./RepositoryRowHelpers.js";
+import { createRepositorySyncWriteExecutor } from "../write/index.js";
 
 export type ColumnMap<T extends Record<string, unknown>> = {
   [K in keyof T]: Column<T[K]>;
