@@ -3,6 +3,7 @@
  * from `shared/`, `direct/`, or `queued/` according to its write mode.
  */
 export type {
+  SheetReader,
   SheetAdapter,
   SheetCell,
   SheetRowSnapshot,

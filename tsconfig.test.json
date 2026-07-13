@@ -6,6 +6,7 @@
   },
   "include": [
     "src/**/*.ts",
+    "test/adapter-compatibility.test.ts",
     "test/queued-repository-transaction.test.ts",
     "test/repository-queue-write-executor.test.ts"
   ],

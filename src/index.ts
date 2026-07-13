@@ -36,6 +36,7 @@ export type {
   DirectSheetAdapter,
   ProcessTaskQueueInput,
   ProcessTaskQueueResult,
+  SheetReader,
   SheetAdapter,
   SheetCell,
   SheetSnapshot,
