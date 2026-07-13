@@ -1,0 +1,13 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": "."
+  },
+  "include": [
+    "src/**/*.ts",
+    "test/queued-repository-transaction.test.ts",
+    "test/repository-queue-write-executor.test.ts"
+  ],
+  "exclude": ["dist", "node_modules"]
+}
