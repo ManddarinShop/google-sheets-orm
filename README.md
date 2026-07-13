@@ -241,29 +241,20 @@ const processor = createQueuedRepositoryQueueProcessor(adapter);
 const result = await processor.processTaskQueue({ maxTransactions: 1 });
 ```
 
-The public queued repository is entity-oriented: use `findAll()`, `findById()`,
-`save()`, `remove()`, and `transaction()`. Saving queues a task; it does not
-apply the change to the canonical sheet immediately. Queue draining is an
-independent infrastructure operation exposed by
+The queued repository requires an explicit transaction boundary for entity
+operations. Use `tx.findAll()`, `tx.findById()`, `tx.save()`, and `tx.remove()`
+inside `repository.transaction()`. The callback is materialized as one queue
+transaction; it does not apply the change to the canonical sheet immediately.
+Queue draining is an independent infrastructure operation exposed by
 `createQueuedRepositoryQueueProcessor()`.
 
 Queued repository reads use the adapter's canonical read operation. The visible
 projection tab is seeded during initialization but is not automatically synced
 by the current gateway processor.
 
-```ts
-const order = await orders.findById("o1");
-
-if (order) {
-  order.status = "paid";
-  await orders.save(order);
-}
-```
-
-Entity `save()` and `remove()` preserve the loaded `_version` and reject stale
-entities. Queue retry/materialization details are internal implementation
-concerns; the public API currently does not expose a transaction handle or
-queue task payload.
+Entity reads and writes are scoped to the transaction callback. Queue
+retry/materialization details are internal implementation concerns; the public
+API does not expose a transaction handle or queue task payload.
 
 ## Documentation
 
