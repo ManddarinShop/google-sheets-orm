@@ -10,7 +10,7 @@ import type {
 } from "../src/adapter/Adapter.js";
 import { boolean, number, text } from "../src/core/schema/index.js";
 import { SchemaDriftError } from "../src/core/errors/index.js";
-import { createQueuedRepositoryTransactionCoordinator } from "../src/core/queued/QueuedRepositoryTransactionCoordinator.js";
+import { createQueuedRepositoryTransactionCoordinator } from "../src/core/queued/transaction/QueuedRepositoryTransactionCoordinator.js";
 import { createRepositoryQueueWriteExecutor } from "../src/core/write/index.js";
 
 interface User {

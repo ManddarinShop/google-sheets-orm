@@ -7,6 +7,7 @@ import {
   ParseError,
   SchemaDriftError,
   boolean,
+  createQueuedRepositoryQueueProcessor,
   createRepositoryFromConfig,
   createQueuedSheetRepository,
   createSheetRepository,
@@ -22,6 +23,7 @@ describe("public API", () => {
   it("exports repository factory, column factories, adapter, and public errors", () => {
     expect(createSheetRepository).toBeTypeOf("function");
     expect(createQueuedSheetRepository).toBeTypeOf("function");
+    expect(createQueuedRepositoryQueueProcessor).toBeTypeOf("function");
     expect(text).toBeTypeOf("function");
     expect(number).toBeTypeOf("function");
     expect(boolean).toBeTypeOf("function");
