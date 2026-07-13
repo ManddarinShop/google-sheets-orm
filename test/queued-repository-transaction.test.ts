@@ -284,6 +284,26 @@ describe("queued repository transaction API", () => {
     expect(adapter.enqueuedTasks).toEqual([]);
   });
 
+  it("rejects changing the key of a loaded entity", async () => {
+    const adapter = new FakeQueueAdapter(ordersSnapshot);
+    const orders = createOrdersRepository(adapter);
+
+    await expect(
+      orders.transaction(async (tx) => {
+        const order = await tx.findById("o1");
+
+        if (order === null) {
+          throw new Error("Expected order");
+        }
+
+        order.id = "o3";
+        tx.save(order);
+      }),
+    ).rejects.toThrow('Entity key cannot be changed from "o1" to "o3"');
+
+    expect(adapter.enqueuedTasks).toEqual([]);
+  });
+
   it("reads canonical state rather than the visible projection", async () => {
     const adapter = new FakeQueueAdapter(ordersSnapshot);
     adapter.setCanonicalSnapshot({

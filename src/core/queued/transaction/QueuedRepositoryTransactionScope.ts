@@ -35,15 +35,20 @@ export function createQueuedRepositoryTransactionScope<
 ): InternalQueuedRepositoryTransactionScope<T> {
   const pendingOperations: Array<RepositoryWriteTransactionOperation<T>> = [];
   const knownEntityIds = new Set<string>();
+  const loadedEntityKeys = new WeakMap<object, string>();
   let inFlightOperations: Array<RepositoryWriteTransactionOperation<T>> | null =
     null;
   let inFlightTransactionId: string | null = input.transactionId ?? null;
 
   function save(row: T): void {
+    const currentKey = String(row[input.key]);
+    const originalKey = loadedEntityKeys.get(row);
+
+    assertEntityKeyUnchanged(originalKey, currentKey);
+
     const rowSnapshot = cloneRow(row);
-    const isKnownEntity = knownEntityIds.has(
-      String(rowSnapshot[input.key]),
-    );
+    const isKnownEntity = originalKey !== undefined
+      || knownEntityIds.has(currentKey);
 
     pushPendingOperation(
       isKnownEntity
@@ -60,6 +65,11 @@ export function createQueuedRepositoryTransactionScope<
   }
 
   function remove(row: T): void {
+    const currentKey = String(row[input.key]);
+    const originalKey = loadedEntityKeys.get(row);
+
+    assertEntityKeyUnchanged(originalKey, currentKey);
+
     const rowSnapshot = cloneRow(row);
 
     pushPendingOperation({
@@ -180,7 +190,10 @@ export function createQueuedRepositoryTransactionScope<
     const rows = await input.findAll();
 
     for (const row of rows) {
-      knownEntityIds.add(String(row[input.key]));
+      const entityKey = String(row[input.key]);
+
+      knownEntityIds.add(entityKey);
+      loadedEntityKeys.set(row, entityKey);
     }
 
     const rowsById = new Map(rows.map((row) => [String(row[input.key]), row]));
@@ -223,6 +236,17 @@ export function createQueuedRepositoryTransactionScope<
     retry,
     clear,
   };
+}
+
+function assertEntityKeyUnchanged(
+  originalKey: string | undefined,
+  currentKey: string,
+): void {
+  if (originalKey !== undefined && originalKey !== currentKey) {
+    throw new ConflictError(
+      `Entity key cannot be changed from "${originalKey}" to "${currentKey}"`,
+    );
+  }
 }
 
 function cloneRow<T extends object>(row: T): T {
