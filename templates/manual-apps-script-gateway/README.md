@@ -144,7 +144,10 @@ document lock; it does not process or materialize queued tasks.
 into hidden canonical sheets and marks each group `done` or `failed`. Queued
 repository reads use `readCanonicalSheet` after processing; the visible
 projection is not automatically synchronized by the current processor.
-Projection refresh and stale `processing` recovery are still future work.
+Projection refresh remains future work. A `processing` claim that has not been
+updated for the gateway's five-minute processing lease is returned to `pending`
+on the next `processTaskQueue` call, and its attempt count is incremented when
+processing starts again.
 `writeHeader` refuses to overwrite a non-empty header row. `appendRows` writes a
 burst of rows through one gateway request so repository inserts can avoid
 per-row Apps Script calls. `deleteRows` deletes data rows from bottom to top in
