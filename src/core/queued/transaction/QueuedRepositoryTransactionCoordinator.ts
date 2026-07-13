@@ -50,9 +50,9 @@ interface RetainedQueueWriteBatch<T extends Record<string, unknown>>
 }
 
 /**
- * Coordinates repository transaction scope with the low-level queue executor.
- * It owns serialization, retained batches, and ambiguous enqueue recovery; the
- * executor only validates operations and materializes or appends queue tasks.
+ * Coordinates transaction scopes with the low-level queue executor. It owns
+ * serialization and ambiguous enqueue recovery; the executor only validates,
+ * materializes, and appends queue tasks.
  */
 export function createQueuedRepositoryTransactionCoordinator<
   T extends Record<string, unknown>,

@@ -45,6 +45,10 @@ class FakeQueueAdapter implements AppsScriptQueueAdapter {
 
   constructor(private snapshot: SheetSnapshot) {}
 
+  setSnapshot(snapshot: SheetSnapshot): void {
+    this.snapshot = snapshot;
+  }
+
   setCanonicalSnapshot(snapshot: SheetSnapshot): void {
     this.canonicalSnapshot = snapshot;
   }
@@ -107,7 +111,7 @@ class FakeQueueAdapter implements AppsScriptQueueAdapter {
   }
 }
 
-describe("queued repository public API", () => {
+describe("queued repository transaction API", () => {
   const columns = {
     id: text(),
     userId: text(),
@@ -153,17 +157,16 @@ describe("queued repository public API", () => {
       keyValue: "o1",
       expectedVersion: 3,
     });
-    expect(JSON.parse(task?.payloadJson ?? "{}"))
-      .toEqual({
-        expectedVersion: 3,
-        rowToWrite: {
-          id: "o1",
-          userId: "u1",
-          status: "canceled",
-          canceledAt: "2026-07-09T00:00:00.000Z",
-          _version: 4,
-        },
-      });
+    expect(JSON.parse(task?.payloadJson ?? "{}")).toEqual({
+      expectedVersion: 3,
+      rowToWrite: {
+        id: "o1",
+        userId: "u1",
+        status: "canceled",
+        canceledAt: "2026-07-09T00:00:00.000Z",
+        _version: 4,
+      },
+    });
   });
 
   it("does not enqueue when the transaction callback throws", async () => {
@@ -186,7 +189,7 @@ describe("queued repository public API", () => {
     expect(adapter.enqueuedTasks).toEqual([]);
   });
 
-  it("groups multiple entity mutations into one transaction", async () => {
+  it("groups multiple entity mutations into one queue transaction", async () => {
     const adapter = new FakeQueueAdapter(ordersSnapshot);
     const orders = createOrdersRepository(adapter);
 
@@ -209,50 +212,41 @@ describe("queued repository public API", () => {
     expect(new Set(tasks.map((task) => task.transactionId))).toHaveLength(1);
   });
 
-  it("supports public save for existing and new entities", async () => {
+  it("does not expose entity operations outside a transaction", () => {
     const adapter = new FakeQueueAdapter(ordersSnapshot);
     const orders = createOrdersRepository(adapter);
 
-    const existingOrder = await orders.findById("o1");
-
-    if (existingOrder === null) {
-      throw new Error("Expected existing order");
-    }
-
-    existingOrder.status = "canceled";
-    await orders.save(existingOrder);
-    await orders.save({
-      id: "o3",
-      userId: "u1",
-      status: "created",
-      canceledAt: undefined,
-      _version: 1,
-    });
-
-    expect(adapter.enqueuedTasks).toHaveLength(2);
-    expect(adapter.enqueuedTasks.map((batch) => batch.tasks[0]?.operation))
-      .toEqual(["update", "insert"]);
+    expect(orders).not.toHaveProperty("findAll");
+    expect(orders).not.toHaveProperty("findById");
+    expect(orders).not.toHaveProperty("save");
+    expect(orders).not.toHaveProperty("remove");
+    expect(orders.transaction).toBeTypeOf("function");
   });
 
-  it("supports public remove for a loaded entity", async () => {
+  it("rejects a stale entity within its transaction", async () => {
     const adapter = new FakeQueueAdapter(ordersSnapshot);
     const orders = createOrdersRepository(adapter);
-    const order = await orders.findById("o1");
 
-    if (order === null) {
-      throw new Error("Expected order");
-    }
+    await expect(
+      orders.transaction(async (tx) => {
+        const order = await tx.findById("o1");
 
-    await orders.remove(order);
+        if (order === null) {
+          throw new Error("Expected order");
+        }
 
-    expect(adapter.enqueuedTasks[0]?.tasks[0]).toMatchObject({
-      operation: "delete",
-      keyValue: "o1",
-      expectedVersion: 3,
-    });
+        adapter.setSnapshot({
+          headers: ordersSnapshot.headers,
+          rows: [ordersSnapshot.rows[1]!],
+        });
+        tx.save(order);
+      }),
+    ).rejects.toThrow("Stale entity");
+
+    expect(adapter.enqueuedTasks).toEqual([]);
   });
 
-  it("applies pending save state to reads inside the transaction", async () => {
+  it("applies pending transaction mutations to reads inside the transaction", async () => {
     const adapter = new FakeQueueAdapter(ordersSnapshot);
     const orders = createOrdersRepository(adapter);
 
@@ -279,7 +273,9 @@ describe("queued repository public API", () => {
     });
     const orders = createOrdersRepository(adapter);
 
-    await expect(orders.findById("o1")).resolves.toEqual({
+    await expect(
+      orders.transaction((tx) => tx.findById("o1")),
+    ).resolves.toEqual({
       id: "o1",
       userId: "u1",
       status: "canceled",
@@ -302,7 +298,7 @@ describe("queued repository public API", () => {
     ]);
   });
 
-  it("exposes queue processing separately from repository writes", async () => {
+  it("exposes queue processing separately from repository transactions", async () => {
     const adapter = new FakeQueueAdapter(ordersSnapshot);
     const processor = createQueuedRepositoryQueueProcessor(adapter);
 

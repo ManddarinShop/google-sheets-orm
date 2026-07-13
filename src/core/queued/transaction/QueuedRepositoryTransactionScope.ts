@@ -60,9 +60,8 @@ export function createQueuedRepositoryTransactionScope<
   }
 
   /**
-   * Enqueues one immutable batch and keeps its identity/materialized payload
-   * when the adapter result is ambiguous, so a caller retry cannot append a
-   * second transaction.
+   * Materializes the collected operations and appends one transaction group to
+   * the durable task queue. Enqueue failures retain the internal retry batch.
    */
   async function flush(): Promise<Array<void | T | null>> {
     if (pendingOperations.length === 0) {
@@ -167,6 +166,7 @@ export function createQueuedRepositoryTransactionScope<
 
   async function findAll(): Promise<Array<T>> {
     const rows = await input.findAll();
+
     for (const row of rows) {
       knownEntityIds.add(String(row[input.key]));
     }

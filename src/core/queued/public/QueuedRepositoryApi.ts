@@ -16,12 +16,10 @@ export interface CreateQueuedSheetRepositoryInput<
 export interface QueuedSheetRepository<T extends Record<string, unknown>> {
   /** Initializes the gateway-owned canonical, projection, and queue sheets. */
   ensureSheet(): Promise<void>;
-  findAll(): Promise<Array<T>>;
-  findById(id: string): Promise<T | null>;
-  /** Queues a new or loaded entity for persistence. */
-  save(row: T): Promise<void>;
-  /** Queues deletion of a loaded entity using its original version. */
-  remove(row: T): Promise<void>;
+  /**
+   * Runs entity reads and writes in one queued unit of work. Entity operations
+   * outside this callback are not part of the public queued API.
+   */
   transaction<TResult>(
     callback: (
       transaction: QueuedRepositoryTransaction<T>,

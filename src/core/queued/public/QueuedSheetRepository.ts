@@ -39,6 +39,7 @@ export function createQueuedSheetRepository<
     await adapter.initializeSystemSheets(sheetName, Object.keys(columns));
   }
 
+  /** Reads canonical rows for the current transaction scope. */
   async function findAll(): Promise<Array<T>> {
     const snapshot = await readQueuedRepositorySheet(adapter, sheetName);
 
@@ -57,33 +58,12 @@ export function createQueuedSheetRepository<
     );
 
     assertUniqueKeys(rows, key);
-
     return rows;
   }
 
-  async function findById(id: string): Promise<T | null> {
-    const rows = await findAll();
-
-    return rows.find((row) => String(row[key]) === id) ?? null;
-  }
-
-  async function save(row: T): Promise<void> {
-    const transaction = createRepositoryTransactionScope();
-    await transaction.findById(String(row[key]));
-    transaction.save(row);
-
-    await transaction.flush();
-  }
-
-  async function remove(row: T): Promise<void> {
-    const transaction = createRepositoryTransactionScope();
-
-    transaction.remove(row);
-    await transaction.flush();
-  }
-
-  /** Builds one queued unit of work with this repository's read and write context. */
-  function createRepositoryTransactionScope(): InternalQueuedRepositoryTransactionScope<T> {
+  /** Creates the one unit of work used by a manual or future ambient transaction. */
+  function createRepositoryTransactionScope():
+    InternalQueuedRepositoryTransactionScope<T> {
     return createQueuedRepositoryTransactionScope({
       findAll,
       key,
@@ -91,8 +71,14 @@ export function createQueuedSheetRepository<
     });
   }
 
+  /**
+   * Runs all entity reads and writes in one queued unit of work. Callback
+   * failures are cleared; enqueue failures retain their internal retry batch.
+   */
   async function transaction<TResult>(
-    callback: (transaction: QueuedRepositoryTransaction<T>) => TResult | Promise<TResult>,
+    callback: (
+      transaction: QueuedRepositoryTransaction<T>,
+    ) => TResult | Promise<TResult>,
   ): Promise<TResult> {
     const transactionScope = createRepositoryTransactionScope();
     let result: TResult;
@@ -104,19 +90,12 @@ export function createQueuedSheetRepository<
       throw error;
     }
 
-    // Callback failures are cleared above. A flush failure intentionally
-    // leaves the batch retained in the internal coordinator for its retry path.
     await transactionScope.flush();
-
     return result;
   }
 
   return {
     ensureSheet,
-    findAll,
-    findById,
-    save,
-    remove,
     transaction,
   };
 }
