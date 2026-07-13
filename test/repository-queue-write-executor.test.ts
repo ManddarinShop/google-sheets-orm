@@ -8,12 +8,17 @@ import type {
   ProcessTaskQueueResult,
   SheetSnapshot,
 } from "../src/adapter/Adapter.js";
+import { ConflictError, SchemaDriftError } from "../src/core/errors/index.js";
+import {
+  createQueuedRepositoryTransactionCoordinator,
+} from "../src/core/queued/transaction/QueuedRepositoryTransactionCoordinator.js";
+import {
+  createRepositoryQueueWriteExecutor,
+  type RepositoryWriteTransactionOperation,
+} from "../src/core/write/index.js";
 import { boolean, number, text } from "../src/core/schema/index.js";
-import { SchemaDriftError } from "../src/core/errors/index.js";
-import { createQueuedRepositoryTransactionCoordinator } from "../src/core/queued/transaction/QueuedRepositoryTransactionCoordinator.js";
-import { createRepositoryQueueWriteExecutor } from "../src/core/write/index.js";
 
-interface User {
+interface User extends Record<string, unknown> {
   id: string;
   email: string;
   age: number | undefined;
@@ -23,34 +28,42 @@ interface User {
 
 class FakeQueueAdapter implements AppsScriptQueueAdapter {
   readonly enqueuedTasks: EnqueueTasksInput[] = [];
-  readonly readSheets: Array<string> = [];
+  readonly readSheets: string[] = [];
+  enqueueError: Error | null = null;
+  enqueueErrorAfterRecord: Error | null = null;
 
   constructor(private readonly snapshot: SheetSnapshot) {}
 
   async readSheet(sheetName: string): Promise<SheetSnapshot> {
     this.readSheets.push(sheetName);
-
-    return {
-      headers: [...this.snapshot.headers],
-      rows: this.snapshot.rows.map((row) => ({
-        rowNumber: row.rowNumber,
-        cells: [...row.cells],
-      })),
-    };
+    return cloneSnapshot(this.snapshot);
   }
 
   async readCanonicalSheet(sheetName: string): Promise<SheetSnapshot> {
     return this.readSheet(sheetName);
   }
 
-  async initializeSystemSheets(): Promise<InitializeSystemSheetsResult> {
+  async initializeSystemSheets(
+    _sheetName: string,
+    _headers: string[],
+  ): Promise<InitializeSystemSheetsResult> {
     throw new Error("Unexpected initializeSystemSheets call");
   }
 
   async enqueueTasks(input: EnqueueTasksInput): Promise<EnqueueTasksResult> {
+    if (this.enqueueError !== null) {
+      throw this.enqueueError;
+    }
+
     this.enqueuedTasks.push({
       tasks: input.tasks.map((task) => ({ ...task })),
     });
+
+    if (this.enqueueErrorAfterRecord !== null) {
+      const error = this.enqueueErrorAfterRecord;
+      this.enqueueErrorAfterRecord = null;
+      throw error;
+    }
 
     return {
       tasks: input.tasks.map((task, index) => ({
@@ -65,60 +78,7 @@ class FakeQueueAdapter implements AppsScriptQueueAdapter {
   }
 }
 
-class BlockingQueueAdapter extends FakeQueueAdapter {
-  private readIndex = 0;
-  private readonly pendingEnqueueResolves: Array<() => void> = [];
-
-  constructor(private readonly snapshots: SheetSnapshot[]) {
-    super(snapshots[0] ?? { headers: [], rows: [] });
-  }
-
-  override async readSheet(sheetName: string): Promise<SheetSnapshot> {
-    this.readSheets.push(sheetName);
-
-    const snapshot =
-      this.snapshots[Math.min(this.readIndex, this.snapshots.length - 1)];
-    this.readIndex += 1;
-
-    if (snapshot === undefined) {
-      throw new Error("Missing controlled snapshot");
-    }
-
-    return {
-      headers: [...snapshot.headers],
-      rows: snapshot.rows.map((row) => ({
-        rowNumber: row.rowNumber,
-        cells: [...row.cells],
-      })),
-    };
-  }
-
-  override async enqueueTasks(
-    input: EnqueueTasksInput,
-  ): Promise<EnqueueTasksResult> {
-    await new Promise<void>((resolve) => {
-      this.pendingEnqueueResolves.push(resolve);
-    });
-
-    return super.enqueueTasks(input);
-  }
-
-  get pendingEnqueueCount(): number {
-    return this.pendingEnqueueResolves.length;
-  }
-
-  resolveNextEnqueue(): void {
-    const resolve = this.pendingEnqueueResolves.shift();
-
-    if (resolve === undefined) {
-      throw new Error("No pending enqueue");
-    }
-
-    resolve();
-  }
-}
-
-describe("repository queue write executor", () => {
+describe("queued write executor and coordinator", () => {
   const columns = {
     id: text(),
     email: text(),
@@ -140,32 +100,21 @@ describe("repository queue write executor", () => {
     ],
   };
 
-  it("uses random transaction ids by default", () => {
-    const firstExecutor = createQueueExecutor(
-      new FakeQueueAdapter(emptyUsers),
-      null,
-    );
-    const secondExecutor = createQueueExecutor(
-      new FakeQueueAdapter(emptyUsers),
-      null,
-    );
+  it("uses random transaction ids when the coordinator has no factory", () => {
+    const first = createCoordinator(new FakeQueueAdapter(emptyUsers));
+    const second = createCoordinator(new FakeQueueAdapter(emptyUsers));
 
-    const firstId = firstExecutor.createTransactionId();
-    const secondId = secondExecutor.createTransactionId();
+    const firstId = first.createTransactionId();
+    const secondId = second.createTransactionId();
 
     expect(firstId).toMatch(/^tx-[0-9a-f-]{36}$/);
     expect(secondId).toMatch(/^tx-[0-9a-f-]{36}$/);
     expect(firstId).not.toBe(secondId);
   });
 
-  it("materializes queue tasks without retaining transaction state or enqueueing", async () => {
+  it("materializes an insert without enqueueing it", async () => {
     const adapter = new FakeQueueAdapter(emptyUsers);
-    const executor = createRepositoryQueueWriteExecutor<User>({
-      adapter,
-      sheetName: "Users",
-      key: "id",
-      columns,
-    });
+    const executor = createExecutor(adapter);
 
     const materialized = await executor.materializeQueueBatch(
       [
@@ -180,163 +129,27 @@ describe("repository queue write executor", () => {
           },
         },
       ],
-      { transactionId: "tx-low-level" },
+      { transactionId: "tx-insert" },
     );
 
-    expect(materialized.tasks).not.toBeNull();
+    expect(materialized.results).toEqual([undefined]);
+    expect(materialized.tasks?.tasks[0]).toMatchObject({
+      taskId: "tx-insert-0",
+      transactionId: "tx-insert",
+      operation: "insert",
+      expectedVersion: null,
+      keyValue: "u1",
+    });
+    expect(materialized.fingerprint).toEqual(expect.any(String));
     expect(adapter.enqueuedTasks).toEqual([]);
-
-    if (materialized.tasks === null) {
-      throw new Error("Expected materialized queue tasks");
-    }
-
-    await executor.enqueueTasks(materialized.tasks);
-    expect(adapter.enqueuedTasks).toHaveLength(1);
   });
 
-  it("enqueues inserts as one queue transaction", async () => {
-    const adapter = new FakeQueueAdapter(emptyUsers);
-    const executor = createQueueExecutor(adapter);
-
-    await expect(
-      executor.insertRows([
-        {
-          id: "u1",
-          email: "a@test.com",
-          age: undefined,
-          active: true,
-          _version: 1,
-        },
-      ]),
-    ).resolves.toEqual([undefined]);
-
-    expect(adapter.enqueuedTasks).toEqual([
-      {
-        tasks: [
-          {
-            taskId: "tx-1-0",
-            transactionId: "tx-1",
-            transactionIndex: 0,
-            sheetName: "Users",
-            keyHeader: "id",
-            keyValue: "u1",
-            operation: "insert",
-            expectedVersion: null,
-            payloadJson: JSON.stringify({
-              row: {
-                id: "u1",
-                email: "a@test.com",
-                age: null,
-                active: true,
-                _version: 1,
-              },
-            }),
-          },
-        ],
-      },
-    ]);
-  });
-
-  it("enqueues updates with expected version and row to write", async () => {
+  it("materializes mixed operations from one canonical snapshot", async () => {
     const adapter = new FakeQueueAdapter(usersWithRows);
-    const executor = createQueueExecutor(adapter);
+    const executor = createExecutor(adapter);
 
-    await expect(
-      executor.updateRowsById([
-        {
-          id: "u1",
-          updater: (current) => ({
-            ...current,
-            age: undefined,
-          }),
-        },
-      ]),
-    ).resolves.toEqual([
-      {
-        id: "u1",
-        email: "a@test.com",
-        age: undefined,
-        active: true,
-        _version: 2,
-      },
-    ]);
-
-    expect(adapter.enqueuedTasks).toEqual([
-      {
-        tasks: [
-          {
-            taskId: "tx-1-0",
-            transactionId: "tx-1",
-            transactionIndex: 0,
-            sheetName: "Users",
-            keyHeader: "id",
-            keyValue: "u1",
-            operation: "update",
-            expectedVersion: 1,
-            payloadJson: JSON.stringify({
-              expectedVersion: 1,
-              rowToWrite: {
-                id: "u1",
-                email: "a@test.com",
-                age: null,
-                active: true,
-                _version: 2,
-              },
-            }),
-          },
-        ],
-      },
-    ]);
-  });
-
-  it("enqueues deletes with previous row evidence", async () => {
-    const adapter = new FakeQueueAdapter(usersWithRows);
-    const executor = createQueueExecutor(adapter);
-
-    await expect(executor.deleteRowsById(["u2"])).resolves.toEqual([
-      {
-        id: "u2",
-        email: "b@test.com",
-        age: undefined,
-        active: false,
-        _version: 3,
-      },
-    ]);
-
-    expect(adapter.enqueuedTasks).toEqual([
-      {
-        tasks: [
-          {
-            taskId: "tx-1-0",
-            transactionId: "tx-1",
-            transactionIndex: 0,
-            sheetName: "Users",
-            keyHeader: "id",
-            keyValue: "u2",
-            operation: "delete",
-            expectedVersion: 3,
-            payloadJson: JSON.stringify({
-              expectedVersion: 3,
-              rowToDelete: {
-                id: "u2",
-                email: "b@test.com",
-                age: null,
-                active: false,
-                _version: 3,
-              },
-            }),
-          },
-        ],
-      },
-    ]);
-  });
-
-  it("enqueues mixed writes as one transaction from one snapshot", async () => {
-    const adapter = new FakeQueueAdapter(usersWithRows);
-    const executor = createQueueExecutor(adapter);
-
-    await expect(
-      executor.writeTransaction([
+    const materialized = await executor.materializeQueueBatch(
+      [
         {
           kind: "insert",
           row: {
@@ -359,99 +172,31 @@ describe("repository queue write executor", () => {
           kind: "delete",
           id: "u1",
         },
-      ]),
-    ).resolves.toEqual([
-      undefined,
-      {
-        id: "u2",
-        email: "b-next@test.com",
-        age: undefined,
-        active: false,
-        _version: 4,
-      },
-      {
-        id: "u1",
-        email: "a@test.com",
-        age: 20,
-        active: true,
-        _version: 1,
-      },
-    ]);
+      ],
+      { transactionId: "tx-mixed" },
+    );
 
     expect(adapter.readSheets).toEqual(["Users"]);
-    expect(adapter.enqueuedTasks).toEqual([
-      {
-        tasks: [
-          {
-            taskId: "tx-1-0",
-            transactionId: "tx-1",
-            transactionIndex: 0,
-            sheetName: "Users",
-            keyHeader: "id",
-            keyValue: "u3",
-            operation: "insert",
-            expectedVersion: null,
-            payloadJson: JSON.stringify({
-              row: {
-                id: "u3",
-                email: "c@test.com",
-                age: 22,
-                active: true,
-                _version: 1,
-              },
-            }),
-          },
-          {
-            taskId: "tx-1-1",
-            transactionId: "tx-1",
-            transactionIndex: 1,
-            sheetName: "Users",
-            keyHeader: "id",
-            keyValue: "u2",
-            operation: "update",
-            expectedVersion: 3,
-            payloadJson: JSON.stringify({
-              expectedVersion: 3,
-              rowToWrite: {
-                id: "u2",
-                email: "b-next@test.com",
-                age: null,
-                active: false,
-                _version: 4,
-              },
-            }),
-          },
-          {
-            taskId: "tx-1-2",
-            transactionId: "tx-1",
-            transactionIndex: 2,
-            sheetName: "Users",
-            keyHeader: "id",
-            keyValue: "u1",
-            operation: "delete",
-            expectedVersion: 1,
-            payloadJson: JSON.stringify({
-              expectedVersion: 1,
-              rowToDelete: {
-                id: "u1",
-                email: "a@test.com",
-                age: 20,
-                active: true,
-                _version: 1,
-              },
-            }),
-          },
-        ],
-      },
+    expect(materialized.results[0]).toBeUndefined();
+    expect(materialized.results[1]).toMatchObject({
+      id: "u2",
+      email: "b-next@test.com",
+      _version: 4,
+    });
+    expect(materialized.results[2]).toMatchObject({ id: "u1", _version: 1 });
+    expect(materialized.tasks?.tasks.map((task) => task.operation)).toEqual([
+      "insert",
+      "update",
+      "delete",
     ]);
   });
 
-  it("uses earlier transaction operations as later operation state", async () => {
+  it("uses earlier operations as state for later operations", async () => {
     const adapter = new FakeQueueAdapter(emptyUsers);
-    const executor = createQueueExecutor(adapter);
+    const executor = createExecutor(adapter);
 
-    await expect(
-      executor.writeTransaction([
+    const materialized = await executor.materializeQueueBatch(
+      [
         {
           kind: "insert",
           row: {
@@ -470,147 +215,135 @@ describe("repository queue write executor", () => {
             email: "a-next@test.com",
           }),
         },
-      ]),
-    ).resolves.toEqual([
-      undefined,
-      {
-        id: "u1",
-        email: "a-next@test.com",
-        age: 20,
-        active: true,
-        _version: 2,
-      },
-    ]);
+      ],
+      { transactionId: "tx-sequential" },
+    );
 
-    expect(adapter.readSheets).toEqual(["Users"]);
-    expect(adapter.enqueuedTasks).toEqual([
-      {
-        tasks: [
+    expect(materialized.results[1]).toMatchObject({
+      id: "u1",
+      email: "a-next@test.com",
+      _version: 2,
+    });
+    expect(materialized.tasks?.tasks[1]).toMatchObject({
+      operation: "update",
+      expectedVersion: 1,
+      keyValue: "u1",
+    });
+  });
+
+  it("rejects duplicate inserts before enqueueing", async () => {
+    const adapter = new FakeQueueAdapter(usersWithRows);
+    const executor = createExecutor(adapter);
+
+    await expect(
+      executor.materializeQueueBatch(
+        [
           {
-            taskId: "tx-1-0",
-            transactionId: "tx-1",
-            transactionIndex: 0,
-            sheetName: "Users",
-            keyHeader: "id",
-            keyValue: "u1",
-            operation: "insert",
-            expectedVersion: null,
-            payloadJson: JSON.stringify({
-              row: {
-                id: "u1",
-                email: "a@test.com",
-                age: 20,
-                active: true,
-                _version: 1,
-              },
-            }),
+            kind: "insert",
+            row: {
+              id: "u1",
+              email: "duplicate@test.com",
+              age: 21,
+              active: false,
+              _version: 1,
+            },
           },
+        ],
+        { transactionId: "tx-duplicate" },
+      ),
+    ).rejects.toBeInstanceOf(SchemaDriftError);
+
+    expect(adapter.enqueuedTasks).toEqual([]);
+  });
+
+  it("rejects a stale update before enqueueing", async () => {
+    const adapter = new FakeQueueAdapter(usersWithRows);
+    const executor = createExecutor(adapter);
+
+    await expect(
+      executor.materializeQueueBatch(
+        [
           {
-            taskId: "tx-1-1",
-            transactionId: "tx-1",
-            transactionIndex: 1,
-            sheetName: "Users",
-            keyHeader: "id",
-            keyValue: "u1",
-            operation: "update",
-            expectedVersion: 1,
-            payloadJson: JSON.stringify({
-              expectedVersion: 1,
-              rowToWrite: {
-                id: "u1",
-                email: "a-next@test.com",
-                age: 20,
-                active: true,
-                _version: 2,
-              },
+            kind: "update",
+            id: "u1",
+            expectedVersion: 0,
+            updater: (current) => ({
+              ...current,
+              email: "stale@test.com",
             }),
           },
         ],
-      },
-    ]);
+        { transactionId: "tx-stale" },
+      ),
+    ).rejects.toBeInstanceOf(ConflictError);
+
+    expect(adapter.enqueuedTasks).toEqual([]);
   });
 
-  it("does not enqueue tasks for missing update and delete targets", async () => {
+  it("retains and retries the exact batch after an ambiguous enqueue", async () => {
     const adapter = new FakeQueueAdapter(emptyUsers);
-    const executor = createQueueExecutor(adapter);
-
-    await expect(
-      executor.updateRowsById([
-        {
-          id: "missing",
-          updater: (current) => current,
-        },
-      ]),
-    ).resolves.toEqual([null]);
-    await expect(executor.deleteRowsById(["missing"])).resolves.toEqual([null]);
-
-    expect(adapter.enqueuedTasks).toEqual([]);
-  });
-
-  it("rejects duplicate insert keys before enqueueing", async () => {
-    const adapter = new FakeQueueAdapter(usersWithRows);
-    const executor = createQueueExecutor(adapter);
-
-    await expect(
-      executor.insertRows([
-        {
-          id: "u1",
-          email: "duplicate@test.com",
-          age: 21,
-          active: false,
-          _version: 1,
-        },
-      ]),
-    ).rejects.toThrow(SchemaDriftError);
-    expect(adapter.enqueuedTasks).toEqual([]);
-  });
-
-  it("serializes overlapping writes before reading snapshots", async () => {
-    const adapter = new BlockingQueueAdapter([
-      emptyUsers,
-      {
-        headers: ["id", "email", "age", "active", "_version"],
-        rows: [{ rowNumber: 2, cells: ["u1", "a@test.com", 20, true, 1] }],
-      },
-    ]);
-    const executor = createQueueExecutor(adapter);
-    const firstInsert = executor.insertRows([
-      {
+    adapter.enqueueErrorAfterRecord = new Error("enqueue response lost");
+    const coordinator = createCoordinator(adapter);
+    const operation: RepositoryWriteTransactionOperation<User> = {
+      kind: "insert",
+      row: {
         id: "u1",
         email: "a@test.com",
-        age: 20,
+        age: undefined,
         active: true,
         _version: 1,
       },
-    ]);
-    const secondInsert = executor.insertRows([
-      {
-        id: "u1",
-        email: "duplicate@test.com",
-        age: 21,
-        active: false,
-        _version: 1,
-      },
-    ]);
+    };
 
-    await waitForPendingEnqueue(adapter);
+    await expect(
+      coordinator.writeTransaction([operation], {
+        transactionId: "tx-ambiguous",
+      }),
+    ).rejects.toThrow("enqueue response lost");
 
-    expect(adapter.readSheets).toEqual(["Users"]);
-    expect(adapter.enqueuedTasks).toEqual([]);
+    await expect(
+      coordinator.retryTransaction("tx-ambiguous"),
+    ).resolves.toEqual([undefined]);
 
-    adapter.resolveNextEnqueue();
+    expect(adapter.enqueuedTasks).toHaveLength(2);
+    expect(adapter.enqueuedTasks[1]).toEqual(adapter.enqueuedTasks[0]);
+  });
 
-    await expect(firstInsert).resolves.toEqual([undefined]);
-    await expect(secondInsert).rejects.toThrow(SchemaDriftError);
-    expect(adapter.readSheets).toEqual(["Users", "Users"]);
+  it("rejects a different batch for a retained transaction identity", async () => {
+    const adapter = new FakeQueueAdapter(usersWithRows);
+    adapter.enqueueErrorAfterRecord = new Error("enqueue response lost");
+    const coordinator = createCoordinator(adapter);
+
+    const firstOperation: RepositoryWriteTransactionOperation<User> = {
+      kind: "update",
+      id: "u1",
+      expectedVersion: 1,
+      updater: (current) => ({ ...current, email: "first@test.com" }),
+    };
+    const secondOperation: RepositoryWriteTransactionOperation<User> = {
+      kind: "update",
+      id: "u1",
+      expectedVersion: 1,
+      updater: (current) => ({ ...current, email: "second@test.com" }),
+    };
+
+    await expect(
+      coordinator.writeTransaction([firstOperation], {
+        transactionId: "tx-different",
+      }),
+    ).rejects.toThrow("enqueue response lost");
+
+    await expect(
+      coordinator.writeTransaction([secondOperation], {
+        transactionId: "tx-different",
+      }),
+    ).rejects.toThrow("different materialized task batch");
+
     expect(adapter.enqueuedTasks).toHaveLength(1);
   });
 
-  function createQueueExecutor(
-    adapter: AppsScriptQueueAdapter,
-    createTransactionId: (() => string) | null = () => "tx-1",
-  ) {
-    const executor = createRepositoryQueueWriteExecutor<User>({
+  function createExecutor(adapter: AppsScriptQueueAdapter) {
+    return createRepositoryQueueWriteExecutor<User>({
       adapter,
       sheetName: "Users",
       key: "id",
@@ -618,26 +351,31 @@ describe("repository queue write executor", () => {
       createTaskId: ({ transactionId, transactionIndex }) =>
         `${transactionId}-${transactionIndex}`,
     });
-
-    return createTransactionId === null
-      ? createQueuedRepositoryTransactionCoordinator({ executor })
-      : createQueuedRepositoryTransactionCoordinator({
-          executor,
-          createTransactionId,
-        });
   }
 
-  async function waitForPendingEnqueue(
-    adapter: BlockingQueueAdapter,
-  ): Promise<void> {
-    for (let attempt = 0; attempt < 10; attempt += 1) {
-      if (adapter.pendingEnqueueCount > 0) {
-        return;
-      }
+  function createCoordinator(
+    adapter: AppsScriptQueueAdapter,
+    createTransactionId?: () => string,
+  ) {
+    const executor = createExecutor(adapter);
 
-      await Promise.resolve();
+    if (createTransactionId === undefined) {
+      return createQueuedRepositoryTransactionCoordinator({ executor });
     }
 
-    throw new Error("Timed out waiting for pending enqueue");
+    return createQueuedRepositoryTransactionCoordinator({
+      executor,
+      createTransactionId,
+    });
   }
 });
+
+function cloneSnapshot(snapshot: SheetSnapshot): SheetSnapshot {
+  return {
+    headers: [...snapshot.headers],
+    rows: snapshot.rows.map((row) => ({
+      rowNumber: row.rowNumber,
+      cells: [...row.cells],
+    })),
+  };
+}
