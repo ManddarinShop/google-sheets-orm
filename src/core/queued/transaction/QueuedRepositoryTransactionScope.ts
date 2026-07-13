@@ -62,6 +62,14 @@ export function createQueuedRepositoryTransactionScope<
             row: rowSnapshot,
           },
     );
+
+    // Keep the original identity on entities introduced directly to this
+    // transaction as well as entities read from the canonical sheet. Without
+    // this, mutating a newly saved entity's key before a second save could
+    // turn the second save into an unrelated insert.
+    if (originalKey === undefined) {
+      loadedEntityKeys.set(row, currentKey);
+    }
   }
 
   function remove(row: T): void {
@@ -192,15 +200,16 @@ export function createQueuedRepositoryTransactionScope<
     for (const row of rows) {
       const entityKey = String(row[input.key]);
 
-      knownEntityIds.add(entityKey);
-      loadedEntityKeys.set(row, entityKey);
+      rememberCanonicalEntity(row, entityKey);
     }
 
     const rowsById = new Map(rows.map((row) => [String(row[input.key]), row]));
 
     for (const operation of pendingOperations) {
       if (operation.kind === "insert" || operation.kind === "save") {
-        rowsById.set(String(operation.row[input.key]), cloneRow(operation.row));
+        const overlayRow = cloneRow(operation.row);
+        rememberOverlayEntity(overlayRow, String(overlayRow[input.key]));
+        rowsById.set(String(overlayRow[input.key]), overlayRow);
         continue;
       }
 
@@ -211,7 +220,9 @@ export function createQueuedRepositoryTransactionScope<
           continue;
         }
 
-        rowsById.set(operation.id, cloneRow(operation.updater(currentRow)));
+        const overlayRow = cloneRow(operation.updater(currentRow));
+        rememberOverlayEntity(overlayRow, operation.id);
+        rowsById.set(operation.id, overlayRow);
         continue;
       }
 
@@ -219,6 +230,15 @@ export function createQueuedRepositoryTransactionScope<
     }
 
     return [...rowsById.values()];
+  }
+
+  function rememberCanonicalEntity(row: T, entityKey: string): void {
+    knownEntityIds.add(entityKey);
+    loadedEntityKeys.set(row, entityKey);
+  }
+
+  function rememberOverlayEntity(row: T, entityKey: string): void {
+    loadedEntityKeys.set(row, entityKey);
   }
 
   async function findById(id: string): Promise<T | null> {

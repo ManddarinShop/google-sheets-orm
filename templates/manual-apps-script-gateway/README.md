@@ -145,9 +145,14 @@ into hidden canonical sheets and marks each group `done` or `failed`. Queued
 repository reads use `readCanonicalSheet` after processing; the visible
 projection is not automatically synchronized by the current processor.
 Projection refresh remains future work. A `processing` claim that has not been
-updated for the gateway's five-minute processing lease is returned to `pending`
-on the next `processTaskQueue` call, and its attempt count is incremented when
-processing starts again.
+updated for the gateway's five-minute processing lease is reconciled as a
+whole transaction on the next `processTaskQueue` call. If every task's
+canonical postcondition is visible, the transaction is marked `done`; if no
+task was applied, the whole group returns to `pending`; and if only part of the
+group was applied, or a delete cannot be proven from the remaining row state,
+the whole group is marked `failed` with `partial_apply` for manual recovery.
+Recovered pending work increments its attempt count when processing starts
+again.
 `writeHeader` refuses to overwrite a non-empty header row. `appendRows` writes a
 burst of rows through one gateway request so repository inserts can avoid
 per-row Apps Script calls. `deleteRows` deletes data rows from bottom to top in

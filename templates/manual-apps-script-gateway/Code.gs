@@ -328,6 +328,7 @@ function initializeSystemSheets_(spreadsheet, request) {
     "sheetName",
   );
   const headers = requireStringArray_(request.headers, "headers");
+  assertExpectedHeaders_(headers, headers, "projection initialization");
   const canonicalSheetName = getOrCreateCanonicalSheetName_(
     spreadsheet,
     logicalSheetName,
@@ -492,6 +493,21 @@ function enqueueTasks_(spreadsheet, request) {
 }
 
 function ensureTaskQueueSheet_(spreadsheet) {
+  const existingQueueSheet = spreadsheet.getSheetByName(
+    TYPED_SHEETS_TASK_QUEUE_SHEET_NAME,
+  );
+
+  // Queue schema migration must happen before ensureInternalSheet_ validates
+  // the current header. Otherwise an existing 16-column queue is rejected as
+  // drift before the fingerprint column can be appended.
+  if (
+    existingQueueSheet
+    && !isHeaderRowEmpty_(existingQueueSheet)
+    && isLegacyTaskQueueHeader_(readHeaderRow_(existingQueueSheet))
+  ) {
+    migrateLegacyTaskQueueSheet_(existingQueueSheet);
+  }
+
   ensureInternalSheet_(
     spreadsheet,
     TYPED_SHEETS_TASK_QUEUE_SHEET_NAME,
@@ -530,6 +546,7 @@ function isLegacyTaskQueueHeader_(headerValues) {
   }) && (
     headerValues[TYPED_SHEETS_LEGACY_TASK_QUEUE_HEADERS.length] === ""
     || headerValues[TYPED_SHEETS_LEGACY_TASK_QUEUE_HEADERS.length] === null
+    || headerValues[TYPED_SHEETS_LEGACY_TASK_QUEUE_HEADERS.length] === undefined
   );
 }
 
@@ -700,12 +717,6 @@ function processTaskQueue_(spreadsheet, request) {
   const queueSheet = ensureTaskQueueSheet_(spreadsheet);
   const queuedTasks = readQueuedTasks_(queueSheet);
   const now = new Date();
-
-  recoverStaleProcessingTasks_(queueSheet, queuedTasks, now);
-
-  const pendingGroups = groupPendingTasksByTransaction_(queuedTasks)
-    .slice(0, options.maxTransactions);
-  const processingStartedAt = now.toISOString();
   const result = {
     ok: true,
     processedTransactions: 0,
@@ -714,6 +725,24 @@ function processTaskQueue_(spreadsheet, request) {
     failedTasks: 0,
     remainingPendingTasks: 0,
   };
+
+  // Reconcile stale claims before selecting new work. Recovery is performed
+  // for the complete transaction so a partial status update cannot leave a
+  // permanently incomplete done/pending group.
+  const recoveryResult = reconcileStaleProcessingTransactions_(
+    spreadsheet,
+    queueSheet,
+    queuedTasks,
+    now,
+  );
+  result.processedTransactions += recoveryResult.processedTransactions;
+  result.failedTransactions += recoveryResult.failedTransactions;
+  result.processedTasks += recoveryResult.processedTasks;
+  result.failedTasks += recoveryResult.failedTasks;
+
+  const pendingGroups = groupPendingTasksByTransaction_(queuedTasks)
+    .slice(0, options.maxTransactions);
+  const processingStartedAt = now.toISOString();
 
   pendingGroups.forEach(function(group) {
     markQueueTasks_(queueSheet, group.tasks, {
@@ -757,33 +786,102 @@ function processTaskQueue_(spreadsheet, request) {
 }
 
 /**
- * Returns interrupted transaction claims to the pending state after their
- * processing lease expires. The in-memory task objects are updated as well so
- * the same invocation can process a recovered group without rereading it.
+ * Reconciles expired processing claims at transaction granularity. A complete
+ * postcondition match is marked done, an unapplied group is returned to
+ * pending, and an ambiguous or partial result is failed conservatively.
  */
-function recoverStaleProcessingTasks_(queueSheet, queuedTasks, now) {
+function reconcileStaleProcessingTransactions_(
+  spreadsheet,
+  queueSheet,
+  queuedTasks,
+  now,
+) {
   const nowMs = now.getTime();
-  const staleTasks = queuedTasks.filter(function(task) {
-    return isStaleProcessingTask_(task, nowMs);
-  });
-
-  if (staleTasks.length === 0) {
-    return;
-  }
-
   const recoveredAt = now.toISOString();
+  const result = {
+    processedTransactions: 0,
+    failedTransactions: 0,
+    processedTasks: 0,
+    failedTasks: 0,
+  };
 
-  markQueueTasks_(queueSheet, staleTasks, {
-    status: "pending",
-    lastErrorCode: "stale_processing_recovered",
-    lastErrorMessage: "Recovered an interrupted processing claim",
-    updatedAt: recoveredAt,
+  groupTasksByTransaction_(queuedTasks).forEach(function(group) {
+    const hasStaleTask = group.tasks.some(function(task) {
+      return isStaleProcessingTask_(task, nowMs);
+    });
+
+    if (!hasStaleTask) {
+      return;
+    }
+
+    let reconciliation;
+
+    try {
+      reconciliation = reconcileTransactionPostconditions_(
+        spreadsheet,
+        group.tasks,
+      );
+    } catch (error) {
+      reconciliation = {
+        status: "failed",
+        errorCode: error && error.code ? error.code : "recovery_error",
+        errorMessage: error && error.message
+          ? error.message
+          : String(error),
+      };
+    }
+
+    if (reconciliation.status === "done") {
+      markQueueTasks_(queueSheet, group.tasks, {
+        status: "done",
+        payloadJson: JSON.stringify({ redacted: true }),
+        lastErrorCode: "",
+        lastErrorMessage: "",
+        updatedAt: recoveredAt,
+      });
+
+      group.tasks.forEach(function(task) {
+        task.status = "done";
+        task.payloadJson = JSON.stringify({ redacted: true });
+        task.updatedAt = recoveredAt;
+      });
+      result.processedTransactions += 1;
+      result.processedTasks += group.tasks.length;
+      return;
+    }
+
+    if (reconciliation.status === "pending") {
+      markQueueTasks_(queueSheet, group.tasks, {
+        status: "pending",
+        lastErrorCode: "stale_processing_recovered",
+        lastErrorMessage: "Recovered an unapplied transaction claim",
+        updatedAt: recoveredAt,
+      });
+
+      group.tasks.forEach(function(task) {
+        task.status = "pending";
+        task.updatedAt = recoveredAt;
+      });
+      return;
+    }
+
+    markQueueTasks_(queueSheet, group.tasks, {
+      status: "failed",
+      lastErrorCode: reconciliation.errorCode || "partial_apply",
+      lastErrorMessage: reconciliation.errorMessage
+        || "Transaction postconditions are ambiguous; manual recovery is required",
+      updatedAt: recoveredAt,
+    });
+
+    group.tasks.forEach(function(task) {
+      task.status = "failed";
+      task.updatedAt = recoveredAt;
+    });
+    result.failedTransactions += 1;
+    result.failedTasks += group.tasks.length;
   });
 
-  staleTasks.forEach(function(task) {
-    task.status = "pending";
-    task.updatedAt = recoveredAt;
-  });
+  return result;
 }
 
 function isStaleProcessingTask_(task, nowMs) {
@@ -869,6 +967,12 @@ function parseQueuedTaskRow_(row, rowNumber) {
 }
 
 function groupPendingTasksByTransaction_(queuedTasks) {
+  return groupTasksByTransaction_(queuedTasks).filter(function(group) {
+    return group.allPending;
+  });
+}
+
+function groupTasksByTransaction_(queuedTasks) {
   const groupsById = Object.create(null);
   const groups = [];
 
@@ -901,13 +1005,194 @@ function groupPendingTasksByTransaction_(queuedTasks) {
     });
   });
 
-  return groups
-    .filter(function(group) {
-      return group.allPending;
-    })
-    .sort(function(left, right) {
-      return left.firstSequence - right.firstSequence;
-    });
+  return groups.sort(function(left, right) {
+    return left.firstSequence - right.firstSequence;
+  });
+}
+
+/**
+ * Checks whether each task's intended canonical state is already visible.
+ * Deletes deliberately remain ambiguous when the target row is absent because
+ * the sheet does not retain a durable delete tombstone.
+ */
+function reconcileTransactionPostconditions_(spreadsheet, tasks) {
+  let appliedTasks = 0;
+  let unappliedTasks = 0;
+  let ambiguousOutcome = null;
+
+  tasks.forEach(function(task) {
+    if (task.status === "done") {
+      appliedTasks += 1;
+      return;
+    }
+
+    if (task.status === "failed") {
+      ambiguousOutcome = {
+        errorCode: "partial_apply",
+        errorMessage: "Transaction contains a previously failed task",
+      };
+      return;
+    }
+
+    const outcome = inspectTaskPostcondition_(spreadsheet, task);
+
+    if (outcome.status === "applied") {
+      appliedTasks += 1;
+      return;
+    }
+
+    if (outcome.status === "ambiguous") {
+      ambiguousOutcome = outcome;
+      return;
+    }
+
+    unappliedTasks += 1;
+  });
+
+  if (ambiguousOutcome !== null || (appliedTasks > 0 && unappliedTasks > 0)) {
+    return {
+      status: "failed",
+      errorCode: ambiguousOutcome
+        ? ambiguousOutcome.errorCode
+        : "partial_apply",
+      errorMessage: ambiguousOutcome
+        ? ambiguousOutcome.errorMessage
+        : "Only part of the transaction is visible in the canonical sheet",
+    };
+  }
+
+  if (unappliedTasks === 0) {
+    return { status: "done" };
+  }
+
+  return { status: "pending" };
+}
+
+function inspectTaskPostcondition_(spreadsheet, task) {
+  const table = readCanonicalTableForTask_(spreadsheet, task);
+  const rowIndex = table.rowsByKey[task.keyValue];
+
+  if (task.operation === "insert") {
+    if (rowIndex === undefined) {
+      return { status: "unapplied" };
+    }
+
+    const payload = requireTaskPayloadObject_(task);
+    const rowObject = requirePayloadObject_(payload.row, "payload.row");
+    const expectedRow = rowObjectToCanonicalCells_(table, rowObject, null);
+
+    assertTaskRowMatchesKey_(table, expectedRow, task);
+
+    return areCanonicalRowsEqual_(table.rows[rowIndex], expectedRow)
+      ? { status: "applied" }
+      : {
+          status: "ambiguous",
+          errorCode: "partial_apply",
+          errorMessage: "Inserted row does not match the queued payload",
+        };
+  }
+
+  if (task.operation === "update") {
+    if (rowIndex === undefined) {
+      return {
+        status: "ambiguous",
+        errorCode: "partial_apply",
+        errorMessage: "Updated row is missing from the canonical sheet",
+      };
+    }
+
+    const currentRow = table.rows[rowIndex];
+    const payload = requireTaskPayloadObject_(task);
+    const rowToWrite = requirePayloadObject_(
+      payload.rowToWrite,
+      "payload.rowToWrite",
+    );
+    const versionToWrite = requireTaskFiniteNumber_(
+      rowToWrite._version,
+      "payload.rowToWrite._version",
+    );
+
+    if (versionToWrite <= task.expectedVersion) {
+      throw gatewayError_(
+        "invalid_task",
+        "payload.rowToWrite._version must advance expectedVersion",
+      );
+    }
+
+    const expectedRow = rowObjectToCanonicalCells_(
+      table,
+      rowToWrite,
+      currentRow,
+    );
+    assertTaskRowMatchesKey_(table, expectedRow, task);
+
+    if (areCanonicalRowsEqual_(currentRow, expectedRow)) {
+      return { status: "applied" };
+    }
+
+    if (Number(currentRow[table.versionIndex]) === task.expectedVersion) {
+      return { status: "unapplied" };
+    }
+
+    return {
+      status: "ambiguous",
+      errorCode: "partial_apply",
+      errorMessage: "Updated row does not match the queued postcondition",
+    };
+  }
+
+  assertDeletePayloadMatchesTask_(task);
+
+  if (rowIndex === undefined) {
+    return {
+      status: "ambiguous",
+      errorCode: "partial_apply",
+      errorMessage: "Delete postcondition cannot be proven after the row disappeared",
+    };
+  }
+
+  if (Number(table.rows[rowIndex][table.versionIndex]) === task.expectedVersion) {
+    return { status: "unapplied" };
+  }
+
+  return {
+    status: "ambiguous",
+    errorCode: "partial_apply",
+    errorMessage: "Delete target changed before recovery completed",
+  };
+}
+
+function areCanonicalRowsEqual_(left, right) {
+  if (left.length !== right.length) {
+    return false;
+  }
+
+  for (let index = 0; index < left.length; index += 1) {
+    if (!areCanonicalCellsEqual_(left[index], right[index])) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function areCanonicalCellsEqual_(left, right) {
+  if (left === right) {
+    return true;
+  }
+
+  if (
+    (left === null || left === "")
+    && (right === null || right === "")
+  ) {
+    return true;
+  }
+
+  if (left instanceof Date && right instanceof Date) {
+    return left.getTime() === right.getTime();
+  }
+
+  return String(left) === String(right);
 }
 
 function applyQueueTransaction_(spreadsheet, tasks) {
@@ -1430,6 +1715,10 @@ function requireProjectionSheetName_(value, name) {
 }
 
 function ensureProjectionSheet_(spreadsheet, sheetName, headers) {
+  // Validate the requested schema even when the sheet is being created. This
+  // catches duplicate headers before they become a new, invalid system sheet.
+  assertExpectedHeaders_(headers, headers, "projection initialization");
+
   let sheet = spreadsheet.getSheetByName(sheetName);
 
   if (!sheet) {
@@ -1438,6 +1727,12 @@ function ensureProjectionSheet_(spreadsheet, sheetName, headers) {
 
   if (isHeaderRowEmpty_(sheet)) {
     sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+  } else {
+    assertExpectedHeaders_(
+      readHeaderRow_(sheet),
+      headers,
+      "projection initialization",
+    );
   }
 }
 
@@ -1450,6 +1745,12 @@ function ensureInternalSheet_(spreadsheet, sheetName, headers) {
 
   if (isHeaderRowEmpty_(sheet)) {
     sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+  } else {
+    assertExpectedHeaders_(
+      readHeaderRow_(sheet),
+      headers,
+      "canonical initialization",
+    );
   }
 
   hideInternalSheet_(sheet);
@@ -2136,6 +2437,23 @@ function assertExpectedHeaders_(actualHeaders, expectedHeaders, operation) {
     );
   }
 
+  const seenHeaders = Object.create(null);
+
+  actualHeaders.forEach(function(header) {
+    if (header === "") {
+      return;
+    }
+
+    if (seenHeaders[header]) {
+      throw gatewayError_(
+        "schema_drift",
+        "Duplicate header before " + operation + ": " + header,
+      );
+    }
+
+    seenHeaders[header] = true;
+  });
+
   expectedHeaders.forEach(function(expectedHeader, index) {
     if (actualHeaders[index] !== expectedHeader) {
       throw gatewayError_(
@@ -2144,6 +2462,21 @@ function assertExpectedHeaders_(actualHeaders, expectedHeaders, operation) {
       );
     }
   });
+}
+
+function readHeaderRow_(sheet) {
+  const lastColumn = sheet.getLastColumn();
+
+  if (lastColumn === 0) {
+    return [];
+  }
+
+  return sheet
+    .getRange(1, 1, 1, lastColumn)
+    .getValues()[0]
+    .map(function(value) {
+      return String(value);
+    });
 }
 
 function isHeaderRowEmpty_(sheet) {

@@ -555,6 +555,74 @@ describe("manual Apps Script gateway template system sheets", () => {
     expect(projection.values[1]).toEqual(["u1", "legacy@test.com", 1]);
   });
 
+  it("rejects projection schema drift during queued initialization", async () => {
+    const gateway = await loadGatewayTemplate();
+    const spreadsheet = new FakeSpreadsheet();
+    const projection = spreadsheet.insertSheet("Users");
+    projection.values = [
+      ["id", "wrong", "_version"],
+    ];
+
+    expect(() =>
+      gateway.initializeSystemSheets_(spreadsheet, {
+        sheetName: "Users",
+        headers: ["id", "email", "_version"],
+      }),
+    ).toThrow("Header row changed before projection initialization");
+  });
+
+  it("rejects duplicate projection headers during queued initialization", async () => {
+    const gateway = await loadGatewayTemplate();
+    const spreadsheet = new FakeSpreadsheet();
+    const projection = spreadsheet.insertSheet("Users");
+    projection.values = [
+      ["id", "email", "email", "_version"],
+    ];
+
+    expect(() =>
+      gateway.initializeSystemSheets_(spreadsheet, {
+        sheetName: "Users",
+        headers: ["id", "email", "active", "_version"],
+      }),
+    ).toThrow("Duplicate header before projection initialization: email");
+  });
+
+  it("rejects duplicate requested headers before creating queued sheets", async () => {
+    const gateway = await loadGatewayTemplate();
+    const spreadsheet = new FakeSpreadsheet();
+
+    expect(() =>
+      gateway.initializeSystemSheets_(spreadsheet, {
+        sheetName: "Users",
+        headers: ["id", "email", "email"],
+      }),
+    ).toThrow("Duplicate header before projection initialization: email");
+    expect(spreadsheet.sheets.has("Users")).toBe(false);
+  });
+
+  it("rejects canonical schema drift during queued initialization", async () => {
+    const gateway = await loadGatewayTemplate();
+    const spreadsheet = new FakeSpreadsheet();
+    const systemSheets = gateway.initializeSystemSheets_(spreadsheet, {
+      sheetName: "Users",
+      headers: ["id", "email", "_version"],
+    });
+    const canonical = spreadsheet.sheets.get(systemSheets.canonicalSheetName);
+
+    if (canonical === undefined) {
+      throw new Error("Expected canonical sheet");
+    }
+
+    canonical.values[0] = ["id", "wrong", "_version"];
+
+    expect(() =>
+      gateway.initializeSystemSheets_(spreadsheet, {
+        sheetName: "Users",
+        headers: ["id", "email", "_version"],
+      }),
+    ).toThrow("Header row changed before canonical initialization");
+  });
+
   it("keeps redacted legacy done tasks replayable by task id", async () => {
     const gateway = await loadGatewayTemplate();
     const spreadsheet = new FakeSpreadsheet();
@@ -1653,6 +1721,195 @@ describe("manual Apps Script gateway template system sheets", () => {
     ]);
     expect(queue.values[1]![4]).toBe("done");
     expect(queue.values[1]![11]).toBe(2);
+  });
+
+  it("reconciles a stale transaction after all canonical rows were applied", async () => {
+    const gateway = await loadGatewayTemplate();
+    const spreadsheet = new FakeSpreadsheet();
+    const systemSheets = gateway.initializeSystemSheets_(spreadsheet, {
+      sheetName: "Users",
+      headers: ["id", "_version"],
+    });
+    const canonical = spreadsheet.sheets.get(systemSheets.canonicalSheetName);
+    const queue = spreadsheet.sheets.get(
+      gateway.TYPED_SHEETS_TASK_QUEUE_SHEET_NAME,
+    );
+
+    gateway.enqueueTasks_(spreadsheet, {
+      tasks: [
+        {
+          taskId: "task-recovered-done-1",
+          transactionId: "tx-recovered-done",
+          transactionIndex: 0,
+          operation: "insert",
+          sheetName: "Users",
+          keyHeader: "id",
+          keyValue: "u1",
+          expectedVersion: null,
+          payloadJson: JSON.stringify({ row: { id: "u1", _version: 1 } }),
+        },
+        {
+          taskId: "task-recovered-done-2",
+          transactionId: "tx-recovered-done",
+          transactionIndex: 1,
+          operation: "insert",
+          sheetName: "Users",
+          keyHeader: "id",
+          keyValue: "u2",
+          expectedVersion: null,
+          payloadJson: JSON.stringify({ row: { id: "u2", _version: 1 } }),
+        },
+      ],
+    });
+
+    canonical?.values.push(["u1", 1], ["u2", 1]);
+
+    if (queue === undefined) {
+      throw new Error("Expected task queue sheet");
+    }
+
+    queue.values[1]![4] = "done";
+    queue.values[1]![10] = JSON.stringify({ redacted: true });
+    queue.values[2]![4] = "processing";
+    queue.values[2]![15] = "2020-01-01T00:00:00.000Z";
+
+    expect(gateway.processTaskQueue_(spreadsheet, {})).toEqual({
+      ok: true,
+      processedTransactions: 1,
+      failedTransactions: 0,
+      processedTasks: 2,
+      failedTasks: 0,
+      remainingPendingTasks: 0,
+    });
+    expect(queue.values.slice(1).map((row) => row[4])).toEqual([
+      "done",
+      "done",
+    ]);
+    expect(canonical?.values).toEqual([
+      ["id", "_version"],
+      ["u1", 1],
+      ["u2", 1],
+    ]);
+  });
+
+  it("fails a stale transaction when only part of its canonical state was applied", async () => {
+    const gateway = await loadGatewayTemplate();
+    const spreadsheet = new FakeSpreadsheet();
+    const systemSheets = gateway.initializeSystemSheets_(spreadsheet, {
+      sheetName: "Users",
+      headers: ["id", "_version"],
+    });
+    const canonical = spreadsheet.sheets.get(systemSheets.canonicalSheetName);
+    const queue = spreadsheet.sheets.get(
+      gateway.TYPED_SHEETS_TASK_QUEUE_SHEET_NAME,
+    );
+
+    gateway.enqueueTasks_(spreadsheet, {
+      tasks: [
+        {
+          taskId: "task-partial-1",
+          transactionId: "tx-partial",
+          transactionIndex: 0,
+          operation: "insert",
+          sheetName: "Users",
+          keyHeader: "id",
+          keyValue: "u1",
+          expectedVersion: null,
+          payloadJson: JSON.stringify({ row: { id: "u1", _version: 1 } }),
+        },
+        {
+          taskId: "task-partial-2",
+          transactionId: "tx-partial",
+          transactionIndex: 1,
+          operation: "insert",
+          sheetName: "Users",
+          keyHeader: "id",
+          keyValue: "u2",
+          expectedVersion: null,
+          payloadJson: JSON.stringify({ row: { id: "u2", _version: 1 } }),
+        },
+      ],
+    });
+
+    canonical?.values.push(["u1", 1]);
+
+    if (queue === undefined) {
+      throw new Error("Expected task queue sheet");
+    }
+
+    queue.values.slice(1).forEach((row) => {
+      row[4] = "processing";
+      row[15] = "2020-01-01T00:00:00.000Z";
+    });
+
+    expect(gateway.processTaskQueue_(spreadsheet, {})).toEqual({
+      ok: true,
+      processedTransactions: 0,
+      failedTransactions: 1,
+      processedTasks: 0,
+      failedTasks: 2,
+      remainingPendingTasks: 0,
+    });
+    expect(queue.values.slice(1).map((row) => row[4])).toEqual([
+      "failed",
+      "failed",
+    ]);
+    expect(queue.values.slice(1).map((row) => row[12])).toEqual([
+      "partial_apply",
+      "partial_apply",
+    ]);
+    expect(canonical?.values).toEqual([
+      ["id", "_version"],
+      ["u1", 1],
+    ]);
+  });
+
+  it("fails stale deletes when the missing row cannot prove the postcondition", async () => {
+    const gateway = await loadGatewayTemplate();
+    const spreadsheet = new FakeSpreadsheet();
+    const systemSheets = gateway.initializeSystemSheets_(spreadsheet, {
+      sheetName: "Users",
+      headers: ["id", "_version"],
+    });
+    const queue = spreadsheet.sheets.get(
+      gateway.TYPED_SHEETS_TASK_QUEUE_SHEET_NAME,
+    );
+
+    gateway.enqueueTasks_(spreadsheet, {
+      tasks: [
+        {
+          taskId: "task-delete-ambiguous",
+          transactionId: "tx-delete-ambiguous",
+          transactionIndex: 0,
+          operation: "delete",
+          sheetName: "Users",
+          keyHeader: "id",
+          keyValue: "u1",
+          expectedVersion: 1,
+          payloadJson: JSON.stringify({
+            rowToDelete: { id: "u1", _version: 1 },
+          }),
+        },
+      ],
+    });
+
+    if (queue === undefined) {
+      throw new Error("Expected task queue sheet");
+    }
+
+    queue.values[1]![4] = "processing";
+    queue.values[1]![15] = "2020-01-01T00:00:00.000Z";
+
+    expect(gateway.processTaskQueue_(spreadsheet, {})).toEqual({
+      ok: true,
+      processedTransactions: 0,
+      failedTransactions: 1,
+      processedTasks: 0,
+      failedTasks: 1,
+      remainingPendingTasks: 0,
+    });
+    expect(queue.values[1]![4]).toBe("failed");
+    expect(queue.values[1]![12]).toBe("partial_apply");
   });
 
   it("does not adopt a colliding internal sheet without a stored mapping", async () => {
