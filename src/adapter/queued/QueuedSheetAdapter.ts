@@ -1,5 +1,5 @@
 import type {
-  SheetAdapter,
+  SheetReader,
   SheetSnapshot,
 } from "../shared/SheetAdapter.js";
 
@@ -55,7 +55,7 @@ export interface ProcessTaskQueueResult {
   remainingPendingTasks: number;
 }
 
-export interface AppsScriptQueueAdapter extends SheetAdapter {
+export interface AppsScriptQueueAdapter extends SheetReader {
   /** Reads gateway-owned canonical rows after queued tasks are processed. */
   readCanonicalSheet(sheetName: string): Promise<SheetSnapshot>;
   /**

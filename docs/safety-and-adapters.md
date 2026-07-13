@@ -36,8 +36,12 @@ export interface SheetRowSnapshot {
   cells: SheetCell[];
 }
 
-export interface SheetAdapter {
+export interface SheetReader {
   readSheet(sheetName: string): Promise<SheetSnapshot>;
+}
+
+// `SheetAdapter` keeps the legacy direct read/write contract for compatibility.
+export interface SheetAdapter extends SheetReader {
   appendRow(sheetName: string, row: SheetCell[]): Promise<void>;
   updateRow(sheetName: string, rowNumber: number, row: SheetCell[]): Promise<void>;
   deleteRow(sheetName: string, rowNumber: number): Promise<void>;
@@ -46,6 +50,12 @@ export interface SheetAdapter {
   initializeSheet?(sheetName: string, headers: string[]): Promise<void>;
 }
 ```
+
+`SheetReader` is the common read-only boundary used by queued adapters.
+`SheetAdapter` is retained as the legacy direct adapter name, and
+`DirectSheetAdapter` is the explicit direct-repository contract. A queued
+adapter should implement `AppsScriptQueueAdapter`, not `SheetAdapter`, because
+queued writes are submitted as tasks rather than direct row mutations.
 
 The adapter owns authentication, Google API calls, range mapping, append, row
 update mechanics, and optional sheet initialization.
