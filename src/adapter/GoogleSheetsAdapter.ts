@@ -2,9 +2,11 @@ import { auth as googleAuth, sheets, type sheets_v4 } from "@googleapis/sheets";
 import type {
   AppendRowsInput,
   DirectSheetAdapter,
+} from "./direct/DirectSheetAdapter.js";
+import type {
   SheetCell,
   SheetSnapshot,
-} from "./Adapter.js";
+} from "./shared/SheetAdapter.js";
 
 type GoogleSheetsAuth = NonNullable<sheets_v4.Options["auth"]>;
 

@@ -1,4 +1,4 @@
-import { SheetCell } from "../../adapter/Adapter.js";
+import type { SheetCell } from "../../adapter/shared/SheetAdapter.js";
 import { ParseError } from "../errors/index.js";
 
 export interface Column<T> {

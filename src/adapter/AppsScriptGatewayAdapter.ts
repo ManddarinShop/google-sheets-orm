@@ -1,19 +1,23 @@
 import type {
   AppendRowsInput,
-  AppsScriptQueueAdapter,
   DeleteRowsByKeyInput,
   DeleteRowsByKeyResult,
   DirectSheetAdapter,
+  UpdateRowsByKeyInput,
+  UpdateRowsByKeyResult,
+} from "./direct/DirectSheetAdapter.js";
+import type {
+  AppsScriptQueueAdapter,
   EnqueueTasksInput,
   EnqueueTasksResult,
   InitializeSystemSheetsResult,
   ProcessTaskQueueInput,
   ProcessTaskQueueResult,
+} from "./queued/QueuedSheetAdapter.js";
+import type {
   SheetCell,
   SheetSnapshot,
-  UpdateRowsByKeyInput,
-  UpdateRowsByKeyResult,
-} from "./Adapter.js";
+} from "./shared/SheetAdapter.js";
 import { ConflictError, SchemaDriftError } from "../core/errors/index.js";
 import type {
   AppsScriptGatewayAuthenticatedRequest,

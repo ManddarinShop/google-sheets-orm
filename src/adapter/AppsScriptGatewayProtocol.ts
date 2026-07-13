@@ -1,13 +1,17 @@
 import type {
   DeleteRowsByKeyResult,
+  UpdateRowsByKeyResult,
+} from "./direct/DirectSheetAdapter.js";
+import type {
   EnqueueTaskInput,
   EnqueueTasksResult,
   InitializeSystemSheetsResult,
   ProcessTaskQueueResult,
+} from "./queued/QueuedSheetAdapter.js";
+import type {
   SheetCell,
   SheetSnapshot,
-  UpdateRowsByKeyResult,
-} from "./Adapter.js";
+} from "./shared/SheetAdapter.js";
 
 export type AppsScriptGatewayRequest =
   | { operation: "ping" }
