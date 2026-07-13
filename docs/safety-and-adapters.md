@@ -126,10 +126,11 @@ The update flow:
 
 This is stale-write protection, not a full database transaction.
 
-The queued repository also exposes transaction-style grouping for one enqueue
-batch. It provides stable retry identities and canonical-state optimistic
-locking, but it is not a database transaction and does not provide rollback or
-atomicity across arbitrary sheets.
+The queued repository provides an entity-oriented transaction callback for
+grouping one enqueue batch. Queue materialization, task identity, and retry
+retention are internal writer concerns; queue draining is exposed through a
+separate processor API. This is not a database transaction and does not provide
+rollback or atomicity across arbitrary sheets.
 
 `deleteById(id)` follows the same safety model. It returns the deleted row when
 the key exists, returns `null` when no row matches the key, and throws

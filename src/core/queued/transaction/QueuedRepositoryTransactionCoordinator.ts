@@ -1,18 +1,13 @@
 import { randomUUID } from "node:crypto";
 
-import type { EnqueueTasksInput } from "../../adapter/queued/QueuedSheetAdapter.js";
-import { ConflictError } from "../errors/index.js";
+import type { EnqueueTasksInput } from "../../../adapter/queued/QueuedSheetAdapter.js";
+import { ConflictError } from "../../errors/index.js";
 import {
   type RepositoryQueueWriteExecutor,
   type RepositoryQueueBatch,
   type RepositoryWriteTransactionOperation,
   type RepositoryWriteTransactionResult,
-} from "./QueuedSheetWriteExecutor.js";
-
-interface RepositoryUpdateRequest<T extends Record<string, unknown>> {
-  id: string;
-  updater(current: T): T;
-}
+} from "../writer/QueuedSheetWriteExecutor.js";
 
 export interface QueuedRepositoryTransactionCoordinatorOptions {
   /** Supplies deterministic transaction identities for tests or callers that need one. */
@@ -29,19 +24,12 @@ export interface RepositoryQueueWriteCoordinator<
 > {
   /** Creates an identity for one queue batch and its retry attempts. */
   createTransactionId(): string;
-  /** Reports whether an ambiguous batch is retained for this identity. */
-  hasMaterializedTransaction(transactionId: string): boolean;
   /** Discards a retained batch that the caller explicitly abandoned. */
   discardTransaction(transactionId: string): void;
   /** Re-enqueues a retained batch without consulting current canonical state. */
   retryTransaction(
     transactionId: string,
   ): Promise<Array<RepositoryWriteTransactionResult<T>>>;
-  insertRows(rows: Array<T>): Promise<Array<void>>;
-  updateRowsById(
-    requests: Array<RepositoryUpdateRequest<T>>,
-  ): Promise<Array<T | null>>;
-  deleteRowsById(ids: Array<string>): Promise<Array<T | null>>;
   writeTransaction(
     operations: Array<RepositoryWriteTransactionOperation<T>>,
     options?: RepositoryQueueWriteTransactionOptions,
@@ -92,24 +80,12 @@ export function createQueuedRepositoryTransactionCoordinator<
 
   return {
     createTransactionId: () => createTransactionId(input),
-    hasMaterializedTransaction: (transactionId) =>
-      retainedBatches.has(transactionId),
     discardTransaction: (transactionId) => {
       retainedBatches.delete(transactionId);
     },
     retryTransaction: (transactionId) =>
       runSerializedWrite(() =>
         retryRetainedQueueBatch(input.executor, transactionId, retainedBatches),
-      ),
-    insertRows: (rows) =>
-      runSerializedWrite(() => insertRepositoryRows(input, rows, retainedBatches)),
-    updateRowsById: (requests) =>
-      runSerializedWrite(() =>
-        updateRepositoryRowsById(input, requests, retainedBatches),
-      ),
-    deleteRowsById: (ids) =>
-      runSerializedWrite(() =>
-        deleteRepositoryRowsById(input, ids, retainedBatches),
       ),
     writeTransaction: (operations, options) =>
       runSerializedWrite(() =>
@@ -140,75 +116,6 @@ async function retryRetainedQueueBatch<T extends Record<string, unknown>>(
   retainedBatches.delete(transactionId);
 
   return cached.results;
-}
-
-async function insertRepositoryRows<T extends Record<string, unknown>>(
-  input: CreateQueuedRepositoryTransactionCoordinatorInput<T>,
-  rows: Array<T>,
-  retainedBatches: Map<string, RetainedQueueWriteBatch<T>>,
-): Promise<Array<void>> {
-  if (rows.length === 0) {
-    return [];
-  }
-
-  await writeRepositoryTransaction(
-    input,
-    rows.map((row) => ({
-      kind: "insert",
-      row,
-    })),
-    undefined,
-    retainedBatches,
-  );
-
-  return createVoidResults(rows.length);
-}
-
-async function updateRepositoryRowsById<T extends Record<string, unknown>>(
-  input: CreateQueuedRepositoryTransactionCoordinatorInput<T>,
-  requests: Array<RepositoryUpdateRequest<T>>,
-  retainedBatches: Map<string, RetainedQueueWriteBatch<T>>,
-): Promise<Array<T | null>> {
-  if (requests.length === 0) {
-    return [];
-  }
-
-  assertUniqueRequestIds(requests);
-
-  const results = await writeRepositoryTransaction(
-    input,
-    requests.map((request) => ({
-      kind: "update" as const,
-      id: request.id,
-      updater: request.updater,
-    })),
-    undefined,
-    retainedBatches,
-  );
-
-  return results.map((result) => (result === undefined ? null : result));
-}
-
-async function deleteRepositoryRowsById<T extends Record<string, unknown>>(
-  input: CreateQueuedRepositoryTransactionCoordinatorInput<T>,
-  ids: Array<string>,
-  retainedBatches: Map<string, RetainedQueueWriteBatch<T>>,
-): Promise<Array<T | null>> {
-  if (ids.length === 0) {
-    return [];
-  }
-
-  const results = await writeRepositoryTransaction(
-    input,
-    ids.map((id) => ({
-      kind: "delete" as const,
-      id,
-    })),
-    undefined,
-    retainedBatches,
-  );
-
-  return results.map((result) => (result === undefined ? null : result));
 }
 
 /**
@@ -290,20 +197,6 @@ async function writeRepositoryTransaction<T extends Record<string, unknown>>(
   return materialized.results;
 }
 
-function assertUniqueRequestIds<T extends Record<string, unknown>>(
-  requests: Array<RepositoryUpdateRequest<T>>,
-): void {
-  const claimedIds = new Set<string>();
-
-  for (const request of requests) {
-    if (claimedIds.has(request.id)) {
-      throw new ConflictError(`Duplicate update for key "${request.id}"`);
-    }
-
-    claimedIds.add(request.id);
-  }
-}
-
 function createTransactionId<T extends Record<string, unknown>>(
   input: CreateQueuedRepositoryTransactionCoordinatorInput<T>,
 ): string {
@@ -312,8 +205,4 @@ function createTransactionId<T extends Record<string, unknown>>(
   }
 
   return `tx-${randomUUID()}`;
-}
-
-function createVoidResults(count: number): Array<void> {
-  return Array.from({ length: count }, () => undefined);
 }

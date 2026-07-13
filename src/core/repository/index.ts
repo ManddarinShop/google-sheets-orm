@@ -1,17 +1,21 @@
 export {
   createQueuedSheetRepository,
-  summarizeProcessTaskQueueResult,
 } from "../queued/index.js";
 export { createSheetRepository } from "../direct/index.js";
 export type {
   CreateQueuedSheetRepositoryInput,
   QueuedColumnMap,
-  QueuedRepositoryQueueProcessingStatus,
-  QueuedRepositoryQueueProcessingSummary,
-  QueuedRepositoryProcessedFlushResult,
-  QueuedRepositoryTransactionOptions,
   QueuedRepositoryTransaction,
   QueuedSheetRepository,
+} from "../queued/index.js";
+export {
+  createQueuedRepositoryQueueProcessor,
+  summarizeProcessTaskQueueResult,
+} from "../queued/index.js";
+export type {
+  QueuedRepositoryQueueProcessor,
+  QueuedRepositoryQueueProcessingStatus,
+  QueuedRepositoryQueueProcessingSummary,
 } from "../queued/index.js";
 export type {
   ColumnMap,
