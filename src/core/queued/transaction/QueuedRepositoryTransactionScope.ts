@@ -41,12 +41,22 @@ export function createQueuedRepositoryTransactionScope<
 
   function save(row: T): void {
     const rowSnapshot = cloneRow(row);
+    const isKnownEntity = knownEntityIds.has(
+      String(rowSnapshot[input.key]),
+    );
 
-    pushPendingOperation({
-      kind: "save",
-      row: rowSnapshot,
-      requireExisting: knownEntityIds.has(String(rowSnapshot[input.key])),
-    });
+    pushPendingOperation(
+      isKnownEntity
+        ? {
+            kind: "save",
+            row: rowSnapshot,
+            requireExisting: true,
+          }
+        : {
+            kind: "insert",
+            row: rowSnapshot,
+          },
+    );
   }
 
   function remove(row: T): void {

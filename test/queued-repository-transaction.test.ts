@@ -265,6 +265,25 @@ describe("queued repository transaction API", () => {
     });
   });
 
+  it("cancels a new entity saved and removed in the same transaction", async () => {
+    const adapter = new FakeQueueAdapter(ordersSnapshot);
+    const orders = createOrdersRepository(adapter);
+    const newOrder: Order = {
+      id: "o3",
+      userId: "u1",
+      status: "created",
+      canceledAt: undefined,
+      _version: 1,
+    };
+
+    await orders.transaction((tx) => {
+      tx.save(newOrder);
+      tx.remove(newOrder);
+    });
+
+    expect(adapter.enqueuedTasks).toEqual([]);
+  });
+
   it("reads canonical state rather than the visible projection", async () => {
     const adapter = new FakeQueueAdapter(ordersSnapshot);
     adapter.setCanonicalSnapshot({
