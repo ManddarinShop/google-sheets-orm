@@ -15,12 +15,13 @@ import {
 import {
   assertUniqueKeys,
   parseRepositoryRows,
+  readRepositoryProperty,
   type ParsedRepositoryRow,
 } from "../../shared/RepositoryRowHelpers.js";
 import { assertSchema } from "../../schema/index.js";
 
 export type RepositoryWriteTransactionOperation<
-  T extends Record<string, unknown>,
+  T extends object,
 > =
   | {
       kind: "insert";
@@ -44,23 +45,23 @@ export type RepositoryWriteTransactionOperation<
     };
 
 export type RepositoryWriteTransactionResult<
-  T extends Record<string, unknown>,
+  T extends object,
 > = void | T | null;
 
-export interface RepositorySnapshot<T extends Record<string, unknown>> {
+export interface RepositorySnapshot<T extends object> {
   headers: Array<string>;
   parsedRows: Array<ParsedRepositoryRow<T>>;
 }
 
 export interface RepositoryQueueBatchMaterializationOptions<
-  T extends Record<string, unknown>,
+  T extends object,
 > {
   transactionId: string;
   intentSnapshot?: RepositorySnapshot<T>;
 }
 
 export interface RepositoryQueueBatch<
-  T extends Record<string, unknown>,
+  T extends object,
 > {
   results: Array<RepositoryWriteTransactionResult<T>>;
   tasks: EnqueueTasksInput | null;
@@ -68,14 +69,14 @@ export interface RepositoryQueueBatch<
   intentSnapshot: RepositorySnapshot<T>;
 }
 
-interface MaterializedRepositoryWrite<T extends Record<string, unknown>> {
+interface MaterializedRepositoryWrite<T extends object> {
   results: Array<RepositoryWriteTransactionResult<T>>;
   tasks: EnqueueTasksInput | null;
   intentSnapshot: RepositorySnapshot<T>;
 }
 
 export interface RepositoryQueueWriteExecutor<
-  T extends Record<string, unknown>,
+  T extends object,
 > {
   /**
    * Validates repository operations and converts them into an immutable queue
@@ -89,7 +90,7 @@ export interface RepositoryQueueWriteExecutor<
   enqueueTasks(tasks: EnqueueTasksInput): Promise<void>;
 }
 
-interface RepositoryQueueWriteContext<T extends Record<string, unknown>> {
+interface RepositoryQueueWriteContext<T extends object> {
   adapter: AppsScriptQueueAdapter;
   sheetName: string;
   key: keyof T & string;
@@ -107,7 +108,7 @@ interface RepositoryQueueWriteContext<T extends Record<string, unknown>> {
  * transaction coordinator.
  */
 export function createRepositoryQueueWriteExecutor<
-  T extends Record<string, unknown>,
+  T extends object,
 >(
   input: RepositoryQueueWriteContext<T>,
 ): RepositoryQueueWriteExecutor<T> {
@@ -132,7 +133,7 @@ export function createRepositoryQueueWriteExecutor<
 }
 
 async function materializeRepositoryTransaction<
-  T extends Record<string, unknown>,
+  T extends object,
 >(
   input: RepositoryQueueWriteContext<T>,
   operations: Array<RepositoryWriteTransactionOperation<T>>,
@@ -195,25 +196,31 @@ async function materializeRepositoryTransaction<
         throw new SchemaDriftError(`Duplicate key "${id}"`);
       }
 
-      const expectedVersion = Number(operation.row["_version"]);
+      const expectedVersion = Number(
+        readRepositoryProperty(operation.row, "_version"),
+      );
 
       if (
         !isRetryMaterialization
-        && expectedVersion !== Number(currentRow["_version"])
+        && expectedVersion !== Number(
+          readRepositoryProperty(currentRow, "_version"),
+        )
       ) {
         throw new ConflictError(`Stale entity for key "${id}"`);
       }
 
       const rowToWrite = {
         ...operation.row,
-        _version: Number(currentRow["_version"]) + 1,
+        _version: Number(readRepositoryProperty(currentRow, "_version")) + 1,
       } as T;
 
       rowsById.set(id, rowToWrite);
       queueOperations.push({
         kind: "update",
         id,
-        expectedVersion: Number(currentRow["_version"]),
+        expectedVersion: Number(
+          readRepositoryProperty(currentRow, "_version"),
+        ),
         rowToWrite: toQueueRowObject(input, rowToWrite),
       });
       results.push(rowToWrite);
@@ -231,7 +238,9 @@ async function materializeRepositoryTransaction<
       continue;
     }
 
-    const expectedVersion = Number(currentRow["_version"]);
+    const expectedVersion = Number(
+      readRepositoryProperty(currentRow, "_version"),
+    );
 
     if (
       !isRetryMaterialization
@@ -294,7 +303,7 @@ function createTaskBatchFingerprint(tasks: EnqueueTasksInput): string {
   );
 }
 
-function createQueueTasks<T extends Record<string, unknown>>(
+function createQueueTasks<T extends object>(
   input: RepositoryQueueWriteContext<T>,
   operations: Array<RepositoryQueuedWriteOperation<Record<string, SheetCell>>>,
   transactionId: string,
@@ -311,7 +320,7 @@ function createQueueTasks<T extends Record<string, unknown>>(
   });
 }
 
-async function readRepositorySnapshot<T extends Record<string, unknown>>(
+async function readRepositorySnapshot<T extends object>(
   input: {
     adapter: Pick<AppsScriptQueueAdapter, "readCanonicalSheet">;
     sheetName: string;
@@ -345,23 +354,27 @@ async function readRepositorySnapshot<T extends Record<string, unknown>>(
   };
 }
 
-function toQueueRowObject<T extends Record<string, unknown>>(
+function toQueueRowObject<T extends object>(
   input: RepositoryQueueWriteContext<T>,
   row: T,
 ): Record<string, SheetCell> {
   return Object.fromEntries(
-    Object.entries(input.columns).map(([columnName, column]) => [
-      columnName,
-      column.serialize(row[columnName as keyof T]),
-    ]),
+    Object.keys(input.columns).map((columnName) => {
+      const column = input.columns[columnName as keyof T];
+
+      return [
+        columnName,
+        column.serialize(row[columnName as keyof T]),
+      ];
+    }),
   );
 }
 
-function cloneRow<T extends Record<string, unknown>>(row: T): T {
+function cloneRow<T extends object>(row: T): T {
   return { ...row };
 }
 
-function createTaskId<T extends Record<string, unknown>>(
+function createTaskId<T extends object>(
   input: RepositoryQueueWriteContext<T>,
   transactionId: string,
   transactionIndex: number,

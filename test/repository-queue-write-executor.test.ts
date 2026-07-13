@@ -18,7 +18,7 @@ import {
 } from "../src/core/write/index.js";
 import { boolean, number, text } from "../src/core/schema/index.js";
 
-interface User extends Record<string, unknown> {
+interface User {
   id: string;
   email: string;
   age: number | undefined;

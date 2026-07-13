@@ -16,7 +16,7 @@ import {
   summarizeProcessTaskQueueResult,
 } from "../src/core/repository/index.js";
 
-interface Order extends Record<string, unknown> {
+interface Order {
   id: string;
   userId: string;
   status: string;
