@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 
-import { boolean, number, text } from "../src/core/Columns.js";
-import { ConflictError } from "../src/core/Errors.js";
-import { createSheetRepository } from "../src/core/Repository.js";
+import { boolean, number, text } from "../src/core/schema/index.js";
+import { ConflictError } from "../src/core/errors/index.js";
+import { createSheetRepository } from "../src/core/repository/index.js";
 import { FakeSheetAdapter } from "./fake-adapter.js";
 
 interface User {
@@ -62,7 +62,7 @@ describe("repository deletes and optimistic locking", () => {
     ]);
   });
 
-  it("runs concurrent deletes independently", async () => {
+  it("batches concurrent deletes into one adapter call", async () => {
     const sheet = {
       headers: ["id", "email", "age", "active", "_version"],
       rows: [
@@ -109,20 +109,9 @@ describe("repository deletes and optimistic locking", () => {
           expectedHeaders: ["id", "email", "age", "active", "_version"],
           keyHeader: "id",
           versionHeader: "_version",
-          ids: ["u1"],
+          ids: ["u1", "u3"],
           versionsById: {
             u1: 1,
-          },
-        },
-      },
-      {
-        sheetName: "Users",
-        input: {
-          expectedHeaders: ["id", "email", "age", "active", "_version"],
-          keyHeader: "id",
-          versionHeader: "_version",
-          ids: ["u3"],
-          versionsById: {
             u3: 1,
           },
         },

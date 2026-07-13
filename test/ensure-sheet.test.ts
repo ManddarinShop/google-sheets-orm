@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 
-import { boolean, number, text } from "../src/core/Columns.js";
-import { SchemaDriftError } from "../src/core/Errors.js";
-import { createSheetRepository } from "../src/core/Repository.js";
+import { boolean, number, text } from "../src/core/schema/index.js";
+import { SchemaDriftError } from "../src/core/errors/index.js";
+import { createSheetRepository } from "../src/core/repository/index.js";
 import type {
   AppsScriptQueueAdapter,
   DirectSheetAdapter,

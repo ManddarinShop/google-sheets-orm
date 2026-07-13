@@ -6,7 +6,7 @@ import {
   createSheetRepository,
   type ColumnMap,
   type SheetRepository,
-} from "../core/Repository.js";
+} from "../core/repository/index.js";
 import { loadTypedSheetsConfig } from "../setup/ConfigLoader.js";
 import type { TypedSheetsConfig } from "../setup/Config.js";
 

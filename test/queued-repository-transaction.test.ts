@@ -8,8 +8,11 @@ import type {
   ProcessTaskQueueResult,
   SheetSnapshot,
 } from "../src/adapter/Adapter.js";
-import { number, text } from "../src/core/Columns.js";
-import { createQueuedSheetRepository } from "../src/core/QueuedRepository.js";
+import { number, text } from "../src/core/schema/index.js";
+import {
+  createQueuedSheetRepository,
+  summarizeProcessTaskQueueResult,
+} from "../src/core/repository/index.js";
 
 interface Order {
   id: string;
@@ -27,6 +30,13 @@ class FakeQueueAdapter implements AppsScriptQueueAdapter {
   }> = [];
   readonly processedTaskQueues: Array<unknown> = [];
   enqueueError: Error | null = null;
+  processResult: ProcessTaskQueueResult = {
+    processedTransactions: 1,
+    failedTransactions: 0,
+    processedTasks: 1,
+    failedTasks: 0,
+    remainingPendingTasks: 0,
+  };
 
   constructor(private snapshot: SheetSnapshot) {}
 
@@ -81,13 +91,7 @@ class FakeQueueAdapter implements AppsScriptQueueAdapter {
   async processTaskQueue(input?: unknown): Promise<ProcessTaskQueueResult> {
     this.processedTaskQueues.push(input ?? {});
 
-    return {
-      processedTransactions: 1,
-      failedTransactions: 0,
-      processedTasks: 1,
-      failedTasks: 0,
-      remainingPendingTasks: 0,
-    };
+    return this.processResult;
   }
 }
 
@@ -381,9 +385,80 @@ describe("queued repository transactions", () => {
         failedTasks: 0,
         remainingPendingTasks: 0,
       },
+      processing: {
+        status: "processed",
+        processedAny: true,
+        hasFailures: false,
+        hasPendingTasks: false,
+      },
     });
     expect(adapter.enqueuedTasks).toHaveLength(1);
     expect(adapter.processedTaskQueues).toEqual([{ maxTransactions: 1 }]);
+  });
+
+  it("summarizes pending queue processor responses", async () => {
+    const adapter = new FakeQueueAdapter(ordersSnapshot);
+    const orders = createOrdersRepository(adapter);
+    const tx = orders.createTransaction();
+
+    adapter.processResult = {
+      processedTransactions: 1,
+      failedTransactions: 0,
+      processedTasks: 2,
+      failedTasks: 0,
+      remainingPendingTasks: 3,
+    };
+
+    await expect(tx.flushAndProcessQueue()).resolves.toMatchObject({
+      writeResults: [],
+      processing: {
+        status: "pending",
+        processedAny: true,
+        hasFailures: false,
+        hasPendingTasks: true,
+      },
+    });
+  });
+
+  it("summarizes failed queue processor responses", async () => {
+    const adapter = new FakeQueueAdapter(ordersSnapshot);
+    const orders = createOrdersRepository(adapter);
+    const tx = orders.createTransaction();
+
+    adapter.processResult = {
+      processedTransactions: 0,
+      failedTransactions: 1,
+      processedTasks: 0,
+      failedTasks: 2,
+      remainingPendingTasks: 0,
+    };
+
+    await expect(tx.flushAndProcessQueue()).resolves.toMatchObject({
+      writeResults: [],
+      processing: {
+        status: "failed",
+        processedAny: false,
+        hasFailures: true,
+        hasPendingTasks: false,
+      },
+    });
+  });
+
+  it("summarizes idle queue processor responses", () => {
+    expect(
+      summarizeProcessTaskQueueResult({
+        processedTransactions: 0,
+        failedTransactions: 0,
+        processedTasks: 0,
+        failedTasks: 0,
+        remainingPendingTasks: 0,
+      }),
+    ).toEqual({
+      status: "idle",
+      processedAny: false,
+      hasFailures: false,
+      hasPendingTasks: false,
+    });
   });
 
   it("reads pending transaction state before flush", async () => {
