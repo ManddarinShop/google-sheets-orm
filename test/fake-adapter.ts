@@ -2,7 +2,7 @@ import type {
   AppendRowsInput,
   DeleteRowsByKeyInput,
   DeleteRowsByKeyResult,
-  SheetAdapter,
+  DirectSheetAdapter,
   SheetCell,
   SheetSnapshot,
   UpdateRowsByKeyInput,
@@ -10,7 +10,7 @@ import type {
 } from "../src/adapter/Adapter.js";
 import { ConflictError, SchemaDriftError } from "../src/core/Errors.js";
 
-export class FakeSheetAdapter implements SheetAdapter {
+export class FakeSheetAdapter implements DirectSheetAdapter {
   private readIndex = 0;
 
   readonly appendedRows: Array<{ sheetName: string; row: SheetCell[] }> = [];
@@ -33,11 +33,11 @@ export class FakeSheetAdapter implements SheetAdapter {
     sheetName: string;
     input: UpdateRowsByKeyInput;
   }> = [];
-  updateRowsByKey: SheetAdapter["updateRowsByKey"] = async (
+  updateRowsByKey: DirectSheetAdapter["updateRowsByKey"] = async (
     sheetName,
     input,
   ) => updateRowsByKey(this, sheetName, input);
-  deleteRowsByKey: SheetAdapter["deleteRowsByKey"] = async (
+  deleteRowsByKey: DirectSheetAdapter["deleteRowsByKey"] = async (
     sheetName,
     input,
   ) => deleteRowsByKey(this, sheetName, input);

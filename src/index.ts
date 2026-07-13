@@ -1,5 +1,6 @@
 export { boolean, number, text } from "./core/Columns.js";
 export { createSheetRepository } from "./core/Repository.js";
+export { createQueuedSheetRepository } from "./core/QueuedRepository.js";
 export { ConflictError, ParseError, SchemaDriftError } from "./core/Errors.js";
 export { parseTypedSheetsConfig } from "./setup/Config.js";
 export { loadTypedSheetsConfig } from "./setup/ConfigLoader.js";
@@ -27,6 +28,8 @@ export type {
   EnqueueTasksInput,
   EnqueueTasksResult,
   InitializeSystemSheetsResult,
+  AppsScriptQueueAdapter,
+  DirectSheetAdapter,
   ProcessTaskQueueInput,
   ProcessTaskQueueResult,
   SheetAdapter,
@@ -43,3 +46,8 @@ export type {
   CreateSheetRepositoryInput,
   SheetRepository,
 } from "./core/Repository.js";
+export type {
+  CreateQueuedSheetRepositoryInput,
+  QueuedRepositoryTransaction,
+  QueuedSheetRepository,
+} from "./core/QueuedRepository.js";

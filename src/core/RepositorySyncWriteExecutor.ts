@@ -1,6 +1,6 @@
 import type { SheetCell } from "../adapter/Adapter.js";
 import { ConflictError } from "./Errors.js";
-import type { RepositoryWriteBatcherContext } from "./RepositoryBatching.js";
+import type { RepositoryWriteContext } from "./RepositoryWriteContext.js";
 import {
   assertUniqueKeys,
   findParsedRowByIdOrNull,
@@ -12,17 +12,17 @@ import {
 } from "./RepositoryRows.js";
 import { assertSchema } from "./Schema.js";
 
-export interface RepositoryUpdateRequest<T extends Record<string, unknown>> {
+interface RepositoryUpdateRequest<T extends Record<string, unknown>> {
   id: string;
   updater(current: T): T;
 }
 
-export interface RepositoryWriteExecutor<T extends Record<string, unknown>> {
-  insertRows(rows: T[]): Promise<void[]>;
-  updateRows(
+interface RepositorySyncWriteExecutor<T extends Record<string, unknown>> {
+  insertRows(rows: Array<T>): Promise<Array<void>>;
+  updateRowsById(
     requests: Array<RepositoryUpdateRequest<T>>,
   ): Promise<Array<T | null>>;
-  deleteRowsById(ids: string[]): Promise<Array<T | null>>;
+  deleteRowsById(ids: Array<string>): Promise<Array<T | null>>;
 }
 
 interface ResolvedUpdate<T extends Record<string, unknown>> {
@@ -30,11 +30,11 @@ interface ResolvedUpdate<T extends Record<string, unknown>> {
   currentVersion: number;
   target: ParsedRepositoryRow<T>;
   row: T;
-  serializedRow: SheetCell[];
+  serializedRow: Array<SheetCell>;
 }
 
 interface RepositorySnapshot<T extends Record<string, unknown>> {
-  headers: string[];
+  headers: Array<string>;
   parsedRows: Array<ParsedRepositoryRow<T>>;
 }
 
@@ -46,19 +46,19 @@ interface RepositorySnapshot<T extends Record<string, unknown>> {
 export function createRepositorySyncWriteExecutor<
   T extends Record<string, unknown>,
 >(
-  input: RepositoryWriteBatcherContext<T>,
-): RepositoryWriteExecutor<T> {
+  input: RepositoryWriteContext<T>,
+): RepositorySyncWriteExecutor<T> {
   return {
     insertRows: (rows) => insertRepositoryRows(input, rows),
-    updateRows: (requests) => updateRepositoryRows(input, requests),
+    updateRowsById: (requests) => updateRepositoryRowsById(input, requests),
     deleteRowsById: (ids) => deleteRepositoryRowsById(input, ids),
   };
 }
 
 async function insertRepositoryRows<T extends Record<string, unknown>>(
-  input: RepositoryWriteBatcherContext<T>,
-  rows: T[],
-): Promise<void[]> {
+  input: RepositoryWriteContext<T>,
+  rows: Array<T>,
+): Promise<Array<void>> {
   const { adapter, sheetName, key, columns } = input;
 
   if (rows.length === 0) {
@@ -89,8 +89,8 @@ async function insertRepositoryRows<T extends Record<string, unknown>>(
   return createVoidResults(rows.length);
 }
 
-async function updateRepositoryRows<T extends Record<string, unknown>>(
-  input: RepositoryWriteBatcherContext<T>,
+async function updateRepositoryRowsById<T extends Record<string, unknown>>(
+  input: RepositoryWriteContext<T>,
   requests: Array<RepositoryUpdateRequest<T>>,
 ): Promise<Array<T | null>> {
   const { adapter, sheetName, key, columns } = input;
@@ -164,8 +164,8 @@ async function updateRepositoryRows<T extends Record<string, unknown>>(
 }
 
 async function deleteRepositoryRowsById<T extends Record<string, unknown>>(
-  input: RepositoryWriteBatcherContext<T>,
-  ids: string[],
+  input: RepositoryWriteContext<T>,
+  ids: Array<string>,
 ): Promise<Array<T | null>> {
   const { adapter, sheetName, key, columns } = input;
 
@@ -220,7 +220,7 @@ async function deleteRepositoryRowsById<T extends Record<string, unknown>>(
 
 async function applyLockedKeyBasedUpdates<T extends Record<string, unknown>>(
   params: {
-    input: RepositoryWriteBatcherContext<T>;
+    input: RepositoryWriteContext<T>;
     snapshot: RepositorySnapshot<T>;
     resolvedUpdates: Array<ResolvedUpdate<T> | null>;
     rowsToUpdate: Array<ResolvedUpdate<T>>;
@@ -267,7 +267,7 @@ async function applyLockedKeyBasedUpdates<T extends Record<string, unknown>>(
 
 async function applyDirectRowNumberUpdates<T extends Record<string, unknown>>(
   params: {
-    input: RepositoryWriteBatcherContext<T>;
+    input: RepositoryWriteContext<T>;
     resolvedUpdates: Array<ResolvedUpdate<T> | null>;
     rowsToUpdate: Array<ResolvedUpdate<T>>;
   },
@@ -304,7 +304,7 @@ async function applyDirectRowNumberUpdates<T extends Record<string, unknown>>(
 
 async function applyLockedKeyBasedDeletes<T extends Record<string, unknown>>(
   params: {
-    input: RepositoryWriteBatcherContext<T>;
+    input: RepositoryWriteContext<T>;
     snapshot: RepositorySnapshot<T>;
     targets: Array<ParsedRepositoryRow<T> | null>;
     rowsToDelete: Array<ParsedRepositoryRow<T>>;
@@ -357,7 +357,7 @@ async function applyLockedKeyBasedDeletes<T extends Record<string, unknown>>(
 
 async function applyDirectRowNumberDeletes<T extends Record<string, unknown>>(
   params: {
-    input: RepositoryWriteBatcherContext<T>;
+    input: RepositoryWriteContext<T>;
     targets: Array<ParsedRepositoryRow<T> | null>;
     rowsToDelete: Array<ParsedRepositoryRow<T>>;
   },
@@ -398,7 +398,7 @@ async function applyDirectRowNumberDeletes<T extends Record<string, unknown>>(
 }
 
 async function readRepositorySnapshot<T extends Record<string, unknown>>(
-  input: RepositoryWriteBatcherContext<T>,
+  input: RepositoryWriteContext<T>,
 ): Promise<RepositorySnapshot<T>> {
   const { adapter, sheetName, key, columns } = input;
   const snapshot = await adapter.readSheet(sheetName);
@@ -426,7 +426,7 @@ async function readRepositorySnapshot<T extends Record<string, unknown>>(
   };
 }
 
-function createVoidResults(count: number): void[] {
+function createVoidResults(count: number): Array<void> {
   return Array.from({ length: count }, () => undefined);
 }
 
