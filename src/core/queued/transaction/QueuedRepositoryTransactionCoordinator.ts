@@ -9,9 +9,18 @@ import {
   type RepositoryWriteTransactionResult,
 } from "../writer/QueuedSheetWriteExecutor.js";
 
+const DEFAULT_RETAINED_BATCH_TTL_MS = 5 * 60 * 1000;
+const DEFAULT_MAX_RETAINED_BATCHES = 100;
+
 export interface QueuedRepositoryTransactionCoordinatorOptions {
   /** Supplies deterministic transaction identities for tests or callers that need one. */
   createTransactionId?(): string;
+  /** Removes an ambiguous batch after this amount of time has elapsed. */
+  retainedBatchTtlMs?: number;
+  /** Bounds memory retained for batches that have not been acknowledged. */
+  maxRetainedBatches?: number;
+  /** Supplies the current time for retention cleanup and deterministic tests. */
+  now?(): number;
 }
 
 export interface RepositoryQueueWriteTransactionOptions {
@@ -38,15 +47,15 @@ export interface RepositoryQueueWriteCoordinator<
 
 interface CreateQueuedRepositoryTransactionCoordinatorInput<
   T extends object,
-> {
+> extends QueuedRepositoryTransactionCoordinatorOptions {
   executor: RepositoryQueueWriteExecutor<T>;
-  createTransactionId?(): string;
 }
 
 interface RetainedQueueWriteBatch<T extends object>
   extends Omit<RepositoryQueueBatch<T>, "tasks" | "fingerprint"> {
   tasks: EnqueueTasksInput;
   fingerprint: string;
+  retainedAtMs: number;
 }
 
 /**
@@ -59,6 +68,7 @@ export function createQueuedRepositoryTransactionCoordinator<
 >(
   input: CreateQueuedRepositoryTransactionCoordinatorInput<T>,
 ): RepositoryQueueWriteCoordinator<T> {
+  const retention = resolveRetentionPolicy(input);
   let writeTail: Promise<void> = Promise.resolve();
   const retainedBatches = new Map<
     string,
@@ -81,22 +91,85 @@ export function createQueuedRepositoryTransactionCoordinator<
   return {
     createTransactionId: () => createTransactionId(input),
     discardTransaction: (transactionId) => {
+      pruneRetainedBatches(retainedBatches, retention);
       retainedBatches.delete(transactionId);
     },
     retryTransaction: (transactionId) =>
-      runSerializedWrite(() =>
-        retryRetainedQueueBatch(input.executor, transactionId, retainedBatches),
-      ),
+      runSerializedWrite(() => {
+        pruneRetainedBatches(retainedBatches, retention);
+        return retryRetainedQueueBatch(
+          input.executor,
+          transactionId,
+          retainedBatches,
+        );
+      }),
     writeTransaction: (operations, options) =>
-      runSerializedWrite(() =>
-        writeRepositoryTransaction(
+      runSerializedWrite(() => {
+        pruneRetainedBatches(retainedBatches, retention);
+        return writeRepositoryTransaction(
           input,
           operations,
           options?.transactionId,
           retainedBatches,
-        ),
-      ),
+          retention,
+        );
+      }),
   };
+}
+
+interface RetentionPolicy {
+  retainedBatchTtlMs: number;
+  maxRetainedBatches: number;
+  now(): number;
+}
+
+function resolveRetentionPolicy(
+  input: QueuedRepositoryTransactionCoordinatorOptions,
+): RetentionPolicy {
+  const retainedBatchTtlMs = input.retainedBatchTtlMs
+    ?? DEFAULT_RETAINED_BATCH_TTL_MS;
+  const maxRetainedBatches = input.maxRetainedBatches
+    ?? DEFAULT_MAX_RETAINED_BATCHES;
+
+  if (!Number.isFinite(retainedBatchTtlMs) || retainedBatchTtlMs <= 0) {
+    throw new RangeError("retainedBatchTtlMs must be greater than zero");
+  }
+
+  if (
+    !Number.isInteger(maxRetainedBatches)
+    || maxRetainedBatches <= 0
+  ) {
+    throw new RangeError("maxRetainedBatches must be a positive integer");
+  }
+
+  return {
+    retainedBatchTtlMs,
+    maxRetainedBatches,
+    now: input.now ?? Date.now,
+  };
+}
+
+function pruneRetainedBatches<T extends object>(
+  retainedBatches: Map<string, RetainedQueueWriteBatch<T>>,
+  retention: RetentionPolicy,
+): void {
+  const nowMs = retention.now();
+
+  for (const [transactionId, batch] of retainedBatches) {
+    if (nowMs - batch.retainedAtMs >= retention.retainedBatchTtlMs) {
+      retainedBatches.delete(transactionId);
+    }
+  }
+
+  while (retainedBatches.size > retention.maxRetainedBatches) {
+    const oldest = retainedBatches.keys().next();
+
+    if (oldest.done) {
+      break;
+    }
+
+    retainedBatches.delete(oldest.value);
+  }
 }
 
 async function retryRetainedQueueBatch<T extends object>(
@@ -128,6 +201,7 @@ async function writeRepositoryTransaction<T extends object>(
   operations: Array<RepositoryWriteTransactionOperation<T>>,
   transactionId: string | undefined,
   retainedBatches: Map<string, RetainedQueueWriteBatch<T>>,
+  retention: RetentionPolicy,
 ): Promise<Array<RepositoryWriteTransactionResult<T>>> {
   const cached =
     transactionId === undefined
@@ -185,7 +259,10 @@ async function writeRepositoryTransaction<T extends object>(
       tasks: materialized.tasks,
       fingerprint: materialized.fingerprint,
       intentSnapshot: materialized.intentSnapshot,
+      retainedAtMs: retention.now(),
     });
+
+    pruneRetainedBatches(retainedBatches, retention);
   }
 
   await input.executor.enqueueTasks(materialized.tasks);
