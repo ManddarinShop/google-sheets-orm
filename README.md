@@ -202,6 +202,7 @@ appended as durable tasks and processed explicitly:
 ```ts
 import {
   AppsScriptGatewayAdapter,
+  createQueuedRepositoryQueueProcessor,
   createQueuedSheetRepository,
   number,
   text,
@@ -234,48 +235,35 @@ await orders.transaction(async (tx) => {
     order.status = "paid";
     tx.save(order);
   }
-}, { transactionId: "request-123" });
+});
 
-const processing = orders.createTransaction();
-const result = await processing.flushAndProcessQueue({ maxTransactions: 1 });
+const processor = createQueuedRepositoryQueueProcessor(adapter);
+const result = await processor.processTaskQueue({ maxTransactions: 1 });
 ```
 
-Queued writes are not applied to canonical sheets until
-`flushAndProcessQueue()` or the adapter's `processTaskQueue()` is called.
-Queued repository reads always use the adapter's canonical read operation, so
-reads remain consistent after processing. The visible projection tab is seeded
-during initialization but is not automatically synced by the current gateway
-processor.
+The public queued repository is entity-oriented: use `findAll()`, `findById()`,
+`save()`, `remove()`, and `transaction()`. Saving queues a task; it does not
+apply the change to the canonical sheet immediately. Queue draining is an
+independent infrastructure operation exposed by
+`createQueuedRepositoryQueueProcessor()`.
 
-`transactionId` should be stable when retrying after an ambiguous enqueue
-response. The same option is available on convenience writes:
-
-```ts
-await orders.update(
-  "o1",
-  current => ({ ...current, status: "paid" }),
-  { transactionId: "request-123" },
-);
-```
-
-If the callback or entity payload differs on retry, the repository raises
-`ConflictError` instead of reusing an unrelated cached task batch. Entity
-`save()` and `remove()` also preserve the loaded `_version` and reject stale
-entities. A transaction handle also exposes `retry()` when the original
-operation cannot be reconstructed from current reads, such as a delete whose
-row has already been processed:
+Queued repository reads use the adapter's canonical read operation. The visible
+projection tab is seeded during initialization but is not automatically synced
+by the current gateway processor.
 
 ```ts
-const tx = orders.createTransaction({ transactionId: "request-123" });
-const order = await tx.findById("o1");
-if (order) tx.remove(order);
+const order = await orders.findById("o1");
 
-try {
-  await tx.flush();
-} catch {
-  await tx.retry();
+if (order) {
+  order.status = "paid";
+  await orders.save(order);
 }
 ```
+
+Entity `save()` and `remove()` preserve the loaded `_version` and reject stale
+entities. Queue retry/materialization details are internal implementation
+concerns; the public API currently does not expose a transaction handle or
+queue task payload.
 
 ## Documentation
 

@@ -16,17 +16,14 @@ compatibility barrels while the implementation lives under `direct/`,
 
 ## `queued/`
 
-- `QueuedSheetWriteExecutor.ts`: queued write implementation for
-  `QueuedSheetRepository.ts`. It reads the current canonical snapshot, validates
-  requested changes, converts them into immutable queue batches, and appends
-  tasks through `AppsScriptQueueAdapter`. It does not retain transaction or
-  retry state.
-- `QueuedRepositoryTransactionCoordinator.ts`: owns repository transaction
-  serialization, retained materialized batches, and ambiguous enqueue retries
-  around the low-level queue executor.
-- `QueuedSheetRepository.ts`: queued repository facade and transaction scope.
-- `QueuedWriteTaskProducer.ts`: low-level conversion from validated
-  repository operations into durable task-queue payloads.
+- `public/`: entity-oriented repository facade and public transaction contracts.
+  Queue task details are hidden from this layer's public types.
+- `transaction/`: collects entity mutations, serializes writes, and retains
+  materialized batches for ambiguous enqueue recovery.
+- `writer/`: validates canonical state, materializes immutable queue batches,
+  and converts validated operations into durable task payloads.
+- `processor/`: separate infrastructure API for draining pending queue
+  transaction groups and summarizing processor results.
 
 ## `shared/`
 
@@ -38,8 +35,8 @@ compatibility barrels while the implementation lives under `direct/`,
 
 - `repository/index.ts`: re-exports both public repository facades and keeps the
   existing import path stable.
-- `write/index.ts`: re-exports direct and queued write internals for tests and
-  existing internal callers.
+- `write/index.ts`: compatibility barrel for direct and queued write internals;
+  these exports are not part of the root public API.
 
 ## `schema/`
 

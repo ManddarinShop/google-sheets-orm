@@ -434,8 +434,10 @@ repository transaction must reuse the original transaction/task IDs and
 materialized payloads for that retry; generating new IDs would bypass this
 idempotency check.
 
-The high-level repository transaction API accepts an optional stable
-`transactionId` for retries:
+The public repository transaction API generates transaction identities
+internally and does not expose queue task payloads. Queue materialization and
+retry retention belong to the internal queue writer. Queue draining is a
+separate processor operation:
 
 ```ts
 await orders.transaction(async (tx) => {
@@ -444,19 +446,13 @@ await orders.transaction(async (tx) => {
     order.status = "canceled";
     tx.save(order);
   }
-}, { transactionId: "request-123" });
+});
 ```
 
-If the enqueue result is ambiguous, retry the callback with the same
-`transactionId`. The repository keeps the materialized task batch and reuses
-its task IDs and payloads. The retry callback is validated against the
-immutable snapshot captured during the first materialization, rather than the
-current sheet, so a queue processor may finish the task before the retry
-arrives. Callback failures clear pending work; enqueue failures do not. A
-transaction with a pending flush retry must be retried or cleared before it
-can be mutated again. A transaction handle's explicit `retry()` method can
-re-enqueue the retained batch when a callback cannot reconstruct the original
-operation from current reads, such as a delete whose row was already applied.
+The queue writer keeps materialized task batches and task identities private to
+the repository implementation. Callback failures clear pending work;
+ambiguous enqueue failures remain an internal recovery state until a public
+retry/status contract is introduced.
 
 Processor idempotency rules:
 

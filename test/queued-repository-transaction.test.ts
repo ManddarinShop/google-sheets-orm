@@ -11,6 +11,7 @@ import type {
 import { ConflictError } from "../src/core/errors/index.js";
 import { number, text } from "../src/core/schema/index.js";
 import {
+  createQueuedRepositoryQueueProcessor,
   createQueuedSheetRepository,
   summarizeProcessTaskQueueResult,
 } from "../src/core/repository/index.js";
@@ -949,6 +950,77 @@ describe("queued repository transactions", () => {
       canceledAt: undefined,
       _version: 4,
     });
+  });
+
+  it("saves an existing entity through the public repository API", async () => {
+    const adapter = new FakeQueueAdapter(ordersSnapshot);
+    const orders = createOrdersRepository(adapter);
+    const order = await orders.findById("o1");
+
+    if (order === null) {
+      throw new Error("Expected order");
+    }
+
+    order.status = "canceled";
+    await orders.save(order);
+
+    expect(adapter.enqueuedTasks[0]?.tasks[0]?.operation).toBe("update");
+  });
+
+  it("saves a new entity through the public repository API", async () => {
+    const adapter = new FakeQueueAdapter(ordersSnapshot);
+    const orders = createOrdersRepository(adapter);
+
+    await orders.save({
+      id: "o3",
+      userId: "u1",
+      status: "created",
+      canceledAt: undefined,
+      _version: 1,
+    });
+
+    expect(adapter.enqueuedTasks[0]?.tasks[0]?.operation).toBe("insert");
+  });
+
+  it("saves a new entity inside the public transaction callback", async () => {
+    const adapter = new FakeQueueAdapter(ordersSnapshot);
+    const orders = createOrdersRepository(adapter);
+
+    await orders.transaction((tx) => {
+      tx.save({
+        id: "o3",
+        userId: "u1",
+        status: "created",
+        canceledAt: undefined,
+        _version: 1,
+      });
+    });
+
+    expect(adapter.enqueuedTasks[0]?.tasks[0]?.operation).toBe("insert");
+  });
+
+  it("removes an entity through the public repository API", async () => {
+    const adapter = new FakeQueueAdapter(ordersSnapshot);
+    const orders = createOrdersRepository(adapter);
+    const order = await orders.findById("o1");
+
+    if (order === null) {
+      throw new Error("Expected order");
+    }
+
+    await orders.remove(order);
+
+    expect(adapter.enqueuedTasks[0]?.tasks[0]?.operation).toBe("delete");
+  });
+
+  it("exposes queue processing separately from the repository", async () => {
+    const adapter = new FakeQueueAdapter(ordersSnapshot);
+    const processor = createQueuedRepositoryQueueProcessor(adapter);
+
+    await expect(
+      processor.processTaskQueue({ maxTransactions: 1 }),
+    ).resolves.toEqual(adapter.processResult);
+    expect(adapter.processedTaskQueues).toEqual([{ maxTransactions: 1 }]);
   });
 
   function createOrdersRepository(adapter: AppsScriptQueueAdapter) {

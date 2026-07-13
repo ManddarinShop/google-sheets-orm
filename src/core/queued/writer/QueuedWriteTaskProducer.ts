@@ -1,7 +1,7 @@
 import type {
   EnqueueTaskInput,
   EnqueueTasksInput,
-} from "../../adapter/queued/QueuedSheetAdapter.js";
+} from "../../../adapter/queued/QueuedSheetAdapter.js";
 
 export type RepositoryQueuedWriteOperation<T extends Record<string, unknown>> =
   | {

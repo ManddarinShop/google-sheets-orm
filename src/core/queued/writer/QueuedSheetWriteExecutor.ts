@@ -1,13 +1,13 @@
 import type {
   AppsScriptQueueAdapter,
   EnqueueTasksInput,
-} from "../../adapter/queued/QueuedSheetAdapter.js";
+} from "../../../adapter/queued/QueuedSheetAdapter.js";
 import type {
   SheetCell,
   SheetSnapshot,
-} from "../../adapter/shared/SheetAdapter.js";
-import { ConflictError, SchemaDriftError } from "../errors/index.js";
-import type { ColumnMap } from "../shared/RepositoryTypes.js";
+} from "../../../adapter/shared/SheetAdapter.js";
+import { ConflictError, SchemaDriftError } from "../../errors/index.js";
+import type { ColumnMap } from "../../shared/RepositoryTypes.js";
 import {
   createRepositoryQueueTasks,
   type RepositoryQueuedWriteOperation,
@@ -16,8 +16,8 @@ import {
   assertUniqueKeys,
   parseRepositoryRows,
   type ParsedRepositoryRow,
-} from "../shared/RepositoryRowHelpers.js";
-import { assertSchema } from "../schema/index.js";
+} from "../../shared/RepositoryRowHelpers.js";
+import { assertSchema } from "../../schema/index.js";
 
 export type RepositoryWriteTransactionOperation<
   T extends Record<string, unknown>,
@@ -25,6 +25,11 @@ export type RepositoryWriteTransactionOperation<
   | {
       kind: "insert";
       row: T;
+    }
+  | {
+      kind: "save";
+      row: T;
+      requireExisting: boolean;
     }
   | {
       kind: "update";
@@ -165,6 +170,53 @@ async function materializeRepositoryTransaction<
         row: toQueueRowObject(input, operation.row),
       });
       results.push(undefined);
+      continue;
+    }
+
+    if (operation.kind === "save") {
+      const id = String(operation.row[key]);
+      const currentRow = rowsById.get(id);
+
+      if (currentRow === undefined) {
+        if (operation.requireExisting) {
+          throw new ConflictError(`Stale entity for key "${id}"`);
+        }
+
+        rowsById.set(id, cloneRow(operation.row));
+        queueOperations.push({
+          kind: "insert",
+          row: toQueueRowObject(input, operation.row),
+        });
+        results.push(undefined);
+        continue;
+      }
+
+      if (!operation.requireExisting) {
+        throw new SchemaDriftError(`Duplicate key "${id}"`);
+      }
+
+      const expectedVersion = Number(operation.row["_version"]);
+
+      if (
+        !isRetryMaterialization
+        && expectedVersion !== Number(currentRow["_version"])
+      ) {
+        throw new ConflictError(`Stale entity for key "${id}"`);
+      }
+
+      const rowToWrite = {
+        ...operation.row,
+        _version: Number(currentRow["_version"]) + 1,
+      } as T;
+
+      rowsById.set(id, rowToWrite);
+      queueOperations.push({
+        kind: "update",
+        id,
+        expectedVersion: Number(currentRow["_version"]),
+        rowToWrite: toQueueRowObject(input, rowToWrite),
+      });
+      results.push(rowToWrite);
       continue;
     }
 
