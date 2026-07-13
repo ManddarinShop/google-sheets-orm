@@ -309,6 +309,79 @@ describe("queued write executor and coordinator", () => {
     expect(adapter.enqueuedTasks[1]).toEqual(adapter.enqueuedTasks[0]);
   });
 
+  it("expires retained batches so ambiguous failures do not accumulate", async () => {
+    const adapter = new FakeQueueAdapter(emptyUsers);
+    adapter.enqueueErrorAfterRecord = new Error("first response lost");
+    let now = 0;
+    const coordinator = createCoordinator(adapter, undefined, {
+      retainedBatchTtlMs: 1000,
+      now: () => now,
+    });
+    const operation: RepositoryWriteTransactionOperation<User> = {
+      kind: "insert",
+      row: {
+        id: "u1",
+        email: "a@test.com",
+        age: undefined,
+        active: true,
+        _version: 1,
+      },
+    };
+
+    await expect(
+      coordinator.writeTransaction([operation], {
+        transactionId: "tx-expired",
+      }),
+    ).rejects.toThrow("first response lost");
+
+    now = 1000;
+
+    await expect(
+      coordinator.retryTransaction("tx-expired"),
+    ).rejects.toThrow("has no retained materialized batch");
+  });
+
+  it("bounds the number of retained ambiguous batches", async () => {
+    const adapter = new FakeQueueAdapter(emptyUsers);
+    let now = 0;
+    const coordinator = createCoordinator(adapter, undefined, {
+      maxRetainedBatches: 1,
+      now: () => now,
+    });
+    const createOperation = (id: string): RepositoryWriteTransactionOperation<User> => ({
+      kind: "insert",
+      row: {
+        id,
+        email: `${id}@test.com`,
+        age: undefined,
+        active: true,
+        _version: 1,
+      },
+    });
+
+    adapter.enqueueErrorAfterRecord = new Error("first response lost");
+    await expect(
+      coordinator.writeTransaction([createOperation("u1")], {
+        transactionId: "tx-first",
+      }),
+    ).rejects.toThrow("first response lost");
+
+    now = 1;
+    adapter.enqueueErrorAfterRecord = new Error("second response lost");
+    await expect(
+      coordinator.writeTransaction([createOperation("u2")], {
+        transactionId: "tx-second",
+      }),
+    ).rejects.toThrow("second response lost");
+
+    await expect(
+      coordinator.retryTransaction("tx-first"),
+    ).rejects.toThrow("has no retained materialized batch");
+    await expect(
+      coordinator.retryTransaction("tx-second"),
+    ).resolves.toEqual([undefined]);
+  });
+
   it("rejects a different batch for a retained transaction identity", async () => {
     const adapter = new FakeQueueAdapter(usersWithRows);
     adapter.enqueueErrorAfterRecord = new Error("enqueue response lost");
@@ -356,16 +429,25 @@ describe("queued write executor and coordinator", () => {
   function createCoordinator(
     adapter: AppsScriptQueueAdapter,
     createTransactionId?: () => string,
+    options?: {
+      maxRetainedBatches?: number;
+      retainedBatchTtlMs?: number;
+      now?(): number;
+    },
   ) {
     const executor = createExecutor(adapter);
 
     if (createTransactionId === undefined) {
-      return createQueuedRepositoryTransactionCoordinator({ executor });
+      return createQueuedRepositoryTransactionCoordinator({
+        executor,
+        ...options,
+      });
     }
 
     return createQueuedRepositoryTransactionCoordinator({
       executor,
       createTransactionId,
+      ...options,
     });
   }
 });
