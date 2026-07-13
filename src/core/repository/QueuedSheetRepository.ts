@@ -2,7 +2,9 @@ import type {
   AppsScriptQueueAdapter,
   ProcessTaskQueueInput,
   ProcessTaskQueueResult,
+  SheetSnapshot,
 } from "../../adapter/Adapter.js";
+import { ConflictError } from "../errors/index.js";
 import { Column } from "../schema/Columns.js";
 import { parseRow, assertSchema } from "../schema/index.js";
 import { assertUniqueKeys } from "./RepositoryRowHelpers.js";
@@ -25,16 +27,31 @@ export interface CreateQueuedSheetRepositoryInput<
   columns: QueuedColumnMap<T>;
 }
 
+export interface QueuedRepositoryTransactionOptions {
+  /** Stable identity to reuse when the transaction is retried after an ambiguous enqueue result. */
+  transactionId?: string;
+}
+
 export interface QueuedSheetRepository<T extends Record<string, unknown>> {
   ensureSheet(): Promise<void>;
   findAll(): Promise<Array<T>>;
   findById(id: string): Promise<T | null>;
-  insert(row: T): Promise<void>;
-  update(id: string, updater: (current: T) => T): Promise<T | null>;
-  deleteById(id: string): Promise<T | null>;
-  createTransaction(): QueuedRepositoryTransaction<T>;
+  insert(row: T, options?: QueuedRepositoryTransactionOptions): Promise<void>;
+  update(
+    id: string,
+    updater: (current: T) => T,
+    options?: QueuedRepositoryTransactionOptions,
+  ): Promise<T | null>;
+  deleteById(
+    id: string,
+    options?: QueuedRepositoryTransactionOptions,
+  ): Promise<T | null>;
+  createTransaction(
+    options?: QueuedRepositoryTransactionOptions,
+  ): QueuedRepositoryTransaction<T>;
   transaction<TResult>(
     callback: (transaction: QueuedRepositoryTransaction<T>) => TResult | Promise<TResult>,
+    options?: QueuedRepositoryTransactionOptions,
   ): Promise<TResult>;
 }
 
@@ -46,6 +63,8 @@ export interface QueuedRepositoryTransaction<T extends Record<string, unknown>> 
   save(row: T): void;
   remove(row: T): void;
   flush(): Promise<Array<void | T | null>>;
+  /** Re-enqueues an ambiguous batch without reading the current sheet. */
+  retry(): Promise<Array<void | T | null>>;
   flushAndProcessQueue(
     input?: ProcessTaskQueueInput,
   ): Promise<QueuedRepositoryProcessedFlushResult<T>>;
@@ -76,7 +95,9 @@ export interface QueuedRepositoryQueueProcessingSummary {
 /**
  * Creates a queued repository facade with MikroORM-style transaction helpers.
  * Writes are collected in a transaction scope and flushed as one queue
- * transaction, while reads still use the adapter's current read sheet.
+ * transaction, while reads always use the adapter's gateway-owned canonical
+ * state. Queued adapters must expose this path so processed writes and
+ * optimistic-lock checks do not read the visible projection by accident.
  */
 export function createQueuedSheetRepository<
   T extends Record<string, unknown>,
@@ -91,7 +112,7 @@ export function createQueuedSheetRepository<
   }
 
   async function findAll(): Promise<Array<T>> {
-    const snapshot = await adapter.readSheet(sheetName);
+    const snapshot = await readQueuedRepositorySheet(adapter, sheetName);
 
     assertSchema({
       headers: snapshot.headers,
@@ -118,8 +139,11 @@ export function createQueuedSheetRepository<
     return rows.find((row) => String(row[key]) === id) ?? null;
   }
 
-  async function insert(row: T): Promise<void> {
-    const transaction = createTransaction();
+  async function insert(
+    row: T,
+    options: QueuedRepositoryTransactionOptions = {},
+  ): Promise<void> {
+    const transaction = createTransaction(options);
 
     transaction.insert(row);
     await transaction.flush();
@@ -128,8 +152,9 @@ export function createQueuedSheetRepository<
   async function update(
     id: string,
     updater: (current: T) => T,
+    options: QueuedRepositoryTransactionOptions = {},
   ): Promise<T | null> {
-    const transaction = createTransaction();
+    const transaction = createTransaction(options);
     transaction.update(id, updater);
 
     const [updatedRow] = await transaction.flush();
@@ -137,11 +162,23 @@ export function createQueuedSheetRepository<
     return updatedRow ?? null;
   }
 
-  async function deleteById(id: string): Promise<T | null> {
-    const transaction = createTransaction();
+  async function deleteById(
+    id: string,
+    options: QueuedRepositoryTransactionOptions = {},
+  ): Promise<T | null> {
+    const transaction = createTransaction(options);
     const current = await transaction.findById(id);
 
     if (current === null) {
+      if (
+        options.transactionId !== undefined
+        && writeExecutor.hasMaterializedTransaction(options.transactionId)
+      ) {
+        const [deletedRow] = await transaction.retry();
+
+        return deletedRow ?? null;
+      }
+
       return null;
     }
 
@@ -152,30 +189,40 @@ export function createQueuedSheetRepository<
     return deletedRow ?? null;
   }
 
-  function createTransaction(): QueuedRepositoryTransaction<T> {
+  function createTransaction(
+    options: QueuedRepositoryTransactionOptions = {},
+  ): QueuedRepositoryTransaction<T> {
     return createQueuedRepositoryTransaction({
       findAll,
       key,
       processTaskQueue: (processInput) => adapter.processTaskQueue(processInput),
       writeExecutor,
+      ...(options.transactionId === undefined
+        ? {}
+        : { transactionId: options.transactionId }),
     });
   }
 
   async function transaction<TResult>(
     callback: (transaction: QueuedRepositoryTransaction<T>) => TResult | Promise<TResult>,
+    options: QueuedRepositoryTransactionOptions = {},
   ): Promise<TResult> {
-    const transactionScope = createTransaction();
+    const transactionScope = createTransaction(options);
+    let result: TResult;
 
     try {
-      const result = await callback(transactionScope);
-
-      await transactionScope.flush();
-
-      return result;
+      result = await callback(transactionScope);
     } catch (error) {
       transactionScope.clear();
       throw error;
     }
+
+    // Keep an ambiguous enqueue batch cached so callers can retry this method
+    // with the same transactionId. Callback failures are cleared above, while
+    // flush failures intentionally escape without clearing the batch.
+    await transactionScope.flush();
+
+    return result;
   }
 
   return {
@@ -197,8 +244,12 @@ function createQueuedRepositoryTransaction<
   key: keyof T & string;
   processTaskQueue(input?: ProcessTaskQueueInput): Promise<ProcessTaskQueueResult>;
   writeExecutor: RepositoryQueueWriteExecutor<T>;
+  transactionId?: string;
 }): QueuedRepositoryTransaction<T> {
   const pendingOperations: Array<RepositoryWriteTransactionOperation<T>> = [];
+  let inFlightOperations: Array<RepositoryWriteTransactionOperation<T>> | null =
+    null;
+  let inFlightTransactionId: string | null = input.transactionId ?? null;
 
   function insert(row: T): void {
     pushPendingOperation({
@@ -222,6 +273,7 @@ function createQueuedRepositoryTransaction<
       kind: "update",
       id: String(rowSnapshot[input.key]),
       updater: () => rowSnapshot,
+      expectedVersion: Number(rowSnapshot["_version"]),
     });
   }
 
@@ -231,18 +283,34 @@ function createQueuedRepositoryTransaction<
     pushPendingOperation({
       kind: "delete",
       id: String(rowSnapshot[input.key]),
+      expectedVersion: Number(rowSnapshot["_version"]),
     });
   }
 
+  /**
+   * Enqueues one immutable batch and keeps its identity/materialized payload
+   * when the adapter result is ambiguous, so a caller retry cannot append a
+   * second transaction.
+   */
   async function flush(): Promise<Array<void | T | null>> {
     if (pendingOperations.length === 0) {
       return [];
     }
 
-    const operations = [...pendingOperations];
-    const result = await input.writeExecutor.writeTransaction(operations);
+    const operations = inFlightOperations ?? [...pendingOperations];
+    const transactionId =
+      inFlightTransactionId ?? input.writeExecutor.createTransactionId();
+
+    inFlightOperations = operations;
+    inFlightTransactionId = transactionId;
+
+    const result = await input.writeExecutor.writeTransaction(operations, {
+      transactionId,
+    });
 
     pendingOperations.splice(0, operations.length);
+    inFlightOperations = null;
+    inFlightTransactionId = null;
 
     return result;
   }
@@ -260,13 +328,53 @@ function createQueuedRepositoryTransaction<
     };
   }
 
+  async function retry(): Promise<Array<void | T | null>> {
+    const transactionId = inFlightTransactionId ?? input.transactionId;
+
+    if (transactionId === undefined || transactionId === null) {
+      throw new ConflictError(
+        "Transaction retry requires a stable transactionId",
+      );
+    }
+
+    if (inFlightOperations === null && pendingOperations.length > 0) {
+      throw new ConflictError(
+        "Transaction has unflushed operations; flush them before retrying",
+      );
+    }
+
+    const result = await input.writeExecutor.retryTransaction(transactionId);
+    const operationsToClear = inFlightOperations?.length ?? 0;
+
+    if (operationsToClear > 0) {
+      pendingOperations.splice(0, operationsToClear);
+    }
+
+    inFlightOperations = null;
+    inFlightTransactionId = null;
+
+    return result;
+  }
+
   function clear(): void {
+    if (inFlightTransactionId !== null) {
+      input.writeExecutor.discardTransaction(inFlightTransactionId);
+    }
+
     pendingOperations.splice(0, pendingOperations.length);
+    inFlightOperations = null;
+    inFlightTransactionId = null;
   }
 
   function pushPendingOperation(
     operation: RepositoryWriteTransactionOperation<T>,
   ): void {
+    if (inFlightOperations !== null) {
+      throw new Error(
+        "Cannot mutate a queued repository transaction while a flush retry is pending; retry flush or clear the transaction first",
+      );
+    }
+
     const existingIndex = pendingOperations.findIndex(
       (pendingOperation) =>
         getPendingOperationId(pendingOperation, input.key)
@@ -339,9 +447,17 @@ function createQueuedRepositoryTransaction<
     save,
     remove,
     flush,
+    retry,
     flushAndProcessQueue,
     clear,
   };
+}
+
+function readQueuedRepositorySheet(
+  adapter: AppsScriptQueueAdapter,
+  sheetName: string,
+): Promise<SheetSnapshot> {
+  return adapter.readCanonicalSheet(sheetName);
 }
 
 /**
@@ -436,20 +552,35 @@ function mergePendingOperations<T extends Record<string, unknown>>(input: {
   }
 
   if (operation.kind === "insert") {
-    return {
-      kind: "update",
-      id: String(operation.row[key]),
-      updater: () => cloneRow(operation.row),
-    };
+    return withExpectedVersion(
+      {
+        kind: "update",
+        id: String(operation.row[key]),
+        updater: () => cloneRow(operation.row),
+      },
+      existingOperation.expectedVersion,
+    );
   }
 
   if (existingOperation.kind === "delete") {
     return operation;
   }
 
-  return {
-    kind: "update",
-    id: operation.id,
-    updater: (current) => operation.updater(existingOperation.updater(current)),
-  };
+  return withExpectedVersion(
+    {
+      kind: "update",
+      id: operation.id,
+      updater: (current) => operation.updater(existingOperation.updater(current)),
+    },
+    operation.expectedVersion ?? existingOperation.expectedVersion,
+  );
+}
+
+function withExpectedVersion<T extends Record<string, unknown>>(
+  operation: Extract<RepositoryWriteTransactionOperation<T>, { kind: "update" }>,
+  expectedVersion: number | undefined,
+): Extract<RepositoryWriteTransactionOperation<T>, { kind: "update" }> {
+  return expectedVersion === undefined
+    ? operation
+    : { ...operation, expectedVersion };
 }

@@ -57,6 +57,21 @@ export class AppsScriptGatewayAdapter
     };
   }
 
+  /** Reads canonical repository state so queued writes are visible after processing. */
+  async readCanonicalSheet(sheetName: string): Promise<SheetSnapshot> {
+    const response = requireReadSheetResponse(
+      await this.request({
+        operation: "readCanonicalSheet",
+        sheetName,
+      }),
+    );
+
+    return {
+      headers: response.headers,
+      rows: response.rows,
+    };
+  }
+
   async appendRow(sheetName: string, row: SheetCell[]): Promise<void> {
     await this.request({
       operation: "appendRow",

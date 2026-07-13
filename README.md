@@ -19,6 +19,7 @@ fail clearly instead of passing silently.
 - `_version` based optimistic locking
 - `SchemaDriftError`, `ParseError`, and `ConflictError`
 - service-account and Apps Script gateway adapters
+- explicit queued repository transactions with stable retry identities
 - config-based repository creation with `typed-sheets setup`
 
 ## Installation
@@ -193,6 +194,89 @@ const users = createSheetRepository<User>({
 });
 ```
 
+### Queued repository
+
+Use the queued repository with the Apps Script gateway when writes should be
+appended as durable tasks and processed explicitly:
+
+```ts
+import {
+  AppsScriptGatewayAdapter,
+  createQueuedSheetRepository,
+  number,
+  text,
+} from "typed-sheets";
+
+const adapter = new AppsScriptGatewayAdapter({
+  gatewayUrl: process.env.TYPED_SHEETS_GATEWAY_URL!,
+  gatewaySecret: process.env.TYPED_SHEETS_GATEWAY_SECRET!,
+});
+
+const orders = createQueuedSheetRepository({
+  adapter,
+  sheetName: "Orders",
+  key: "id",
+  columns: {
+    id: text(),
+    status: text(),
+    _version: number(),
+  },
+});
+
+// Creates the canonical sheet and task queue. Existing projection rows are
+// copied into an empty canonical sheet during this one-time initialization.
+await orders.ensureSheet();
+
+await orders.transaction(async (tx) => {
+  const order = await tx.findById("o1");
+
+  if (order) {
+    order.status = "paid";
+    tx.save(order);
+  }
+}, { transactionId: "request-123" });
+
+const processing = orders.createTransaction();
+const result = await processing.flushAndProcessQueue({ maxTransactions: 1 });
+```
+
+Queued writes are not applied to canonical sheets until
+`flushAndProcessQueue()` or the adapter's `processTaskQueue()` is called.
+Queued repository reads always use the adapter's canonical read operation, so
+reads remain consistent after processing. The visible projection tab is seeded
+during initialization but is not automatically synced by the current gateway
+processor.
+
+`transactionId` should be stable when retrying after an ambiguous enqueue
+response. The same option is available on convenience writes:
+
+```ts
+await orders.update(
+  "o1",
+  current => ({ ...current, status: "paid" }),
+  { transactionId: "request-123" },
+);
+```
+
+If the callback or entity payload differs on retry, the repository raises
+`ConflictError` instead of reusing an unrelated cached task batch. Entity
+`save()` and `remove()` also preserve the loaded `_version` and reject stale
+entities. A transaction handle also exposes `retry()` when the original
+operation cannot be reconstructed from current reads, such as a delete whose
+row has already been processed:
+
+```ts
+const tx = orders.createTransaction({ transactionId: "request-123" });
+const order = await tx.findById("o1");
+if (order) tx.remove(order);
+
+try {
+  await tx.flush();
+} catch {
+  await tx.retry();
+}
+```
+
 ## Documentation
 
 - [Safety model and adapters](docs/safety-and-adapters.md)
@@ -205,8 +289,15 @@ const users = createSheetRepository<User>({
 ## Current Limitations
 
 This project currently does not support joins, relations, SQL execution,
-migrations, transactions, multi-row atomic updates, cache/request collapse,
-retry/backoff, browser support, or automatic Apps Script gateway installation.
+automatic retry/backoff, browser support, or automatic Apps Script gateway
+installation. Queued processing is explicit, queued transactions do not provide
+database-level atomicity across separate canonical sheets, and the visible
+projection is not automatically synchronized after processing.
+
+When adopting queued writes for an existing sheet, run `ensureSheet()` once so
+the gateway can seed an empty canonical sheet from the existing projection.
+Queued repositories should then read and write through the canonical queue
+workflow rather than mixing direct writes against the projection tab.
 
 Apps Script and Google Sheets quotas apply. Keep live Google integration tests
 opt-in and use a test spreadsheet or test sheet tab.

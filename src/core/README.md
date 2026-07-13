@@ -21,7 +21,7 @@ through `src/index.ts`; these folders describe internal ownership boundaries.
   `DirectSheetRepository.ts`. It reads the sheet, checks schema/key/version
   state, then writes rows through `DirectSheetAdapter`.
 - `QueuedSheetWriteExecutor.ts`: queued write implementation for
-  `QueuedSheetRepository.ts`. It reads the current sheet snapshot, validates
+  `QueuedSheetRepository.ts`. It reads the current canonical snapshot, validates
   requested changes, converts them into queue operations, and appends task rows
   through `AppsScriptQueueAdapter`. Flushed queued writes are not visible to
   repository reads until the Apps Script queue processor applies them.

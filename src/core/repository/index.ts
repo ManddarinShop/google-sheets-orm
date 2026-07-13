@@ -9,6 +9,7 @@ export type {
   QueuedRepositoryQueueProcessingStatus,
   QueuedRepositoryQueueProcessingSummary,
   QueuedRepositoryProcessedFlushResult,
+  QueuedRepositoryTransactionOptions,
   QueuedRepositoryTransaction,
   QueuedSheetRepository,
 } from "./QueuedSheetRepository.js";

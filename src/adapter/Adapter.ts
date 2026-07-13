@@ -147,6 +147,8 @@ export interface DirectSheetAdapter extends SheetAdapter {
 }
 
 export interface AppsScriptQueueAdapter extends SheetAdapter {
+  /** Reads the gateway-owned canonical rows after queued tasks are processed. */
+  readCanonicalSheet(sheetName: string): Promise<SheetSnapshot>;
   /**
    * Initialize the gateway-owned sheet set for queued writes when supported.
    * Implementations should create or reuse the visible projection sheet,

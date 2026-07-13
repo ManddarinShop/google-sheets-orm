@@ -22,6 +22,7 @@ export type AppsScriptGatewayRequest =
       operation: "processTaskQueue";
       maxTransactions?: number;
     }
+  | { operation: "readCanonicalSheet"; sheetName: string }
   | { operation: "writeHeader"; sheetName: string; headers: string[] }
   | { operation: "readSheet"; sheetName: string }
   | { operation: "appendRow"; sheetName: string; row: SheetCell[] }

@@ -54,6 +54,7 @@ export type {
   CreateQueuedSheetRepositoryInput,
   QueuedRepositoryQueueProcessingStatus,
   QueuedRepositoryQueueProcessingSummary,
+  QueuedRepositoryTransactionOptions,
   QueuedRepositoryTransaction,
   QueuedSheetRepository,
 } from "./core/repository/index.js";

@@ -8,6 +8,7 @@ import type {
   ProcessTaskQueueResult,
   SheetSnapshot,
 } from "../src/adapter/Adapter.js";
+import { ConflictError } from "../src/core/errors/index.js";
 import { number, text } from "../src/core/schema/index.js";
 import {
   createQueuedSheetRepository,
@@ -24,12 +25,15 @@ interface Order {
 
 class FakeQueueAdapter implements AppsScriptQueueAdapter {
   readonly enqueuedTasks: EnqueueTasksInput[] = [];
+  readonly readSheets: Array<string> = [];
   readonly initializedSystemSheets: Array<{
     sheetName: string;
     headers: Array<string>;
   }> = [];
   readonly processedTaskQueues: Array<unknown> = [];
   enqueueError: Error | null = null;
+  enqueueErrorAfterRecord: Error | null = null;
+  private canonicalSnapshot: SheetSnapshot | null = null;
   processResult: ProcessTaskQueueResult = {
     processedTransactions: 1,
     failedTransactions: 0,
@@ -44,10 +48,32 @@ class FakeQueueAdapter implements AppsScriptQueueAdapter {
     this.snapshot = snapshot;
   }
 
-  async readSheet(): Promise<SheetSnapshot> {
+  setCanonicalSnapshot(snapshot: SheetSnapshot): void {
+    this.canonicalSnapshot = snapshot;
+  }
+
+  async readSheet(sheetName: string): Promise<SheetSnapshot> {
+    this.readSheets.push(sheetName);
+
     return {
       headers: [...this.snapshot.headers],
       rows: this.snapshot.rows.map((row) => ({
+        rowNumber: row.rowNumber,
+        cells: [...row.cells],
+      })),
+    };
+  }
+
+  async readCanonicalSheet(sheetName: string): Promise<SheetSnapshot> {
+    if (this.canonicalSnapshot === null) {
+      return this.readSheet(sheetName);
+    }
+
+    this.readSheets.push(sheetName);
+
+    return {
+      headers: [...this.canonicalSnapshot.headers],
+      rows: this.canonicalSnapshot.rows.map((row) => ({
         rowNumber: row.rowNumber,
         cells: [...row.cells],
       })),
@@ -79,6 +105,12 @@ class FakeQueueAdapter implements AppsScriptQueueAdapter {
     this.enqueuedTasks.push({
       tasks: input.tasks.map((task) => ({ ...task })),
     });
+
+    if (this.enqueueErrorAfterRecord !== null) {
+      const error = this.enqueueErrorAfterRecord;
+      this.enqueueErrorAfterRecord = null;
+      throw error;
+    }
 
     return {
       tasks: input.tasks.map((task, index) => ({
@@ -353,6 +385,237 @@ describe("queued repository transactions", () => {
     expect(adapter.enqueuedTasks).toHaveLength(1);
   });
 
+  it("reuses the exact enqueue batch when the response is lost", async () => {
+    const adapter = new FakeQueueAdapter(ordersSnapshot);
+    const orders = createOrdersRepository(adapter);
+    const tx = orders.createTransaction();
+    const order = await tx.findById("o1");
+
+    if (order === null) {
+      throw new Error("Expected order");
+    }
+
+    order.status = "canceled";
+    tx.save(order);
+    adapter.enqueueErrorAfterRecord = new Error("enqueue response lost");
+
+    await expect(tx.flush()).rejects.toThrow(/enqueue response lost/);
+
+    await expect(tx.flush()).resolves.toHaveLength(1);
+
+    expect(adapter.enqueuedTasks).toHaveLength(2);
+    expect(adapter.enqueuedTasks[1]).toEqual(adapter.enqueuedTasks[0]);
+  });
+
+  it("reuses the exact enqueue batch after the processor applies it", async () => {
+    const adapter = new FakeQueueAdapter(ordersSnapshot);
+    const orders = createOrdersRepository(adapter);
+    const tx = orders.createTransaction({ transactionId: "tx-processed-retry" });
+    const order = await tx.findById("o1");
+
+    if (order === null) {
+      throw new Error("Expected order");
+    }
+
+    order.status = "canceled";
+    tx.save(order);
+    adapter.enqueueErrorAfterRecord = new Error("enqueue response lost");
+
+    await expect(tx.flush()).rejects.toThrow(/enqueue response lost/);
+
+    adapter.setSnapshot({
+      headers: ordersSnapshot.headers,
+      rows: [
+        { rowNumber: 2, cells: ["o1", "u1", "canceled", null, 4] },
+        { rowNumber: 3, cells: ["o2", "u1", "paid", null, 1] },
+      ],
+    });
+
+    await expect(tx.flush()).resolves.toHaveLength(1);
+    expect(adapter.enqueuedTasks).toHaveLength(2);
+    expect(adapter.enqueuedTasks[1]).toEqual(adapter.enqueuedTasks[0]);
+    expect(adapter.readSheets).toHaveLength(2);
+  });
+
+  it("reuses a high-level transaction batch when retried with the same identity", async () => {
+    const adapter = new FakeQueueAdapter(ordersSnapshot);
+    const orders = createOrdersRepository(adapter);
+    const transactionId = "tx-high-level-retry";
+
+    adapter.enqueueErrorAfterRecord = new Error("enqueue response lost");
+
+    await expect(
+      orders.transaction(
+        async (tx) => {
+          const order = await tx.findById("o1");
+
+          if (order === null) {
+            throw new Error("Expected order");
+          }
+
+          order.status = "canceled";
+          tx.save(order);
+          return "saved";
+        },
+        { transactionId },
+      ),
+    ).rejects.toThrow(/enqueue response lost/);
+
+    adapter.setSnapshot({
+      headers: ordersSnapshot.headers,
+      rows: [
+        { rowNumber: 2, cells: ["o1", "u1", "canceled", null, 4] },
+        { rowNumber: 3, cells: ["o2", "u1", "paid", null, 1] },
+      ],
+    });
+
+    await expect(
+      orders.transaction(
+        async (tx) => {
+          const order = await tx.findById("o1");
+
+          if (order === null) {
+            throw new Error("Expected order");
+          }
+
+          order.status = "canceled";
+          tx.save(order);
+          return "saved";
+        },
+        { transactionId },
+      ),
+    ).resolves.toBe("saved");
+
+    expect(adapter.enqueuedTasks).toHaveLength(2);
+    expect(adapter.enqueuedTasks[1]).toEqual(adapter.enqueuedTasks[0]);
+  });
+
+  it("rejects a high-level retry when the callback creates different tasks", async () => {
+    const adapter = new FakeQueueAdapter(ordersSnapshot);
+    const orders = createOrdersRepository(adapter);
+    const transactionId = "tx-high-level-different-retry";
+
+    adapter.enqueueErrorAfterRecord = new Error("enqueue response lost");
+
+    await expect(
+      orders.transaction(
+        async (tx) => {
+          const order = await tx.findById("o1");
+
+          if (order === null) {
+            throw new Error("Expected order");
+          }
+
+          order.status = "canceled";
+          tx.save(order);
+        },
+        { transactionId },
+      ),
+    ).rejects.toThrow(/enqueue response lost/);
+
+    await expect(
+      orders.transaction(
+        async (tx) => {
+          const order = await tx.findById("o1");
+
+          if (order === null) {
+            throw new Error("Expected order");
+          }
+
+          order.status = "refunded";
+          tx.save(order);
+        },
+        { transactionId },
+      ),
+    ).rejects.toThrow(/different materialized task batch/);
+
+    expect(adapter.enqueuedTasks).toHaveLength(1);
+  });
+
+  it("reuses a convenience update batch with a stable transaction identity", async () => {
+    const adapter = new FakeQueueAdapter(ordersSnapshot);
+    const orders = createOrdersRepository(adapter);
+    const transactionId = "tx-convenience-retry";
+    const updater = (current: Order): Order => ({
+      ...current,
+      status: "canceled",
+    });
+
+    adapter.enqueueErrorAfterRecord = new Error("enqueue response lost");
+
+    await expect(
+      orders.update("o1", updater, { transactionId }),
+    ).rejects.toThrow(/enqueue response lost/);
+
+    await expect(
+      orders.update("o1", updater, { transactionId }),
+    ).resolves.toEqual({
+      id: "o1",
+      userId: "u1",
+      status: "canceled",
+      canceledAt: undefined,
+      _version: 4,
+    });
+
+    expect(adapter.enqueuedTasks).toHaveLength(2);
+    expect(adapter.enqueuedTasks[1]).toEqual(adapter.enqueuedTasks[0]);
+    expect(adapter.readSheets).toHaveLength(1);
+  });
+
+  it("retries a convenience delete after the processor removed the row", async () => {
+    const adapter = new FakeQueueAdapter(ordersSnapshot);
+    const orders = createOrdersRepository(adapter);
+    const transactionId = "tx-convenience-delete-retry";
+
+    adapter.enqueueErrorAfterRecord = new Error("enqueue response lost");
+
+    await expect(
+      orders.deleteById("o1", { transactionId }),
+    ).rejects.toThrow(/enqueue response lost/);
+
+    adapter.setSnapshot({
+      headers: ordersSnapshot.headers,
+      rows: [
+        { rowNumber: 2, cells: ["o2", "u1", "paid", null, 1] },
+      ],
+    });
+
+    await expect(
+      orders.deleteById("o1", { transactionId }),
+    ).resolves.toEqual({
+      id: "o1",
+      userId: "u1",
+      status: "paid",
+      canceledAt: undefined,
+      _version: 3,
+    });
+
+    expect(adapter.enqueuedTasks).toHaveLength(2);
+    expect(adapter.enqueuedTasks[1]).toEqual(adapter.enqueuedTasks[0]);
+  });
+
+  it("rejects mutations while a flush retry is pending", async () => {
+    const adapter = new FakeQueueAdapter(ordersSnapshot);
+    const orders = createOrdersRepository(adapter);
+    const tx = orders.createTransaction();
+    const order = await tx.findById("o1");
+
+    if (order === null) {
+      throw new Error("Expected order");
+    }
+
+    order.status = "canceled";
+    tx.save(order);
+    adapter.enqueueErrorAfterRecord = new Error("enqueue response lost");
+
+    await expect(tx.flush()).rejects.toThrow(/enqueue response lost/);
+
+    order.status = "restored";
+    expect(() => tx.save(order)).toThrow(/flush retry is pending/);
+
+    await expect(tx.flush()).resolves.toHaveLength(1);
+  });
+
   it("can flush and return the queue processor response", async () => {
     const adapter = new FakeQueueAdapter(ordersSnapshot);
     const orders = createOrdersRepository(adapter);
@@ -418,6 +681,94 @@ describe("queued repository transactions", () => {
         hasPendingTasks: true,
       },
     });
+  });
+
+  it("rejects save when the entity version is stale at flush", async () => {
+    const adapter = new FakeQueueAdapter(ordersSnapshot);
+    const orders = createOrdersRepository(adapter);
+    const tx = orders.createTransaction();
+    const order = await tx.findById("o1");
+
+    if (order === null) {
+      throw new Error("Expected order");
+    }
+
+    order.status = "canceled";
+    tx.save(order);
+    adapter.setSnapshot({
+      headers: ordersSnapshot.headers,
+      rows: [
+        { rowNumber: 2, cells: ["o1", "u1", "refunded", null, 4] },
+        { rowNumber: 3, cells: ["o2", "u1", "paid", null, 1] },
+      ],
+    });
+
+    await expect(tx.flush()).rejects.toBeInstanceOf(ConflictError);
+    expect(adapter.enqueuedTasks).toEqual([]);
+  });
+
+  it("rejects remove when the entity version is stale at flush", async () => {
+    const adapter = new FakeQueueAdapter(ordersSnapshot);
+    const orders = createOrdersRepository(adapter);
+    const tx = orders.createTransaction();
+    const order = await tx.findById("o1");
+
+    if (order === null) {
+      throw new Error("Expected order");
+    }
+
+    tx.remove(order);
+    adapter.setSnapshot({
+      headers: ordersSnapshot.headers,
+      rows: [
+        { rowNumber: 2, cells: ["o1", "u1", "refunded", null, 4] },
+        { rowNumber: 3, cells: ["o2", "u1", "paid", null, 1] },
+      ],
+    });
+
+    await expect(tx.flush()).rejects.toBeInstanceOf(ConflictError);
+    expect(adapter.enqueuedTasks).toEqual([]);
+  });
+
+  it("rejects save when the loaded entity was deleted before flush", async () => {
+    const adapter = new FakeQueueAdapter(ordersSnapshot);
+    const orders = createOrdersRepository(adapter);
+    const tx = orders.createTransaction();
+    const order = await tx.findById("o1");
+
+    if (order === null) {
+      throw new Error("Expected order");
+    }
+
+    order.status = "canceled";
+    tx.save(order);
+    adapter.setSnapshot({
+      headers: ordersSnapshot.headers,
+      rows: [{ rowNumber: 2, cells: ["o2", "u1", "paid", null, 1] }],
+    });
+
+    await expect(tx.flush()).rejects.toBeInstanceOf(ConflictError);
+    expect(adapter.enqueuedTasks).toEqual([]);
+  });
+
+  it("rejects remove when the loaded entity was deleted before flush", async () => {
+    const adapter = new FakeQueueAdapter(ordersSnapshot);
+    const orders = createOrdersRepository(adapter);
+    const tx = orders.createTransaction();
+    const order = await tx.findById("o1");
+
+    if (order === null) {
+      throw new Error("Expected order");
+    }
+
+    tx.remove(order);
+    adapter.setSnapshot({
+      headers: ordersSnapshot.headers,
+      rows: [{ rowNumber: 2, cells: ["o2", "u1", "paid", null, 1] }],
+    });
+
+    await expect(tx.flush()).rejects.toBeInstanceOf(ConflictError);
+    expect(adapter.enqueuedTasks).toEqual([]);
   });
 
   it("summarizes failed queue processor responses", async () => {
@@ -579,6 +930,25 @@ describe("queued repository transactions", () => {
         headers: ["id", "userId", "status", "canceledAt", "_version"],
       },
     ]);
+  });
+
+  it("reads canonical state when the queue adapter provides it", async () => {
+    const adapter = new FakeQueueAdapter(ordersSnapshot);
+    adapter.setCanonicalSnapshot({
+      headers: ordersSnapshot.headers,
+      rows: [
+        { rowNumber: 2, cells: ["o1", "u1", "canceled", null, 4] },
+      ],
+    });
+    const orders = createOrdersRepository(adapter);
+
+    await expect(orders.findById("o1")).resolves.toEqual({
+      id: "o1",
+      userId: "u1",
+      status: "canceled",
+      canceledAt: undefined,
+      _version: 4,
+    });
   });
 
   function createOrdersRepository(adapter: AppsScriptQueueAdapter) {
