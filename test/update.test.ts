@@ -163,7 +163,7 @@ describe("repository updates and optimistic locking", () => {
     expect(adapter.updatedRows).toEqual([]);
   });
 
-  it("batches same-tick key-based updates when the adapter supports it", async () => {
+  it("runs concurrent key-based updates independently", async () => {
     const sheet = {
       headers: ["id", "email", "age", "active", "_version"],
       rows: [
@@ -180,11 +180,14 @@ describe("repository updates and optimistic locking", () => {
       expect(sheetName).toBe("Users");
       updateRowsByKeyCalls.push(input);
 
+      const update = input.updates[0];
+
+      if (update === undefined) {
+        throw new Error("Expected one update");
+      }
+
       return {
-        updatedRows: [
-          { id: "u1", cells: ["u1", "a@test.com", 30, true, 2] },
-          { id: "u2", cells: ["u2", "b@test.com", 31, false, 2] },
-        ],
+        updatedRows: [{ id: update.id, cells: update.row }],
       };
     };
 
@@ -222,7 +225,7 @@ describe("repository updates and optimistic locking", () => {
         _version: 2,
       },
     ]);
-    expect(adapter.readSheets).toEqual(["Users"]);
+    expect(adapter.readSheets).toEqual(["Users", "Users"]);
     expect(adapter.updatedRows).toEqual([]);
     expect(updateRowsByKeyCalls).toEqual([
       {
@@ -235,6 +238,13 @@ describe("repository updates and optimistic locking", () => {
             expectedVersion: 1,
             row: ["u1", "a@test.com", 30, true, 2],
           },
+        ],
+      },
+      {
+        expectedHeaders: ["id", "email", "age", "active", "_version"],
+        keyHeader: "id",
+        versionHeader: "_version",
+        updates: [
           {
             id: "u2",
             expectedVersion: 1,
@@ -294,45 +304,6 @@ describe("repository updates and optimistic locking", () => {
       active: true,
       _version: 2,
     });
-  });
-
-  it("rejects duplicate ids in the same update batch", async () => {
-    const sheet = {
-      headers: ["id", "email", "age", "active", "_version"],
-      rows: [{ rowNumber: 2, cells: ["u1", "a@test.com", 20, true, 1] }],
-    };
-    const adapter = new FakeSheetAdapter({
-      Users: [sheet, sheet],
-    });
-    adapter.updateRowsByKey = async (_sheetName, input) => {
-      expect(input.updates).toHaveLength(1);
-
-      return {
-        updatedRows: [
-          { id: "u1", cells: ["u1", "a@test.com", 21, true, 2] },
-        ],
-      };
-    };
-
-    const users = createSheetRepository<User>({
-      adapter,
-      sheetName: "Users",
-      key: "id",
-      columns,
-    });
-
-    await expect(
-      Promise.all([
-        users.update("u1", current => ({
-          ...current,
-          age: 21,
-        })),
-        users.update("u1", current => ({
-          ...current,
-          age: 22,
-        })),
-      ]),
-    ).rejects.toThrow(ConflictError);
   });
 
   it("rejects missing key-based update results as conflicts", async () => {

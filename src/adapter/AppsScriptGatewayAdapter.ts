@@ -1,13 +1,14 @@
 import type {
   AppendRowsInput,
+  AppsScriptQueueAdapter,
   DeleteRowsByKeyInput,
   DeleteRowsByKeyResult,
+  DirectSheetAdapter,
   EnqueueTasksInput,
   EnqueueTasksResult,
   InitializeSystemSheetsResult,
   ProcessTaskQueueInput,
   ProcessTaskQueueResult,
-  SheetAdapter,
   SheetCell,
   SheetSnapshot,
   UpdateRowsByKeyInput,
@@ -34,7 +35,8 @@ export interface AppsScriptGatewayAdapterOptions {
   fetch?: GatewayFetch;
 }
 
-export class AppsScriptGatewayAdapter implements SheetAdapter {
+export class AppsScriptGatewayAdapter
+  implements DirectSheetAdapter, AppsScriptQueueAdapter {
   private readonly fetch: GatewayFetch;
 
   constructor(private readonly options: AppsScriptGatewayAdapterOptions) {

@@ -103,16 +103,21 @@ The CLI extracts the config JSON from the pasted text, validates it, and writes
 Security note: the generated `gatewaySecret` is a credential. Treat it like a
 password and do not commit it to version control.
 
-The gateway supports these operations:
+The gateway supports these queue/system operations:
 
 - `ping`
-- `ensureSheet`
-- `initializeSheet`
 - `initializeSystemSheets`
 - `enqueueTasks`
 - `processTaskQueue`
-- `writeHeader`
 - `readSheet`
+
+The gateway still accepts these legacy direct-write operations for existing
+`createRepositoryFromConfig()` Apps Script users while repository writes move to
+the task queue:
+
+- `ensureSheet`
+- `initializeSheet`
+- `writeHeader`
 - `appendRow`
 - `appendRows`
 - `updateRow`

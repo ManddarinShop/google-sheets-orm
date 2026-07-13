@@ -1,6 +1,6 @@
 import { auth as googleAuth } from "@googleapis/sheets";
 import { AppsScriptGatewayAdapter } from "../adapter/AppsScriptGatewayAdapter.js";
-import type { SheetAdapter } from "../adapter/Adapter.js";
+import type { DirectSheetAdapter } from "../adapter/Adapter.js";
 import { GoogleSheetsAdapter } from "../adapter/GoogleSheetsAdapter.js";
 import {
   createSheetRepository,
@@ -19,7 +19,7 @@ export interface CreateRepositoryFromConfigOptions<
   columns: ColumnMap<T>;
   createAdapter?: (
     config: TypedSheetsConfig,
-  ) => SheetAdapter | Promise<SheetAdapter>;
+  ) => DirectSheetAdapter | Promise<DirectSheetAdapter>;
 }
 
 export async function createRepositoryFromConfig<
@@ -44,7 +44,7 @@ export async function createRepositoryFromConfig<
   });
 }
 
-function createAdapterFromConfig(config: TypedSheetsConfig): SheetAdapter {
+function createAdapterFromConfig(config: TypedSheetsConfig): DirectSheetAdapter {
   if (config.auth.type === "apps-script-gateway") {
     return new AppsScriptGatewayAdapter({
       gatewayUrl: config.auth.gatewayUrl,

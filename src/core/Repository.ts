@@ -1,17 +1,17 @@
-import type { SheetAdapter } from "../adapter/Adapter.js";
+import type { DirectSheetAdapter } from "../adapter/Adapter.js";
 import { Column } from "./Columns.js";
 import { SchemaDriftError } from "./Errors.js";
 import { parseRow } from "./RowParser.js";
 import { assertSchema } from "./Schema.js";
-import { createRepositoryWriteBatcher } from "./RepositoryWriteBatcher.js";
 import { assertUniqueKeys } from "./RepositoryRows.js";
+import { createRepositorySyncWriteExecutor } from "./RepositorySyncWriteExecutor.js";
 
 export type ColumnMap<T extends Record<string, unknown>> = {
   [K in keyof T]: Column<T[K]>;
 };
 
 export interface CreateSheetRepositoryInput<T extends Record<string, unknown>> {
-  adapter: SheetAdapter;
+  adapter: DirectSheetAdapter;
   sheetName: string;
   key: keyof T & string;
   columns: ColumnMap<T>;
@@ -30,7 +30,8 @@ export function createSheetRepository<T extends Record<string, unknown>>(
   input: CreateSheetRepositoryInput<T>,
 ): SheetRepository<T> {
   const { adapter, sheetName, key, columns } = input;
-  const writeBatcher = createRepositoryWriteBatcher(input);
+  const writeExecutor = createRepositorySyncWriteExecutor(input);
+  let writeTail: Promise<void> = Promise.resolve();
 
   async function ensureSheet(): Promise<void> {
     const headers = Object.keys(columns);
@@ -103,20 +104,43 @@ export function createSheetRepository<T extends Record<string, unknown>>(
   }
 
   async function insert(row: T): Promise<void> {
-    await writeBatcher.insert(row);
+    await runSerializedWrite(async () => {
+      await writeExecutor.insertRows([row]);
+    });
   }
 
   async function update(
     id: string,
     updater: (current: T) => T,
   ): Promise<T | null> {
-    return writeBatcher.update(id, updater);
+    const [updatedRow] = await runSerializedWrite(() =>
+      writeExecutor.updateRowsById([{ id, updater }]),
+    );
+
+    return updatedRow ?? null;
   }
 
   // Deletes a row only after re-reading the same sheet row, so stale callers do
   // not remove data that was updated or moved after their first snapshot.
   async function deleteById(id: string): Promise<T | null> {
-    return writeBatcher.deleteById(id);
+    const [deletedRow] = await runSerializedWrite(() =>
+      writeExecutor.deleteRowsById([id]),
+    );
+
+    return deletedRow ?? null;
+  }
+
+  function runSerializedWrite<TResult>(
+    operation: () => Promise<TResult>,
+  ): Promise<TResult> {
+    const result = writeTail.then(operation, operation);
+
+    writeTail = result.then(
+      () => undefined,
+      () => undefined,
+    );
+
+    return result;
   }
 
   return { ensureSheet, findAll, findById, insert, update, deleteById };
