@@ -46,7 +46,7 @@ projection sheets are generated views of canonical state.
 server write
   -> _typed_sheets_task_queue
   -> _typed_sheets_data_Users
-  -> Users projection sync
+  -> optional Users projection sync
 ```
 
 This keeps manual edits to `Users` from corrupting the system-owned row state.
@@ -57,9 +57,9 @@ First implementation policy:
 
 - queue processors read and write canonical sheets only
 - repository reads should use canonical sheets when queued mode is enabled
-- projection sync copies canonical state into the visible sheet
+- projection sync is optional and is not part of the current gateway processor
 - visible sheet edits are not imported automatically
-- visible sheet edits may be overwritten by the next projection sync
+- a future projection sync may overwrite visible sheet edits
 - `onEdit` import can be designed later as an explicit opt-in feature
 
 This intentionally makes the visible sheet a projection, not the source of
@@ -119,9 +119,17 @@ Proposed header row:
 | `lastErrorMessage` | string or blank | Last gateway error message. |
 | `createdAt` | ISO string | Task creation time. |
 | `updatedAt` | ISO string | Last status update time. |
+| `taskFingerprint` | string | Stable hash of the immutable enqueue request fields, retained after payload redaction for idempotency checks. |
 
 The queue should be append-first. Updating `status`, `attempts`, and error
 columns is allowed during processing.
+
+When the queue schema gains `taskFingerprint`, the Apps Script template must
+append that column to an existing legacy queue before processing or enqueueing.
+Pending and non-redacted rows can be backfilled from their immutable fields.
+Legacy `done` rows whose payload was already redacted cannot be reconstructed;
+the migration keeps a task-id-only compatibility marker for replay and records
+that limitation.
 
 ## Queue Transactions
 
@@ -414,12 +422,41 @@ implicit through key/version preconditions.
 
 `taskId` is the idempotency key. It must be supplied by the client-side
 repository executor or another deterministic internal caller before enqueue.
-The gateway assigns `sequence`, not `taskId`.
+The gateway assigns `sequence`, not `taskId`. The queue stores a
+`taskFingerprint` for the immutable enqueue request fields so it can compare a
+replayed task after `payloadJson` has been redacted.
 
 The gateway should reject duplicate `taskId` values on enqueue unless the
-duplicate has the same operation payload. If a client retry replays the same
+duplicate has the same task fingerprint. If a client retry replays the same
 enqueue request after losing the first response, the gateway can return the
-already queued task instead of appending another row.
+already queued task instead of appending another row. The client-side
+repository transaction must reuse the original transaction/task IDs and
+materialized payloads for that retry; generating new IDs would bypass this
+idempotency check.
+
+The high-level repository transaction API accepts an optional stable
+`transactionId` for retries:
+
+```ts
+await orders.transaction(async (tx) => {
+  const order = await tx.findById("o1");
+  if (order) {
+    order.status = "canceled";
+    tx.save(order);
+  }
+}, { transactionId: "request-123" });
+```
+
+If the enqueue result is ambiguous, retry the callback with the same
+`transactionId`. The repository keeps the materialized task batch and reuses
+its task IDs and payloads. The retry callback is validated against the
+immutable snapshot captured during the first materialization, rather than the
+current sheet, so a queue processor may finish the task before the retry
+arrives. Callback failures clear pending work; enqueue failures do not. A
+transaction with a pending flush retry must be retried or cleared before it
+can be mutated again. A transaction handle's explicit `retry()` method can
+re-enqueue the retained batch when a callback cannot reconstruct the original
+operation from current reads, such as a delete whose row was already applied.
 
 Processor idempotency rules:
 

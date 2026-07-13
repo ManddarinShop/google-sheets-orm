@@ -126,6 +126,11 @@ The update flow:
 
 This is stale-write protection, not a full database transaction.
 
+The queued repository also exposes transaction-style grouping for one enqueue
+batch. It provides stable retry identities and canonical-state optimistic
+locking, but it is not a database transaction and does not provide rollback or
+atomicity across arbitrary sheets.
+
 `deleteById(id)` follows the same safety model. It returns the deleted row when
 the key exists, returns `null` when no row matches the key, and throws
 `ConflictError` when the target row moved or its `_version` changed before the
@@ -143,7 +148,7 @@ This project currently does not support:
 - relations
 - SQL execution
 - migrations
-- transactions
+- database-level transactions or rollback
 - multi-row atomic updates
 - cache or request collapse
 - retry/backoff
@@ -155,6 +160,6 @@ This project currently does not support:
 The long-term direction is a lightweight SQL layer backed by Google Sheets,
 closer to an online H2-like database experience for MVPs and internal tools.
 
-Concurrency control and transaction semantics are later-stage work. The first
-priority is a typed table/storage model that can safely support repository
-operations and eventually a small SQL subset.
+Database-level concurrency and transaction semantics are later-stage work. The
+first priority is a typed table/storage model that can safely support
+repository operations and eventually a small SQL subset.

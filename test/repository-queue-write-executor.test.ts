@@ -38,6 +38,10 @@ class FakeQueueAdapter implements AppsScriptQueueAdapter {
     };
   }
 
+  async readCanonicalSheet(sheetName: string): Promise<SheetSnapshot> {
+    return this.readSheet(sheetName);
+  }
+
   async initializeSystemSheets(): Promise<InitializeSystemSheetsResult> {
     throw new Error("Unexpected initializeSystemSheets call");
   }
@@ -134,6 +138,28 @@ describe("repository queue write executor", () => {
       { rowNumber: 3, cells: ["u2", "b@test.com", null, false, 3] },
     ],
   };
+
+  it("uses random transaction ids by default", () => {
+    const firstExecutor = createRepositoryQueueWriteExecutor<User>({
+      adapter: new FakeQueueAdapter(emptyUsers),
+      sheetName: "Users",
+      key: "id",
+      columns,
+    });
+    const secondExecutor = createRepositoryQueueWriteExecutor<User>({
+      adapter: new FakeQueueAdapter(emptyUsers),
+      sheetName: "Users",
+      key: "id",
+      columns,
+    });
+
+    const firstId = firstExecutor.createTransactionId();
+    const secondId = secondExecutor.createTransactionId();
+
+    expect(firstId).toMatch(/^tx-[0-9a-f-]{36}$/);
+    expect(secondId).toMatch(/^tx-[0-9a-f-]{36}$/);
+    expect(firstId).not.toBe(secondId);
+  });
 
   it("enqueues inserts as one queue transaction", async () => {
     const adapter = new FakeQueueAdapter(emptyUsers);

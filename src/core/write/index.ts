@@ -8,6 +8,7 @@ export type {
 } from "./QueuedWriteTaskProducer.js";
 export type {
   RepositoryQueueWriteExecutor,
+  RepositoryQueueWriteTransactionOptions,
   RepositoryWriteTransactionOperation,
   RepositoryWriteTransactionResult,
 } from "./QueuedSheetWriteExecutor.js";
