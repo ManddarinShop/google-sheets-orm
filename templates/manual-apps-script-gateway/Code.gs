@@ -11,6 +11,10 @@ const TYPED_SHEETS_DATA_SHEET_PREFIX = "_typed_sheets_data_";
 const TYPED_SHEETS_META_MAPPING_KEY_PREFIX = "sheetMapping:";
 const TYPED_SHEETS_MAX_SHEET_NAME_LENGTH = 100;
 const TYPED_SHEETS_TASK_QUEUE_SHEET_NAME = "_typed_sheets_task_queue";
+// Apps Script executions cannot retain a document lock after they terminate.
+// A processing claim older than this lease is therefore safe to return to the
+// pending state on the next processor invocation.
+const TYPED_SHEETS_PROCESSING_LEASE_MS = 5 * 60 * 1000;
 const TYPED_SHEETS_TASK_QUEUE_HEADERS = [
   "taskId",
   "transactionId",
@@ -686,18 +690,22 @@ function isSameQueuedTask_(existingTask, task) {
 /**
  * Processes pending queue transaction groups into canonical sheets.
  *
- * This first processor intentionally keeps the lock for the full claim, apply,
- * and status update cycle. It applies complete pending groups in sequence
- * order, rewrites affected canonical sheets in bulk, and leaves projection sync
- * and stale processing recovery for later queue branches.
+ * This processor keeps the document lock for the full claim, apply, and status
+ * update cycle. It applies complete pending groups in sequence order, rewrites
+ * affected canonical sheets in bulk, and recovers processing claims whose
+ * lease expired after an interrupted execution.
  */
 function processTaskQueue_(spreadsheet, request) {
   const options = requireProcessTaskQueueOptions_(request);
   const queueSheet = ensureTaskQueueSheet_(spreadsheet);
   const queuedTasks = readQueuedTasks_(queueSheet);
+  const now = new Date();
+
+  recoverStaleProcessingTasks_(queueSheet, queuedTasks, now);
+
   const pendingGroups = groupPendingTasksByTransaction_(queuedTasks)
     .slice(0, options.maxTransactions);
-  const now = new Date().toISOString();
+  const processingStartedAt = now.toISOString();
   const result = {
     ok: true,
     processedTransactions: 0,
@@ -710,7 +718,7 @@ function processTaskQueue_(spreadsheet, request) {
   pendingGroups.forEach(function(group) {
     markQueueTasks_(queueSheet, group.tasks, {
       status: "processing",
-      updatedAt: now,
+      updatedAt: processingStartedAt,
     });
 
     try {
@@ -746,6 +754,47 @@ function processTaskQueue_(spreadsheet, request) {
   }).length;
 
   return result;
+}
+
+/**
+ * Returns interrupted transaction claims to the pending state after their
+ * processing lease expires. The in-memory task objects are updated as well so
+ * the same invocation can process a recovered group without rereading it.
+ */
+function recoverStaleProcessingTasks_(queueSheet, queuedTasks, now) {
+  const nowMs = now.getTime();
+  const staleTasks = queuedTasks.filter(function(task) {
+    return isStaleProcessingTask_(task, nowMs);
+  });
+
+  if (staleTasks.length === 0) {
+    return;
+  }
+
+  const recoveredAt = now.toISOString();
+
+  markQueueTasks_(queueSheet, staleTasks, {
+    status: "pending",
+    lastErrorCode: "stale_processing_recovered",
+    lastErrorMessage: "Recovered an interrupted processing claim",
+    updatedAt: recoveredAt,
+  });
+
+  staleTasks.forEach(function(task) {
+    task.status = "pending";
+    task.updatedAt = recoveredAt;
+  });
+}
+
+function isStaleProcessingTask_(task, nowMs) {
+  if (task.status !== "processing") {
+    return false;
+  }
+
+  const updatedAtMs = Date.parse(task.updatedAt);
+
+  return !Number.isFinite(updatedAtMs)
+    || nowMs - updatedAtMs >= TYPED_SHEETS_PROCESSING_LEASE_MS;
 }
 
 function readQueuedTasks_(queueSheet) {
@@ -787,6 +836,7 @@ function parseQueuedTaskRow_(row, rowNumber) {
     expectedVersion: row[9] === "" || row[9] === null ? null : Number(row[9]),
     payloadJson: String(row[10] || ""),
     attempts: Number(row[11] || 0),
+    updatedAt: String(row[15] || ""),
     taskFingerprint: String(row[16] || ""),
   };
 
@@ -1146,6 +1196,8 @@ function markQueueTasks_(queueSheet, tasks, patch) {
   const statusIndex = TYPED_SHEETS_TASK_QUEUE_HEADERS.indexOf("status") + 1;
   const payloadJsonIndex =
     TYPED_SHEETS_TASK_QUEUE_HEADERS.indexOf("payloadJson") + 1;
+  const attemptsIndex =
+    TYPED_SHEETS_TASK_QUEUE_HEADERS.indexOf("attempts") + 1;
   const lastErrorCodeIndex =
     TYPED_SHEETS_TASK_QUEUE_HEADERS.indexOf("lastErrorCode") + 1;
   const lastErrorMessageIndex =
@@ -1164,6 +1216,15 @@ function markQueueTasks_(queueSheet, tasks, patch) {
       queueSheet.getRange(task.rowNumber, payloadJsonIndex, 1, 1).setValues([
         [patch.payloadJson],
       ]);
+    }
+
+    if (patch.status === "processing") {
+      const nextAttempts = Number(task.attempts || 0) + 1;
+
+      queueSheet.getRange(task.rowNumber, attemptsIndex, 1, 1).setValues([
+        [nextAttempts],
+      ]);
+      task.attempts = nextAttempts;
     }
 
     if (patch.lastErrorCode !== undefined) {

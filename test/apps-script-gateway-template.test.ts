@@ -1603,6 +1603,58 @@ describe("manual Apps Script gateway template system sheets", () => {
     ]);
   });
 
+  it("recovers stale processing tasks after an interrupted processor run", async () => {
+    const gateway = await loadGatewayTemplate();
+    const spreadsheet = new FakeSpreadsheet();
+    const systemSheets = gateway.initializeSystemSheets_(spreadsheet, {
+      sheetName: "Users",
+      headers: ["id", "_version"],
+    });
+    const queue = spreadsheet.sheets.get("_typed_sheets_task_queue");
+
+    gateway.enqueueTasks_(spreadsheet, {
+      tasks: [
+        {
+          taskId: "task-interrupted",
+          transactionId: "tx-interrupted",
+          transactionIndex: 0,
+          operation: "insert",
+          sheetName: "Users",
+          keyHeader: "id",
+          keyValue: "u1",
+          expectedVersion: null,
+          payloadJson: JSON.stringify({
+            row: { id: "u1", _version: 1 },
+          }),
+        },
+      ],
+    });
+
+    if (queue === undefined) {
+      throw new Error("Expected task queue sheet");
+    }
+
+    queue.values[1]![4] = "processing";
+    queue.values[1]![11] = 1;
+    queue.values[1]![15] = "2020-01-01T00:00:00.000Z";
+
+    expect(gateway.processTaskQueue_(spreadsheet, {})).toMatchObject({
+      processedTransactions: 1,
+      failedTransactions: 0,
+      processedTasks: 1,
+      failedTasks: 0,
+      remainingPendingTasks: 0,
+    });
+    expect(
+      spreadsheet.sheets.get(systemSheets.canonicalSheetName)?.values,
+    ).toEqual([
+      ["id", "_version"],
+      ["u1", 1],
+    ]);
+    expect(queue.values[1]![4]).toBe("done");
+    expect(queue.values[1]![11]).toBe(2);
+  });
+
   it("does not adopt a colliding internal sheet without a stored mapping", async () => {
     const gateway = await loadGatewayTemplate();
     const spreadsheet = new FakeSpreadsheet();
