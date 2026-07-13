@@ -8,9 +8,9 @@ import type {
   ProcessTaskQueueResult,
   SheetSnapshot,
 } from "../src/adapter/Adapter.js";
-import { boolean, number, text } from "../src/core/Columns.js";
-import { SchemaDriftError } from "../src/core/Errors.js";
-import { createRepositoryQueueWriteExecutor } from "../src/core/RepositoryQueueWriteExecutor.js";
+import { boolean, number, text } from "../src/core/schema/index.js";
+import { SchemaDriftError } from "../src/core/errors/index.js";
+import { createRepositoryQueueWriteExecutor } from "../src/core/write/index.js";
 
 interface User {
   id: string;
