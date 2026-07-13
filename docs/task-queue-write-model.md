@@ -434,8 +434,9 @@ repository transaction must reuse the original transaction/task IDs and
 materialized payloads for that retry; generating new IDs would bypass this
 idempotency check.
 
-The high-level repository transaction API accepts an optional stable
-`transactionId` for retries:
+The high-level repository transaction API can generate an internal transaction
+ID for ordinary writes. To retry the high-level callback after an ambiguous
+enqueue response, pass an options object with a stable `transactionId`:
 
 ```ts
 await orders.transaction(async (tx) => {

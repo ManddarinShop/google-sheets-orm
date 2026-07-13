@@ -247,8 +247,10 @@ reads remain consistent after processing. The visible projection tab is seeded
 during initialization but is not automatically synced by the current gateway
 processor.
 
-`transactionId` should be stable when retrying after an ambiguous enqueue
-response. The same option is available on convenience writes:
+The options argument can be omitted for ordinary writes; the repository then
+generates an internal transaction ID. When an options object is provided, it
+must include a stable `transactionId` so the operation can be retried after an
+ambiguous enqueue response. The same option is available on convenience writes:
 
 ```ts
 await orders.update(
