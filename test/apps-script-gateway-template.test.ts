@@ -836,8 +836,8 @@ describe("manual Apps Script gateway template system sheets", () => {
 
     const queue = spreadsheet.sheets.get("_typed_sheets_task_queue");
     if (queue) {
-      queue.values[1][4] = "done";
-      queue.values[1][10] = JSON.stringify({ redacted: true });
+      queue.values[1]![4] = "done";
+      queue.values[1]![10] = JSON.stringify({ redacted: true });
     }
 
     expect(
@@ -1585,7 +1585,7 @@ describe("manual Apps Script gateway template system sheets", () => {
 
     const queue = spreadsheet.sheets.get("_typed_sheets_task_queue");
     if (queue) {
-      queue.values[1][4] = "done";
+      queue.values[1]![4] = "done";
     }
 
     expect(gateway.processTaskQueue_(spreadsheet, {})).toEqual({

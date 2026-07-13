@@ -11,7 +11,7 @@ import { loadTypedSheetsConfig } from "../setup/ConfigLoader.js";
 import type { TypedSheetsConfig } from "../setup/Config.js";
 
 export interface CreateRepositoryFromConfigOptions<
-  T extends Record<string, unknown>,
+  T extends object,
 > {
   cwd?: string;
   configPath?: string;
@@ -23,7 +23,7 @@ export interface CreateRepositoryFromConfigOptions<
 }
 
 export async function createRepositoryFromConfig<
-  T extends Record<string, unknown>,
+  T extends object,
 >(options: CreateRepositoryFromConfigOptions<T>): Promise<SheetRepository<T>> {
   const config = await loadTypedSheetsConfig({
     ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
