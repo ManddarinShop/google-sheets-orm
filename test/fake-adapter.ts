@@ -33,11 +33,11 @@ export class FakeSheetAdapter implements DirectSheetAdapter {
     sheetName: string;
     input: UpdateRowsByKeyInput;
   }> = [];
-  updateRowsByKey: DirectSheetAdapter["updateRowsByKey"] = async (
+  updateRowsByKey: NonNullable<DirectSheetAdapter["updateRowsByKey"]> = async (
     sheetName,
     input,
   ) => updateRowsByKey(this, sheetName, input);
-  deleteRowsByKey: DirectSheetAdapter["deleteRowsByKey"] = async (
+  deleteRowsByKey: NonNullable<DirectSheetAdapter["deleteRowsByKey"]> = async (
     sheetName,
     input,
   ) => deleteRowsByKey(this, sheetName, input);

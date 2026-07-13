@@ -1,4 +1,25 @@
 import { describe, expect, it, vi } from "vitest";
+import type { CliDeps } from "../src/cli/Cli.js";
+import type { SetupPrompt } from "../src/setup/Setup.js";
+
+function createTestPrompt(): SetupPrompt {
+  return {
+    selectAuthType: async () => "service-account",
+    showMessage: async () => undefined,
+    inputSpreadsheetUrl: async () => "",
+    inputDefaultSheetName: async () => "",
+    inputServiceAccountCredentialsFile: async () => "",
+    inputConfigPath: async () => "",
+  };
+}
+
+function createTestOutput(): CliDeps["stdout"] {
+  return { write: vi.fn() } as unknown as CliDeps["stdout"];
+}
+
+function createTestErrorOutput(): CliDeps["stderr"] {
+  return { write: vi.fn() } as unknown as CliDeps["stderr"];
+}
 
 describe("CLI setup command", () => {
   it("detects bin symlink execution as the main module", async () => {
@@ -25,13 +46,13 @@ describe("CLI setup command", () => {
 
   it("wires the setup command to prompt and runSetup", async () => {
     const { runCli } = await import("../src/cli/Cli.js");
-    const prompt = { kind: "prompt" };
+    const prompt = createTestPrompt();
     const calls: unknown[] = [];
 
     const exitCode = await runCli(["setup"], {
       cwd: "/project",
-      stdout: { write: vi.fn() },
-      stderr: { write: vi.fn() },
+      stdout: createTestOutput(),
+      stderr: createTestErrorOutput(),
       createSetupPrompt: () => {
         calls.push("createSetupPrompt");
         return prompt;
@@ -53,11 +74,11 @@ describe("CLI setup command", () => {
 
   it("prints usage and returns 1 for unknown commands", async () => {
     const { runCli } = await import("../src/cli/Cli.js");
-    const stderr = { write: vi.fn() };
+    const stderr = createTestErrorOutput();
 
     const exitCode = await runCli(["unknown"], {
       cwd: "/project",
-      stdout: { write: vi.fn() },
+      stdout: createTestOutput(),
       stderr,
       createSetupPrompt: () => {
         throw new Error("should not create prompt");
@@ -73,13 +94,13 @@ describe("CLI setup command", () => {
 
   it("prints setup errors and returns 1", async () => {
     const { runCli } = await import("../src/cli/Cli.js");
-    const stderr = { write: vi.fn() };
+    const stderr = createTestErrorOutput();
 
     const exitCode = await runCli(["setup"], {
       cwd: "/project",
-      stdout: { write: vi.fn() },
+      stdout: createTestOutput(),
       stderr,
-      createSetupPrompt: () => ({}),
+      createSetupPrompt: createTestPrompt,
       runSetup: async () => {
         throw new Error("setup failed");
       },
