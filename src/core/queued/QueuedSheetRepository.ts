@@ -30,7 +30,7 @@ export interface CreateQueuedSheetRepositoryInput<
 
 export interface QueuedRepositoryTransactionOptions {
   /** Stable identity to reuse when the transaction is retried after an ambiguous enqueue result. */
-  transactionId?: string;
+  transactionId: string;
 }
 
 export interface QueuedSheetRepository<T extends Record<string, unknown>> {
@@ -144,7 +144,7 @@ export function createQueuedSheetRepository<
 
   async function insert(
     row: T,
-    options: QueuedRepositoryTransactionOptions = {},
+    options?: QueuedRepositoryTransactionOptions,
   ): Promise<void> {
     const transaction = createTransaction(options);
 
@@ -155,7 +155,7 @@ export function createQueuedSheetRepository<
   async function update(
     id: string,
     updater: (current: T) => T,
-    options: QueuedRepositoryTransactionOptions = {},
+    options?: QueuedRepositoryTransactionOptions,
   ): Promise<T | null> {
     const transaction = createTransaction(options);
     transaction.update(id, updater);
@@ -167,14 +167,14 @@ export function createQueuedSheetRepository<
 
   async function deleteById(
     id: string,
-    options: QueuedRepositoryTransactionOptions = {},
+    options?: QueuedRepositoryTransactionOptions,
   ): Promise<T | null> {
     const transaction = createTransaction(options);
     const current = await transaction.findById(id);
 
     if (current === null) {
       if (
-        options.transactionId !== undefined
+        options?.transactionId !== undefined
         && writeCoordinator.hasMaterializedTransaction(options.transactionId)
       ) {
         const [deletedRow] = await transaction.retry();
@@ -193,14 +193,14 @@ export function createQueuedSheetRepository<
   }
 
   function createTransaction(
-    options: QueuedRepositoryTransactionOptions = {},
+    options?: QueuedRepositoryTransactionOptions,
   ): QueuedRepositoryTransaction<T> {
     return createQueuedRepositoryTransaction({
       findAll,
       key,
       processTaskQueue: (processInput) => adapter.processTaskQueue(processInput),
       writeCoordinator,
-      ...(options.transactionId === undefined
+      ...(options === undefined
         ? {}
         : { transactionId: options.transactionId }),
     });
@@ -208,7 +208,7 @@ export function createQueuedSheetRepository<
 
   async function transaction<TResult>(
     callback: (transaction: QueuedRepositoryTransaction<T>) => TResult | Promise<TResult>,
-    options: QueuedRepositoryTransactionOptions = {},
+    options?: QueuedRepositoryTransactionOptions,
   ): Promise<TResult> {
     const transactionScope = createTransaction(options);
     let result: TResult;
