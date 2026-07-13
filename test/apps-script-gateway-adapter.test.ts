@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { ConflictError, SchemaDriftError } from "../src/core/Errors.js";
+import { ConflictError, SchemaDriftError } from "../src/core/errors/index.js";
 import {
   AppsScriptGatewayAdapter,
   type AppsScriptQueueAdapter,

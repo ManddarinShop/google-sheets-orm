@@ -1,5 +1,5 @@
-import type { DirectSheetAdapter } from "../adapter/Adapter.js";
-import type { ColumnMap } from "./Repository.js";
+import type { DirectSheetAdapter } from "../../adapter/Adapter.js";
+import type { ColumnMap } from "../repository/DirectSheetRepository.js";
 
 /**
  * Direct repository write context used by the legacy synchronous executor.

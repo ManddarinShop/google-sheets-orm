@@ -1,6 +1,6 @@
-import type { SheetCell } from "../adapter/Adapter.js";
-import { ConflictError } from "./Errors.js";
-import type { RepositoryWriteContext } from "./RepositoryWriteContext.js";
+import type { SheetCell } from "../../adapter/Adapter.js";
+import { ConflictError } from "../errors/index.js";
+import type { RepositoryWriteContext } from "./DirectSheetWriteContext.js";
 import {
   assertUniqueKeys,
   findParsedRowByIdOrNull,
@@ -9,8 +9,8 @@ import {
   serializeRowInHeaderOrder,
   serializeRowPreservingUnknownCells,
   type ParsedRepositoryRow,
-} from "./RepositoryRows.js";
-import { assertSchema } from "./Schema.js";
+} from "../repository/RepositoryRowHelpers.js";
+import { assertSchema } from "../schema/index.js";
 
 interface RepositoryUpdateRequest<T extends Record<string, unknown>> {
   id: string;

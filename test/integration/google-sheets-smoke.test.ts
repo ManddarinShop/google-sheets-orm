@@ -10,7 +10,7 @@ import {
   number,
   text,
 } from "../../src/index.js";
-import type { SheetRepository } from "../../src/core/Repository.js";
+import type { SheetRepository } from "../../src/core/repository/index.js";
 import { writeTypedSheetsConfig } from "../../src/setup/ConfigWriter.js";
 
 interface SmokeUser {

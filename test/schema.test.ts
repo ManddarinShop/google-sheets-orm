@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 
-import { text, number, boolean } from "../src/core/Columns.js";
-import { SchemaDriftError } from "../src/core/Errors.js";
-import { assertSchema } from "../src/core/Schema.js";
+import { text, number, boolean } from "../src/core/schema/index.js";
+import { SchemaDriftError } from "../src/core/errors/index.js";
+import { assertSchema } from "../src/core/schema/index.js";
 
 describe("schema drift validation", () => {
   const columns = {
