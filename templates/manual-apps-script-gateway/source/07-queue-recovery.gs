@@ -68,10 +68,10 @@ function reconcileStaleProcessingTransactions_(
         updatedAt: recoveredAt,
       });
 
-      group.tasks.forEach(function(task) {
-        task.status = "done";
-        task.payloadJson = JSON.stringify({ redacted: true });
-        task.updatedAt = recoveredAt;
+      updateQueueTasksInMemory_(queuedTasks, group.tasks, {
+        status: "done",
+        payloadJson: JSON.stringify({ redacted: true }),
+        updatedAt: recoveredAt,
       });
       result.processedTransactions += 1;
       result.processedTasks += group.tasks.length;
@@ -89,9 +89,9 @@ function reconcileStaleProcessingTransactions_(
           updatedAt: recoveredAt,
         });
 
-        group.tasks.forEach(function(task) {
-          task.status = "failed";
-          task.updatedAt = recoveredAt;
+        updateQueueTasksInMemory_(queuedTasks, group.tasks, {
+          status: "failed",
+          updatedAt: recoveredAt,
         });
         result.failedTransactions += 1;
         result.failedTasks += group.tasks.length;
@@ -106,9 +106,9 @@ function reconcileStaleProcessingTransactions_(
         updatedAt: recoveredAt,
       });
 
-      group.tasks.forEach(function(task) {
-        task.status = "pending";
-        task.updatedAt = recoveredAt;
+      updateQueueTasksInMemory_(queuedTasks, group.tasks, {
+        status: "pending",
+        updatedAt: recoveredAt,
       });
       break;
     }
@@ -121,9 +121,9 @@ function reconcileStaleProcessingTransactions_(
       updatedAt: recoveredAt,
     });
 
-    group.tasks.forEach(function(task) {
-      task.status = "failed";
-      task.updatedAt = recoveredAt;
+    updateQueueTasksInMemory_(queuedTasks, group.tasks, {
+      status: "failed",
+      updatedAt: recoveredAt,
     });
     result.failedTransactions += 1;
     result.failedTasks += group.tasks.length;

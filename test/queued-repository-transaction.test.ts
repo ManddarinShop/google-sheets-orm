@@ -223,7 +223,7 @@ describe("queued repository transaction API", () => {
     expect(orders.transaction).toBeTypeOf("function");
   });
 
-  it("rejects a stale entity within its transaction", async () => {
+  it("reuses the transaction snapshot when materializing a loaded entity", async () => {
     const adapter = new FakeQueueAdapter(ordersSnapshot);
     const orders = createOrdersRepository(adapter);
 
@@ -241,9 +241,14 @@ describe("queued repository transaction API", () => {
         });
         tx.save(order);
       }),
-    ).rejects.toThrow("Stale entity");
+    ).resolves.toBeUndefined();
 
-    expect(adapter.enqueuedTasks).toEqual([]);
+    expect(adapter.enqueuedTasks).toHaveLength(1);
+    expect(adapter.enqueuedTasks[0]?.tasks[0]).toMatchObject({
+      operation: "update",
+      keyValue: "o1",
+      expectedVersion: 3,
+    });
   });
 
   it("applies pending transaction mutations to reads inside the transaction", async () => {

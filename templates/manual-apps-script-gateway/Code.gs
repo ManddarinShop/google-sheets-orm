@@ -1909,22 +1909,26 @@ function processTaskQueue_(spreadsheet, request) {
     const group = pendingGroups[groupIndex];
 
     if (hasReachedQueueAttemptLimit_(group.tasks)) {
-      markQueueTasks_(queueSheet, group.tasks, {
+      const updates = {
         status: "failed",
         lastErrorCode: "retry_limit_exceeded",
         lastErrorMessage:
           "Transaction exceeded the maximum queue processing attempts",
         updatedAt: new Date().toISOString(),
-      });
+      };
+      markQueueTasks_(queueSheet, group.tasks, updates);
+      updateQueueTasksInMemory_(queuedTasks, group.tasks, updates);
       result.failedTransactions += 1;
       result.failedTasks += group.tasks.length;
       continue;
     }
 
-    markQueueTasks_(queueSheet, group.tasks, {
+    const processingUpdates = {
       status: "processing",
       updatedAt: processingStartedAt,
-    });
+    };
+    markQueueTasks_(queueSheet, group.tasks, processingUpdates);
+    updateQueueTasksInMemory_(queuedTasks, group.tasks, processingUpdates);
 
     try {
       applyQueueTransaction_(spreadsheet, group.tasks);
@@ -1939,12 +1943,14 @@ function processTaskQueue_(spreadsheet, request) {
         break;
       }
 
-      markQueueTasks_(queueSheet, group.tasks, {
+      const failedUpdates = {
         status: "failed",
         lastErrorCode: code,
         lastErrorMessage: message,
         updatedAt: new Date().toISOString(),
-      });
+      };
+      markQueueTasks_(queueSheet, group.tasks, failedUpdates);
+      updateQueueTasksInMemory_(queuedTasks, group.tasks, failedUpdates);
 
       result.failedTransactions += 1;
       result.failedTasks += group.tasks.length;
@@ -1956,13 +1962,15 @@ function processTaskQueue_(spreadsheet, request) {
       // The canonical write already happened, so the next processor run must
       // reconcile the postcondition instead of treating it as a normal apply
       // failure and permanently dead-lettering the transaction.
-      markQueueTasks_(queueSheet, group.tasks, {
+      const doneUpdates = {
         status: "done",
         payloadJson: JSON.stringify({ redacted: true }),
         lastErrorCode: "",
         lastErrorMessage: "",
         updatedAt: new Date().toISOString(),
-      });
+      };
+      markQueueTasks_(queueSheet, group.tasks, doneUpdates);
+      updateQueueTasksInMemory_(queuedTasks, group.tasks, doneUpdates);
     } catch (error) {
       recordQueueCompletionFailure_(queueSheet, group.tasks, error);
       // Canonical data is already written but the terminal queue state is
@@ -1974,11 +1982,14 @@ function processTaskQueue_(spreadsheet, request) {
     result.processedTasks += group.tasks.length;
   }
 
-  const remainingTasks = readQueuedTasks_(queueSheet);
-  result.remainingPendingTasks = remainingTasks.filter(function(task) {
+  // The document lock prevents another enqueue/process request from changing
+  // the queue while this invocation is running. Keep the in-memory task state
+  // updated as status writes succeed instead of scanning the append-only queue
+  // a second time just to build the response summary.
+  result.remainingPendingTasks = queuedTasks.filter(function(task) {
     return task.status === "pending";
   }).length;
-  const recoveryPendingTasks = remainingTasks.filter(function(task) {
+  const recoveryPendingTasks = queuedTasks.filter(function(task) {
     return task.status === "processing"
       || (
         task.status === "done"
@@ -1994,6 +2005,24 @@ function processTaskQueue_(spreadsheet, request) {
   }
 
   return result;
+}
+
+function updateQueueTasksInMemory_(allTasks, updatedTasks, updates) {
+  const updatedTaskIds = Object.create(null);
+
+  updatedTasks.forEach(function(task) {
+    updatedTaskIds[task.taskId] = true;
+  });
+
+  allTasks.forEach(function(task) {
+    if (!updatedTaskIds[task.taskId]) {
+      return;
+    }
+
+    Object.keys(updates).forEach(function(field) {
+      task[field] = updates[field];
+    });
+  });
 }
 
 function recordQueueCompletionFailure_(queueSheet, tasks, error) {
@@ -2151,10 +2180,10 @@ function reconcileStaleProcessingTransactions_(
         updatedAt: recoveredAt,
       });
 
-      group.tasks.forEach(function(task) {
-        task.status = "done";
-        task.payloadJson = JSON.stringify({ redacted: true });
-        task.updatedAt = recoveredAt;
+      updateQueueTasksInMemory_(queuedTasks, group.tasks, {
+        status: "done",
+        payloadJson: JSON.stringify({ redacted: true }),
+        updatedAt: recoveredAt,
       });
       result.processedTransactions += 1;
       result.processedTasks += group.tasks.length;
@@ -2172,9 +2201,9 @@ function reconcileStaleProcessingTransactions_(
           updatedAt: recoveredAt,
         });
 
-        group.tasks.forEach(function(task) {
-          task.status = "failed";
-          task.updatedAt = recoveredAt;
+        updateQueueTasksInMemory_(queuedTasks, group.tasks, {
+          status: "failed",
+          updatedAt: recoveredAt,
         });
         result.failedTransactions += 1;
         result.failedTasks += group.tasks.length;
@@ -2189,9 +2218,9 @@ function reconcileStaleProcessingTransactions_(
         updatedAt: recoveredAt,
       });
 
-      group.tasks.forEach(function(task) {
-        task.status = "pending";
-        task.updatedAt = recoveredAt;
+      updateQueueTasksInMemory_(queuedTasks, group.tasks, {
+        status: "pending",
+        updatedAt: recoveredAt,
       });
       break;
     }
@@ -2204,9 +2233,9 @@ function reconcileStaleProcessingTransactions_(
       updatedAt: recoveredAt,
     });
 
-    group.tasks.forEach(function(task) {
-      task.status = "failed";
-      task.updatedAt = recoveredAt;
+    updateQueueTasksInMemory_(queuedTasks, group.tasks, {
+      status: "failed",
+      updatedAt: recoveredAt,
     });
     result.failedTransactions += 1;
     result.failedTasks += group.tasks.length;

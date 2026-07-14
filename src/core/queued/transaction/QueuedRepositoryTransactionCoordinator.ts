@@ -7,6 +7,7 @@ import {
   type RepositoryQueueBatch,
   type RepositoryWriteTransactionOperation,
   type RepositoryWriteTransactionResult,
+  type RepositorySnapshot,
 } from "../writer/QueuedSheetWriteExecutor.js";
 
 const DEFAULT_RETAINED_BATCH_TTL_MS = 5 * 60 * 1000;
@@ -23,9 +24,11 @@ export interface QueuedRepositoryTransactionCoordinatorOptions {
   now?(): number;
 }
 
-export interface RepositoryQueueWriteTransactionOptions {
+export interface RepositoryQueueWriteTransactionOptions<T extends object> {
   /** Stable identity to reuse when an enqueue response is ambiguous. */
   transactionId: string;
+  /** Reuses the snapshot already read inside the transaction callback. */
+  intentSnapshot?: RepositorySnapshot<T>;
 }
 
 export interface RepositoryQueueWriteCoordinator<
@@ -41,7 +44,7 @@ export interface RepositoryQueueWriteCoordinator<
   ): Promise<Array<RepositoryWriteTransactionResult<T>>>;
   writeTransaction(
     operations: Array<RepositoryWriteTransactionOperation<T>>,
-    options?: RepositoryQueueWriteTransactionOptions,
+    options?: RepositoryQueueWriteTransactionOptions<T>,
   ): Promise<Array<RepositoryWriteTransactionResult<T>>>;
 }
 
@@ -110,6 +113,7 @@ export function createQueuedRepositoryTransactionCoordinator<
           input,
           operations,
           options?.transactionId,
+          options?.intentSnapshot,
           retainedBatches,
           retention,
         );
@@ -200,6 +204,7 @@ async function writeRepositoryTransaction<T extends object>(
   input: CreateQueuedRepositoryTransactionCoordinatorInput<T>,
   operations: Array<RepositoryWriteTransactionOperation<T>>,
   transactionId: string | undefined,
+  intentSnapshot: RepositorySnapshot<T> | undefined,
   retainedBatches: Map<string, RetainedQueueWriteBatch<T>>,
   retention: RetentionPolicy,
 ): Promise<Array<RepositoryWriteTransactionResult<T>>> {
@@ -223,7 +228,10 @@ async function writeRepositoryTransaction<T extends object>(
   const materialized = await input.executor.materializeQueueBatch(
     operations,
     cached === undefined
-      ? { transactionId: effectiveTransactionId }
+      ? {
+          transactionId: effectiveTransactionId,
+          ...(intentSnapshot === undefined ? {} : { intentSnapshot }),
+        }
       : {
           transactionId: effectiveTransactionId,
           intentSnapshot: cached.intentSnapshot,
