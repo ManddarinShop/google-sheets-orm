@@ -110,6 +110,7 @@ The gateway supports these queue/system operations:
 - `enqueueTasks`
 - `processTaskQueue`
 - `readSheet`
+- `readCanonicalSheet`
 
 The gateway still accepts these legacy direct-write operations for existing
 `createRepositoryFromConfig()` Apps Script users while repository writes move to
@@ -130,14 +131,23 @@ the task queue:
 header row is empty while holding the document lock. `initializeSystemSheets`
 creates the visible projection sheet plus the hidden/protected canonical data
 sheet and hidden/protected task queue sheet used by the queued write model.
+When upgrading a pre-fingerprint queue, the template appends the
+`taskFingerprint` column and backfills it while holding the same document lock.
+Legacy completed rows whose payload was already redacted retain a task-id-only
+replay marker because their original payload cannot be reconstructed.
 Apps Script sheet protection is best-effort and spreadsheet owners can still
 edit protected sheets, so queued writes must still validate internal rows.
 `enqueueTasks` appends one transaction worth of caller-supplied write tasks to
 the hidden task queue and assigns monotonic sequence values while holding the
 document lock; it does not process or materialize queued tasks.
 `processTaskQueue` processes a bounded number of pending transaction groups
-into hidden canonical sheets and marks each group `done` or `failed`; projection
-sync and stale `processing` recovery are still future work.
+into hidden canonical sheets and marks each group `done` or `failed`. Queued
+repository reads use `readCanonicalSheet` after processing; the visible
+projection is not automatically synchronized by the current processor.
+Projection refresh remains future work. A `processing` claim that has not been
+updated for the gateway's five-minute processing lease is returned to `pending`
+on the next `processTaskQueue` call, and its attempt count is incremented when
+processing starts again.
 `writeHeader` refuses to overwrite a non-empty header row. `appendRows` writes a
 burst of rows through one gateway request so repository inserts can avoid
 per-row Apps Script calls. `deleteRows` deletes data rows from bottom to top in

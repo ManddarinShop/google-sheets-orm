@@ -36,8 +36,12 @@ export interface SheetRowSnapshot {
   cells: SheetCell[];
 }
 
-export interface SheetAdapter {
+export interface SheetReader {
   readSheet(sheetName: string): Promise<SheetSnapshot>;
+}
+
+// `SheetAdapter` keeps the legacy direct read/write contract for compatibility.
+export interface SheetAdapter extends SheetReader {
   appendRow(sheetName: string, row: SheetCell[]): Promise<void>;
   updateRow(sheetName: string, rowNumber: number, row: SheetCell[]): Promise<void>;
   deleteRow(sheetName: string, rowNumber: number): Promise<void>;
@@ -46,6 +50,12 @@ export interface SheetAdapter {
   initializeSheet?(sheetName: string, headers: string[]): Promise<void>;
 }
 ```
+
+`SheetReader` is the common read-only boundary used by queued adapters.
+`SheetAdapter` is retained as the legacy direct adapter name, and
+`DirectSheetAdapter` is the explicit direct-repository contract. A queued
+adapter should implement `AppsScriptQueueAdapter`, not `SheetAdapter`, because
+queued writes are submitted as tasks rather than direct row mutations.
 
 The adapter owns authentication, Google API calls, range mapping, append, row
 update mechanics, and optional sheet initialization.
@@ -126,6 +136,12 @@ The update flow:
 
 This is stale-write protection, not a full database transaction.
 
+The queued repository provides an entity-oriented transaction callback for
+grouping one enqueue batch. Queue materialization, task identity, and retry
+retention are internal writer concerns; queue draining is exposed through a
+separate processor API. This is not a database transaction and does not provide
+rollback or atomicity across arbitrary sheets.
+
 `deleteById(id)` follows the same safety model. It returns the deleted row when
 the key exists, returns `null` when no row matches the key, and throws
 `ConflictError` when the target row moved or its `_version` changed before the
@@ -143,7 +159,7 @@ This project currently does not support:
 - relations
 - SQL execution
 - migrations
-- transactions
+- database-level transactions or rollback
 - multi-row atomic updates
 - cache or request collapse
 - retry/backoff
@@ -155,6 +171,6 @@ This project currently does not support:
 The long-term direction is a lightweight SQL layer backed by Google Sheets,
 closer to an online H2-like database experience for MVPs and internal tools.
 
-Concurrency control and transaction semantics are later-stage work. The first
-priority is a typed table/storage model that can safely support repository
-operations and eventually a small SQL subset.
+Database-level concurrency and transaction semantics are later-stage work. The
+first priority is a typed table/storage model that can safely support
+repository operations and eventually a small SQL subset.

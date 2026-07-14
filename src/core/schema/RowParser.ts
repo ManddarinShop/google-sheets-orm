@@ -1,9 +1,9 @@
-import { SheetCell } from "../../adapter/Adapter.js";
+import type { SheetCell } from "../../adapter/shared/SheetAdapter.js";
 import { Column } from "./Columns.js";
 
 export type ColumnMap = Record<string, Column<any>>;
 
-export interface ParseRowInput<T extends Record<string, unknown>> {
+export interface ParseRowInput<T extends object> {
   headers: string[];
   cells: SheetCell[];
   columns: {
@@ -11,7 +11,7 @@ export interface ParseRowInput<T extends Record<string, unknown>> {
   };
 }
 
-export function parseRow<T extends Record<string, unknown>>(
+export function parseRow<T extends object>(
   input: ParseRowInput<T>,
 ): T {
   const { headers, cells, columns } = input;

@@ -1,6 +1,10 @@
-import type { EnqueueTaskInput, EnqueueTasksInput } from "../../adapter/Adapter.js";
+import type {
+  EnqueueTaskInput,
+  EnqueueTasksInput,
+} from "../../../adapter/queued/QueuedSheetAdapter.js";
+import { readRepositoryProperty } from "../../shared/RepositoryRowHelpers.js";
 
-export type RepositoryQueuedWriteOperation<T extends Record<string, unknown>> =
+export type RepositoryQueuedWriteOperation<T extends object> =
   | {
       kind: "insert";
       row: T;
@@ -19,14 +23,14 @@ export type RepositoryQueuedWriteOperation<T extends Record<string, unknown>> =
     };
 
 export interface RepositoryQueuedWriteTransaction<
-  T extends Record<string, unknown>,
+  T extends object,
 > {
   id: string;
   operations: Array<RepositoryQueuedWriteOperation<T>>;
 }
 
 export interface CreateRepositoryQueueTasksInput<
-  T extends Record<string, unknown>,
+  T extends object,
 > {
   sheetName: string;
   key: keyof T & string;
@@ -44,7 +48,7 @@ export interface CreateRepositoryQueueTasksInput<
  * caller must pass the exact operations that belong to the transaction.
  */
 export function createRepositoryQueueTasks<
-  T extends Record<string, unknown>,
+  T extends object,
 >(input: CreateRepositoryQueueTasksInput<T>): EnqueueTasksInput {
   const { sheetName, key, transaction, createTaskId } = input;
 
@@ -68,7 +72,7 @@ export function createRepositoryQueueTasks<
   };
 }
 
-function createQueueTask<T extends Record<string, unknown>>(
+function createQueueTask<T extends object>(
   base: {
     taskId: string;
     transactionId: string;
@@ -136,9 +140,9 @@ function createQueueTask<T extends Record<string, unknown>>(
   }
 }
 
-function readOperationKeyValue<T extends Record<string, unknown>>(
+function readOperationKeyValue<T extends object>(
   operation: RepositoryQueuedWriteOperation<T>,
-  key: keyof T & string,
+  key: string,
 ): string {
   if (operation.kind === "delete") {
     return operation.id;
@@ -148,10 +152,10 @@ function readOperationKeyValue<T extends Record<string, unknown>>(
     return operation.id;
   }
 
-  return String(operation.row[key]);
+  return String(readRepositoryProperty(operation.row, key));
 }
 
-function assertAdvancedVersion<T extends Record<string, unknown>>(
+function assertAdvancedVersion<T extends object>(
   expectedVersion: number,
   rowToWrite: T,
 ): void {
@@ -159,7 +163,7 @@ function assertAdvancedVersion<T extends Record<string, unknown>>(
     throw new Error("Queued update expectedVersion must be finite");
   }
 
-  const versionToWrite = rowToWrite["_version"];
+  const versionToWrite = readRepositoryProperty(rowToWrite, "_version");
 
   if (
     typeof versionToWrite !== "number" ||
@@ -170,34 +174,36 @@ function assertAdvancedVersion<T extends Record<string, unknown>>(
   }
 }
 
-function assertFiniteVersion<T extends Record<string, unknown>>(
+function assertFiniteVersion<T extends object>(
   row: T,
   label: string,
 ): void {
-  if (typeof row["_version"] !== "number" || !Number.isFinite(row["_version"])) {
+  const version = readRepositoryProperty(row, "_version");
+
+  if (typeof version !== "number" || !Number.isFinite(version)) {
     throw new Error(`${label} must include a finite numeric _version`);
   }
 }
 
-function assertExpectedVersion<T extends Record<string, unknown>>(
+function assertExpectedVersion<T extends object>(
   row: T,
   expectedVersion: number,
   label: string,
 ): void {
   assertFiniteVersion(row, label);
 
-  if (row["_version"] !== expectedVersion) {
+  if (readRepositoryProperty(row, "_version") !== expectedVersion) {
     throw new Error(`${label} _version must match expectedVersion`);
   }
 }
 
-function assertRowKeyMatchesId<T extends Record<string, unknown>>(
+function assertRowKeyMatchesId<T extends object>(
   row: T,
   id: string,
-  key: keyof T & string,
+  key: string,
   label: string,
 ): void {
-  if (String(row[key]) !== id) {
+  if (String(readRepositoryProperty(row, key)) !== id) {
     throw new Error(`${label} key must match id`);
   }
 }

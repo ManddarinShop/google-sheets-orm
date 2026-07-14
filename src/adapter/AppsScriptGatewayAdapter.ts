@@ -1,19 +1,23 @@
 import type {
   AppendRowsInput,
-  AppsScriptQueueAdapter,
   DeleteRowsByKeyInput,
   DeleteRowsByKeyResult,
   DirectSheetAdapter,
+  UpdateRowsByKeyInput,
+  UpdateRowsByKeyResult,
+} from "./direct/DirectSheetAdapter.js";
+import type {
+  AppsScriptQueueAdapter,
   EnqueueTasksInput,
   EnqueueTasksResult,
   InitializeSystemSheetsResult,
   ProcessTaskQueueInput,
   ProcessTaskQueueResult,
+} from "./queued/QueuedSheetAdapter.js";
+import type {
   SheetCell,
   SheetSnapshot,
-  UpdateRowsByKeyInput,
-  UpdateRowsByKeyResult,
-} from "./Adapter.js";
+} from "./shared/SheetAdapter.js";
 import { ConflictError, SchemaDriftError } from "../core/errors/index.js";
 import type {
   AppsScriptGatewayAuthenticatedRequest,
@@ -47,6 +51,21 @@ export class AppsScriptGatewayAdapter
     const response = requireReadSheetResponse(
       await this.request({
         operation: "readSheet",
+        sheetName,
+      }),
+    );
+
+    return {
+      headers: response.headers,
+      rows: response.rows,
+    };
+  }
+
+  /** Reads canonical repository state so queued writes are visible after processing. */
+  async readCanonicalSheet(sheetName: string): Promise<SheetSnapshot> {
+    const response = requireReadSheetResponse(
+      await this.request({
+        operation: "readCanonicalSheet",
         sheetName,
       }),
     );

@@ -73,6 +73,7 @@ describe("repository sheet initialization", () => {
       },
       async appendRow() {},
       async updateRow() {},
+      async deleteRow() {},
       async ensureSheet() {
         throw new Error("ensureSheet should not be called");
       },
@@ -129,6 +130,7 @@ describe("repository sheet initialization", () => {
       },
       async appendRow() {},
       async updateRow() {},
+      async deleteRow() {},
       async ensureSheet() {
         throw new Error("ensureSheet should not be called");
       },

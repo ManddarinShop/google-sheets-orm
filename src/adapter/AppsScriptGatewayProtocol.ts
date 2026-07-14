@@ -1,13 +1,17 @@
 import type {
   DeleteRowsByKeyResult,
+  UpdateRowsByKeyResult,
+} from "./direct/DirectSheetAdapter.js";
+import type {
   EnqueueTaskInput,
   EnqueueTasksResult,
   InitializeSystemSheetsResult,
   ProcessTaskQueueResult,
+} from "./queued/QueuedSheetAdapter.js";
+import type {
   SheetCell,
   SheetSnapshot,
-  UpdateRowsByKeyResult,
-} from "./Adapter.js";
+} from "./shared/SheetAdapter.js";
 
 export type AppsScriptGatewayRequest =
   | { operation: "ping" }
@@ -22,6 +26,7 @@ export type AppsScriptGatewayRequest =
       operation: "processTaskQueue";
       maxTransactions?: number;
     }
+  | { operation: "readCanonicalSheet"; sheetName: string }
   | { operation: "writeHeader"; sheetName: string; headers: string[] }
   | { operation: "readSheet"; sheetName: string }
   | { operation: "appendRow"; sheetName: string; row: SheetCell[] }
