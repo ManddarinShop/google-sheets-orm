@@ -15,6 +15,10 @@ const TYPED_SHEETS_TASK_QUEUE_SHEET_NAME = "_typed_sheets_task_queue";
 // A processing claim older than this lease is therefore safe to return to the
 // pending state on the next processor invocation.
 const TYPED_SHEETS_PROCESSING_LEASE_MS = 5 * 60 * 1000;
+// The processing lease also acts as the retry backoff. Once a transaction has
+// exhausted this many claims, repeated timeouts must not block the queue
+// forever.
+const TYPED_SHEETS_MAX_QUEUE_ATTEMPTS = 3;
 const TYPED_SHEETS_TASK_QUEUE_HEADERS = [
   "taskId",
   "transactionId",
@@ -788,6 +792,7 @@ function processTaskQueue_(spreadsheet, request) {
   const options = requireProcessTaskQueueOptions_(request);
   const queueSheet = ensureTaskQueueSheet_(spreadsheet);
   const queuedTasks = readQueuedTasks_(queueSheet);
+  retryCompletedTaskRedactions_(queueSheet, queuedTasks);
   const now = new Date();
   const result = {
     ok: true,
@@ -822,6 +827,19 @@ function processTaskQueue_(spreadsheet, request) {
   const processingStartedAt = now.toISOString();
 
   pendingGroups.forEach(function(group) {
+    if (hasReachedQueueAttemptLimit_(group.tasks)) {
+      markQueueTasks_(queueSheet, group.tasks, {
+        status: "failed",
+        lastErrorCode: "retry_limit_exceeded",
+        lastErrorMessage:
+          "Transaction exceeded the maximum queue processing attempts",
+        updatedAt: new Date().toISOString(),
+      });
+      result.failedTransactions += 1;
+      result.failedTasks += group.tasks.length;
+      return;
+    }
+
     markQueueTasks_(queueSheet, group.tasks, {
       status: "processing",
       updatedAt: processingStartedAt,
@@ -832,6 +850,11 @@ function processTaskQueue_(spreadsheet, request) {
     } catch (error) {
       const code = error && error.code ? error.code : "internal_error";
       const message = error && error.message ? error.message : String(error);
+
+      if (error && error.canonicalWriteStarted === true) {
+        recordCanonicalWriteFailure_(queueSheet, group.tasks, error);
+        return;
+      }
 
       markQueueTasks_(queueSheet, group.tasks, {
         status: "failed",
@@ -891,6 +914,63 @@ function recordQueueCompletionFailure_(queueSheet, tasks, error) {
     // The queue write itself may be the failing operation. Leaving the claim
     // untouched is still safer than marking canonical data as failed.
   }
+}
+
+function recordCanonicalWriteFailure_(queueSheet, tasks, error) {
+  const message = error && error.message ? error.message : String(error);
+
+  try {
+    // At least one canonical write was attempted. Keep the transaction in
+    // processing so the next lease expiry can inspect every affected sheet
+    // and distinguish unapplied work from a partial canonical apply.
+    markQueueTasks_(queueSheet, tasks, {
+      lastErrorCode: "canonical_write_unconfirmed",
+      lastErrorMessage:
+        "Canonical write outcome is unconfirmed; recovery is required: "
+        + message,
+      updatedAt: new Date().toISOString(),
+    });
+  } catch (diagnosticError) {
+    // If the queue diagnostic also fails, the original processing claim and
+    // timestamp remain available for lease-based recovery.
+  }
+}
+
+function retryCompletedTaskRedactions_(queueSheet, tasks) {
+  const redactedPayload = JSON.stringify({ redacted: true });
+
+  tasks.forEach(function(task) {
+    if (task.status !== "done" || isRedactedTaskPayload_(task.payloadJson)) {
+      return;
+    }
+
+    try {
+      // Status and canonical data may already be durable even when the
+      // original completion call lost its payload redaction write. Retry the
+      // sensitive-data cleanup on every later processor invocation.
+      markQueueTasks_(queueSheet, [task], {
+        payloadJson: redactedPayload,
+        lastErrorCode: "",
+        lastErrorMessage: "",
+        updatedAt: new Date().toISOString(),
+      });
+      task.payloadJson = redactedPayload;
+      task.lastErrorCode = "";
+      task.lastErrorMessage = "";
+    } catch (error) {
+      try {
+        markQueueTasks_(queueSheet, [task], {
+          lastErrorCode: "redaction_unconfirmed",
+          lastErrorMessage:
+            "Completed task payload redaction failed: "
+            + (error && error.message ? error.message : String(error)),
+          updatedAt: new Date().toISOString(),
+        });
+      } catch (diagnosticError) {
+        // Preserve the completed task and retry the cleanup on the next run.
+      }
+    }
+  });
 }
 
 /**
@@ -978,6 +1058,25 @@ function reconcileStaleProcessingTransactions_(
     }
 
     if (reconciliation.status === "pending") {
+      if (hasReachedQueueAttemptLimit_(group.tasks)) {
+        markQueueTasks_(queueSheet, group.tasks, {
+          status: "failed",
+          lastErrorCode: "retry_limit_exceeded",
+          lastErrorMessage:
+            "Transaction exceeded the maximum queue processing attempts",
+          updatedAt: recoveredAt,
+        });
+
+        group.tasks.forEach(function(task) {
+          task.status = "failed";
+          task.updatedAt = recoveredAt;
+        });
+        result.failedTransactions += 1;
+        result.failedTasks += group.tasks.length;
+        result.recoveredTransactions += 1;
+        continue;
+      }
+
       markQueueTasks_(queueSheet, group.tasks, {
         status: "pending",
         lastErrorCode: "stale_processing_recovered",
@@ -1023,6 +1122,12 @@ function isStaleProcessingTask_(task, nowMs) {
     || nowMs - updatedAtMs >= TYPED_SHEETS_PROCESSING_LEASE_MS;
 }
 
+function hasReachedQueueAttemptLimit_(tasks) {
+  return tasks.some(function(task) {
+    return task.attempts >= TYPED_SHEETS_MAX_QUEUE_ATTEMPTS;
+  });
+}
+
 function readQueuedTasks_(queueSheet) {
   const lastRow = queueSheet.getLastRow();
 
@@ -1062,6 +1167,8 @@ function parseQueuedTaskRow_(row, rowNumber) {
     expectedVersion: row[9] === "" || row[9] === null ? null : Number(row[9]),
     payloadJson: String(row[10] || ""),
     attempts: Number(row[11] || 0),
+    lastErrorCode: String(row[12] || ""),
+    lastErrorMessage: String(row[13] || ""),
     updatedAt: String(row[15] || ""),
     taskFingerprint: String(row[16] || ""),
   };
@@ -1631,8 +1738,21 @@ function applyQueueTransaction_(spreadsheet, tasks) {
   });
 
   affectedSheetNames.sort().forEach(function(sheetName) {
-    writeCanonicalTable_(tables[sheetName]);
+    try {
+      writeCanonicalTable_(tables[sheetName]);
+    } catch (error) {
+      throw markCanonicalWriteStarted_(error);
+    }
   });
+}
+
+function markCanonicalWriteStarted_(error) {
+  const markedError = error && typeof error === "object"
+    ? error
+    : gatewayError_("internal_error", String(error));
+
+  markedError.canonicalWriteStarted = true;
+  return markedError;
 }
 
 function readCanonicalTableForTask_(spreadsheet, task) {

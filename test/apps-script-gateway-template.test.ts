@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 interface GatewayTemplate {
   TYPED_SHEETS_TASK_QUEUE_HEADERS: string[];
   TYPED_SHEETS_TASK_QUEUE_SHEET_NAME: string;
+  TYPED_SHEETS_MAX_QUEUE_ATTEMPTS: number;
   createCanonicalSheetName_(
     logicalSheetName: string,
     hash: string,
@@ -283,6 +284,7 @@ describe("manual Apps Script gateway template system sheets", () => {
         "return {",
         "  TYPED_SHEETS_TASK_QUEUE_HEADERS,",
         "  TYPED_SHEETS_TASK_QUEUE_SHEET_NAME,",
+        "  TYPED_SHEETS_MAX_QUEUE_ATTEMPTS,",
         "  createCanonicalSheetName_,",
         "  createShortHash_,",
         "  getGatewayUrl_,",
@@ -1376,6 +1378,179 @@ describe("manual Apps Script gateway template system sheets", () => {
     expect(queue.values[1]?.[4]).toBe("done");
   });
 
+  it("retries payload redaction after completion status was recorded", async () => {
+    const queueSheetName = "_typed_sheets_task_queue";
+    let redactionFailureInjected = false;
+    const spreadsheet = new FakeSpreadsheet({
+      failSetValues: ({ sheetName, column, values }) => {
+        if (
+          !redactionFailureInjected
+          && sheetName === queueSheetName
+          && column === 11
+          && values[0]?.[0] === JSON.stringify({ redacted: true })
+        ) {
+          redactionFailureInjected = true;
+          return new Error("queue payload redaction lost");
+        }
+
+        return null;
+      },
+    });
+    const gateway = await loadGatewayTemplate();
+    const systemSheets = gateway.initializeSystemSheets_(spreadsheet, {
+      sheetName: "Users",
+      headers: ["id", "_version"],
+    });
+    const queue = spreadsheet.sheets.get(queueSheetName);
+
+    gateway.enqueueTasks_(spreadsheet, {
+      tasks: [
+        {
+          taskId: "task-redaction-retry",
+          transactionId: "tx-redaction-retry",
+          transactionIndex: 0,
+          operation: "insert",
+          sheetName: "Users",
+          keyHeader: "id",
+          keyValue: "u1",
+          expectedVersion: null,
+          payloadJson: JSON.stringify({ row: { id: "u1", _version: 1 } }),
+        },
+      ],
+    });
+
+    if (queue === undefined) {
+      throw new Error("Expected queue sheet");
+    }
+
+    expect(gateway.processTaskQueue_(spreadsheet, {})).toMatchObject({
+      processedTransactions: 0,
+      failedTransactions: 0,
+      processedTasks: 0,
+      failedTasks: 0,
+    });
+    expect(queue.values[1]?.[4]).toBe("done");
+    expect(queue.values[1]?.[10]).toBe(
+      JSON.stringify({ row: { id: "u1", _version: 1 } }),
+    );
+    expect(queue.values[1]?.[12]).toBe("completion_status_unconfirmed");
+
+    expect(gateway.processTaskQueue_(spreadsheet, {})).toMatchObject({
+      processedTransactions: 0,
+      failedTransactions: 0,
+      processedTasks: 0,
+      failedTasks: 0,
+    });
+    expect(queue.values[1]?.[10]).toBe(
+      JSON.stringify({ redacted: true }),
+    );
+  });
+
+  it("keeps a cross-sheet partial apply recoverable until postconditions are checked", async () => {
+    let failCanonicalWrite = false;
+    let secondCanonicalSheetName = "";
+    const spreadsheet = new FakeSpreadsheet({
+      failSetValues: ({ sheetName }) => {
+        if (failCanonicalWrite && sheetName === secondCanonicalSheetName) {
+          return new Error("second canonical write failed");
+        }
+
+        return null;
+      },
+    });
+    const gateway = await loadGatewayTemplate();
+    const firstSheets = gateway.initializeSystemSheets_(spreadsheet, {
+      sheetName: "AUsers",
+      headers: ["id", "_version"],
+    });
+    const secondSheets = gateway.initializeSystemSheets_(spreadsheet, {
+      sheetName: "ZOrders",
+      headers: ["id", "_version"],
+    });
+    secondCanonicalSheetName = secondSheets.canonicalSheetName;
+    const queue = spreadsheet.sheets.get(
+      gateway.TYPED_SHEETS_TASK_QUEUE_SHEET_NAME,
+    );
+
+    gateway.enqueueTasks_(spreadsheet, {
+      tasks: [
+        {
+          taskId: "task-cross-sheet-users",
+          transactionId: "tx-cross-sheet-partial",
+          transactionIndex: 0,
+          operation: "insert",
+          sheetName: "AUsers",
+          keyHeader: "id",
+          keyValue: "u1",
+          expectedVersion: null,
+          payloadJson: JSON.stringify({ row: { id: "u1", _version: 1 } }),
+        },
+        {
+          taskId: "task-cross-sheet-order",
+          transactionId: "tx-cross-sheet-partial",
+          transactionIndex: 1,
+          operation: "insert",
+          sheetName: "ZOrders",
+          keyHeader: "id",
+          keyValue: "o1",
+          expectedVersion: null,
+          payloadJson: JSON.stringify({ row: { id: "o1", _version: 1 } }),
+        },
+      ],
+    });
+
+    if (queue === undefined) {
+      throw new Error("Expected queue sheet");
+    }
+
+    failCanonicalWrite = true;
+    expect(gateway.processTaskQueue_(spreadsheet, {})).toMatchObject({
+      processedTransactions: 0,
+      failedTransactions: 0,
+      processedTasks: 0,
+      failedTasks: 0,
+      remainingPendingTasks: 0,
+    });
+    expect(
+      spreadsheet.sheets.get(firstSheets.canonicalSheetName)?.values,
+    ).toEqual([
+      ["id", "_version"],
+      ["u1", 1],
+    ]);
+    expect(
+      spreadsheet.sheets.get(secondSheets.canonicalSheetName)?.values,
+    ).toEqual([["id", "_version"]]);
+    expect(queue.values.slice(1).map((row) => row[4])).toEqual([
+      "processing",
+      "processing",
+    ]);
+    expect(queue.values.slice(1).map((row) => row[12])).toEqual([
+      "canonical_write_unconfirmed",
+      "canonical_write_unconfirmed",
+    ]);
+
+    failCanonicalWrite = false;
+    queue.values.slice(1).forEach((row) => {
+      row[15] = "2020-01-01T00:00:00.000Z";
+    });
+
+    expect(gateway.processTaskQueue_(spreadsheet, {})).toMatchObject({
+      processedTransactions: 0,
+      failedTransactions: 1,
+      processedTasks: 0,
+      failedTasks: 2,
+      remainingPendingTasks: 0,
+    });
+    expect(queue.values.slice(1).map((row) => row[4])).toEqual([
+      "failed",
+      "failed",
+    ]);
+    expect(queue.values.slice(1).map((row) => row[12])).toEqual([
+      "partial_apply",
+      "partial_apply",
+    ]);
+  });
+
   it("rejects queue writes when a canonical modeled header drifts", async () => {
     const gateway = await loadGatewayTemplate();
     const spreadsheet = new FakeSpreadsheet();
@@ -2135,6 +2310,55 @@ describe("manual Apps Script gateway template system sheets", () => {
     ]);
     expect(queue.values[1]![4]).toBe("done");
     expect(queue.values[1]![11]).toBe(2);
+  });
+
+  it("dead-letters an unapplied stale transaction after the retry limit", async () => {
+    const gateway = await loadGatewayTemplate();
+    const spreadsheet = new FakeSpreadsheet();
+    const systemSheets = gateway.initializeSystemSheets_(spreadsheet, {
+      sheetName: "Users",
+      headers: ["id", "_version"],
+    });
+    const queue = spreadsheet.sheets.get(
+      gateway.TYPED_SHEETS_TASK_QUEUE_SHEET_NAME,
+    );
+
+    gateway.enqueueTasks_(spreadsheet, {
+      tasks: [
+        {
+          taskId: "task-retry-limit",
+          transactionId: "tx-retry-limit",
+          transactionIndex: 0,
+          operation: "insert",
+          sheetName: "Users",
+          keyHeader: "id",
+          keyValue: "u1",
+          expectedVersion: null,
+          payloadJson: JSON.stringify({ row: { id: "u1", _version: 1 } }),
+        },
+      ],
+    });
+
+    if (queue === undefined) {
+      throw new Error("Expected queue sheet");
+    }
+
+    queue.values[1]![4] = "processing";
+    queue.values[1]![11] = gateway.TYPED_SHEETS_MAX_QUEUE_ATTEMPTS;
+    queue.values[1]![15] = "2020-01-01T00:00:00.000Z";
+
+    expect(gateway.processTaskQueue_(spreadsheet, {})).toMatchObject({
+      processedTransactions: 0,
+      failedTransactions: 1,
+      processedTasks: 0,
+      failedTasks: 1,
+      remainingPendingTasks: 0,
+    });
+    expect(
+      spreadsheet.sheets.get(systemSheets.canonicalSheetName)?.values,
+    ).toEqual([["id", "_version"]]);
+    expect(queue.values[1]?.[4]).toBe("failed");
+    expect(queue.values[1]?.[12]).toBe("retry_limit_exceeded");
   });
 
   it("blocks a later pending transaction behind a fresh processing transaction", async () => {
