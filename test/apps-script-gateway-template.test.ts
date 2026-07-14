@@ -69,6 +69,14 @@ interface GatewayTemplate {
     projectionSheetName: string;
     taskQueueSheetName: string;
   };
+  ensureMetaSheet_(
+    spreadsheet: FakeSpreadsheet,
+    config: {
+      spreadsheetUrl: string;
+      defaultSheetName: string;
+      auth: { gatewayUrl: string; type: string };
+    },
+  ): void;
 }
 
 interface FakeSetValuesInput {
@@ -293,6 +301,7 @@ describe("manual Apps Script gateway template system sheets", () => {
         "  processTaskQueue_,",
         "  readCanonicalSheet_,",
         "  initializeSystemSheets_,",
+        "  ensureMetaSheet_,",
         "};",
       ].join("\n"),
     );
@@ -653,6 +662,76 @@ describe("manual Apps Script gateway template system sheets", () => {
       "legacy@test.com",
       1,
     ]);
+  });
+
+  it("preserves migration metadata when setup rewrites the meta sheet", async () => {
+    const gateway = await loadGatewayTemplate();
+    const spreadsheet = new FakeSpreadsheet();
+    const projection = spreadsheet.insertSheet("Users");
+    projection.values = [
+      ["id", "email", "_version"],
+      ["u1", "legacy@test.com", 1],
+    ];
+
+    const systemSheets = gateway.initializeSystemSheets_(spreadsheet, {
+      sheetName: "Users",
+      headers: ["id", "email", "_version"],
+    });
+    const canonical = spreadsheet.sheets.get(systemSheets.canonicalSheetName);
+    const queue = spreadsheet.sheets.get(
+      gateway.TYPED_SHEETS_TASK_QUEUE_SHEET_NAME,
+    );
+
+    if (canonical === undefined || queue === undefined) {
+      throw new Error("Expected canonical and task queue sheets");
+    }
+
+    gateway.enqueueTasks_(spreadsheet, {
+      tasks: [
+        {
+          taskId: "task-delete-before-setup",
+          transactionId: "tx-delete-before-setup",
+          transactionIndex: 0,
+          operation: "delete",
+          sheetName: "Users",
+          keyHeader: "id",
+          keyValue: "u1",
+          expectedVersion: 1,
+          payloadJson: JSON.stringify({
+            rowToDelete: {
+              id: "u1",
+              email: "legacy@test.com",
+              _version: 1,
+            },
+          }),
+        },
+      ],
+    });
+    gateway.processTaskQueue_(spreadsheet, {});
+
+    gateway.ensureMetaSheet_(spreadsheet, {
+      spreadsheetUrl: "https://spreadsheet.example",
+      defaultSheetName: "Users",
+      auth: {
+        gatewayUrl: "https://gateway.example/exec",
+        type: "apps-script-gateway",
+      },
+    });
+    gateway.initializeSystemSheets_(spreadsheet, {
+      sheetName: "Users",
+      headers: ["id", "email", "_version"],
+    });
+
+    expect(canonical.values).not.toContainEqual([
+      "u1",
+      "legacy@test.com",
+      1,
+    ]);
+    expect(
+      spreadsheet.sheets.get("_typed_sheets_meta")?.values.some(
+        (row) => row[0] === "projectionMigration:Users",
+      ),
+    ).toBe(true);
   });
 
   it("rejects projection schema drift during queued initialization", async () => {
