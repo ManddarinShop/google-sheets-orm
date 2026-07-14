@@ -22,7 +22,9 @@
     "templates/manual-apps-script-gateway/README.md"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build:gateway": "node scripts/build-manual-gateway.mjs",
+    "build": "npm run build:gateway && tsc -p tsconfig.json",
+    "pretest": "npm run build:gateway",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "typecheck:test": "tsc -p tsconfig.test.json",
     "test": "vitest run test/*.test.ts",

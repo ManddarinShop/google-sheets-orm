@@ -1,3 +1,10 @@
+// GENERATED FILE: edit files under source/ and run npm run build:gateway.
+// This single file is the copy-and-deploy artifact for the manual Apps Script gateway.
+
+// ----- 00-config.gs -----
+
+// Source module for the generated manual Apps Script gateway.
+
 // typed-sheets - Manual Apps Script Gateway
 //
 // This file is the canonical Apps Script gateway template shipped with the npm
@@ -67,6 +74,11 @@ const TYPED_SHEETS_LEGACY_DIRECT_OPERATIONS = [
  *
  * @returns {object} The typed-sheets config to paste into .typed-sheets.json.
  */
+
+// ----- 01-entrypoint.gs -----
+
+// Source module for the generated manual Apps Script gateway.
+
 function setupTypedSheets() {
   const config = createTypedSheetsConfig_();
   const configJson = JSON.stringify(config, null, 2);
@@ -192,6 +204,10 @@ function doPost(e) {
   }
 }
 
+// ----- 02-validation.gs -----
+
+// Source module for the generated manual Apps Script gateway.
+
 function parseRequest_(e) {
   try {
     const request = JSON.parse((e.postData && e.postData.contents) || "{}");
@@ -292,6 +308,302 @@ function validateOperation_(request) {
 
   return operation;
 }
+
+
+function getSheet_(spreadsheet, sheetName) {
+  const name = requireString_(sheetName, "sheetName");
+  const sheet = spreadsheet.getSheetByName(name);
+
+  if (!sheet) {
+    throw gatewayError_("sheet_not_found", "Sheet not found: " + name);
+  }
+
+  return sheet;
+}
+
+function requireString_(value, name) {
+  if (typeof value !== "string" || value.trim() === "") {
+    throw gatewayError_("invalid_request", name + " must be a non-empty string");
+  }
+
+  return value;
+}
+
+function requireStringArray_(value, name) {
+  if (!Array.isArray(value) || value.length === 0) {
+    throw gatewayError_(
+      "invalid_request",
+      name + " must be a non-empty string array",
+    );
+  }
+
+  value.forEach(function(item, index) {
+    if (typeof item !== "string" || item.trim() === "") {
+      throw gatewayError_(
+        "invalid_request",
+        name + "[" + index + "] must be a non-empty string",
+      );
+    }
+  });
+
+  return value;
+}
+
+function requireSheetCellArray_(value, name) {
+  if (!Array.isArray(value)) {
+    throw gatewayError_("invalid_request", name + " must be an array");
+  }
+
+  value.forEach(function(item, index) {
+    if (
+      item !== null &&
+      typeof item !== "string" &&
+      typeof item !== "number" &&
+      typeof item !== "boolean"
+    ) {
+      throw gatewayError_(
+        "invalid_request",
+        name + "[" + index + "] must be a string, number, boolean, or null",
+      );
+    }
+  });
+
+  return value;
+}
+
+function requireSheetCellRows_(value, name) {
+  if (!Array.isArray(value)) {
+    throw gatewayError_("invalid_request", name + " must be an array");
+  }
+
+  value.forEach(function(row, index) {
+    requireSheetCellArray_(row, name + "[" + index + "]");
+  });
+
+  return value;
+}
+
+function requireUpdateRows_(value, name) {
+  if (!Array.isArray(value) || value.length === 0) {
+    throw gatewayError_("invalid_request", name + " must be a non-empty array");
+  }
+
+  value.forEach(function(update, index) {
+    if (!update || typeof update !== "object" || Array.isArray(update)) {
+      throw gatewayError_(
+        "invalid_request",
+        name + "[" + index + "] must be an object",
+      );
+    }
+
+    requireString_(update.id, name + "[" + index + "].id");
+    requireFiniteNumber_(
+      update.expectedVersion,
+      name + "[" + index + "].expectedVersion",
+    );
+    requireSheetCellArray_(update.row, name + "[" + index + "].row");
+  });
+
+  return value;
+}
+
+function requireQueueTasks_(value, name) {
+  if (!Array.isArray(value) || value.length === 0) {
+    throw gatewayError_("invalid_request", name + " must be a non-empty array");
+  }
+
+  return value.map(function(task, index) {
+    const taskName = name + "[" + index + "]";
+
+    if (!task || typeof task !== "object" || Array.isArray(task)) {
+      throw gatewayError_("invalid_request", taskName + " must be an object");
+    }
+
+    const operation = requireQueueOperation_(
+      task.operation,
+      taskName + ".operation",
+    );
+
+    return {
+      taskId: requireString_(task.taskId, taskName + ".taskId"),
+      transactionId: requireString_(
+        task.transactionId,
+        taskName + ".transactionId",
+      ),
+      transactionIndex: requireNonNegativeInteger_(
+        task.transactionIndex,
+        taskName + ".transactionIndex",
+      ),
+      operation: operation,
+      sheetName: requireProjectionSheetName_(
+        task.sheetName,
+        taskName + ".sheetName",
+      ),
+      keyHeader: requireString_(task.keyHeader, taskName + ".keyHeader"),
+      keyValue: requireString_(task.keyValue, taskName + ".keyValue"),
+      expectedVersion: requireQueueExpectedVersion_(
+        task.expectedVersion,
+        operation,
+        taskName + ".expectedVersion",
+      ),
+      payloadJson: requireJsonObjectString_(
+        task.payloadJson,
+        taskName + ".payloadJson",
+      ),
+    };
+  });
+}
+
+function requireProcessTaskQueueOptions_(request) {
+  const maxTransactions = request.maxTransactions === undefined
+    ? 1
+    : requirePositiveInteger_(request.maxTransactions, "maxTransactions");
+
+  return {
+    maxTransactions: maxTransactions,
+  };
+}
+
+function requireQueueOperation_(value, name) {
+  const operation = requireString_(value, name);
+
+  if (["insert", "update", "delete"].indexOf(operation) === -1) {
+    throw gatewayError_(
+      "invalid_request",
+      name + " must be insert, update, or delete",
+    );
+  }
+
+  return operation;
+}
+
+function requireQueueExpectedVersion_(value, operation, name) {
+  if (operation === "insert") {
+    if (value === null || value === "" || value === undefined) {
+      return null;
+    }
+
+    throw gatewayError_(
+      "invalid_request",
+      name + " must be null or blank for insert tasks",
+    );
+  }
+
+  return requireFiniteNumber_(value, name);
+}
+
+function requireJsonObjectString_(value, name) {
+  const json = requireString_(value, name);
+  let parsed;
+
+  try {
+    parsed = JSON.parse(json);
+  } catch (error) {
+    throw gatewayError_("invalid_request", name + " must be valid JSON");
+  }
+
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw gatewayError_("invalid_request", name + " must encode an object");
+  }
+
+  return json;
+}
+
+function requirePositiveInteger_(value, name) {
+  const numberValue = Number(value);
+
+  if (!Number.isInteger(numberValue) || numberValue < 1) {
+    throw gatewayError_("invalid_request", name + " must be a positive integer");
+  }
+
+  return numberValue;
+}
+
+function requireNonNegativeInteger_(value, name) {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
+    throw gatewayError_(
+      "invalid_request",
+      name + " must be a non-negative integer",
+    );
+  }
+
+  return value;
+}
+
+function requirePositiveIntegerArray_(value, name) {
+  if (!Array.isArray(value)) {
+    throw gatewayError_("invalid_request", name + " must be an array");
+  }
+
+  value.forEach(function(item, index) {
+    requirePositiveInteger_(item, name + "[" + index + "]");
+  });
+
+  return value.map(function(item) {
+    return Number(item);
+  });
+}
+
+function requireFiniteNumber_(value, name) {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw gatewayError_("invalid_request", name + " must be a number");
+  }
+
+  return value;
+}
+
+function requireNumberRecord_(value, name) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw gatewayError_("invalid_request", name + " must be an object");
+  }
+
+  Object.keys(value).forEach(function(key) {
+    if (typeof value[key] !== "number" || !Number.isFinite(value[key])) {
+      throw gatewayError_("invalid_request", name + "." + key + " must be a number");
+    }
+  });
+
+  return value;
+}
+
+function assertExpectedHeaders_(actualHeaders, expectedHeaders, operation) {
+  if (actualHeaders.length < expectedHeaders.length) {
+    throw gatewayError_(
+      "schema_drift",
+      "Header row changed before " + operation,
+    );
+  }
+
+  const seenHeaders = Object.create(null);
+
+  actualHeaders.forEach(function(header) {
+    if (header === "") {
+      return;
+    }
+
+    if (seenHeaders[header]) {
+      throw gatewayError_(
+        "schema_drift",
+        "Duplicate header before " + operation + ": " + header,
+      );
+    }
+
+    seenHeaders[header] = true;
+  });
+
+  expectedHeaders.forEach(function(expectedHeader, index) {
+    if (actualHeaders[index] !== expectedHeader) {
+      throw gatewayError_(
+        "schema_drift",
+        "Header row changed before " + operation,
+      );
+    }
+  });
+}
+
+// ----- 03-system-sheets.gs -----
+
+// Source module for the generated manual Apps Script gateway.
 
 function ensureSheet_(spreadsheet, request) {
   const sheetName = requireString_(request.sheetName, "sheetName");
@@ -434,6 +746,424 @@ function migrateProjectionToCanonicalIfNeeded_(
  * monotonic sequence values under the document lock so processors can replay
  * write intent in enqueue order.
  */
+
+function getOrCreateCanonicalSheetName_(spreadsheet, logicalSheetName) {
+  const existingMapping = getCanonicalSheetMapping_(
+    spreadsheet,
+    logicalSheetName,
+  );
+
+  if (existingMapping) {
+    return existingMapping.canonicalSheetName;
+  }
+
+  const hash = createShortHash_(logicalSheetName);
+  let collisionIndex = 0;
+
+  while (collisionIndex < 100) {
+    const canonicalSheetName = createCanonicalSheetName_(
+      logicalSheetName,
+      hash,
+      collisionIndex,
+    );
+
+    if (!spreadsheet.getSheetByName(canonicalSheetName)) {
+      persistCanonicalSheetMapping_(spreadsheet, {
+        logicalSheetName: logicalSheetName,
+        canonicalSheetName: canonicalSheetName,
+        projectionSheetName: logicalSheetName,
+      });
+
+      return canonicalSheetName;
+    }
+
+    collisionIndex += 1;
+  }
+
+  throw gatewayError_(
+    "system_sheet_name_collision",
+    "Could not allocate a canonical sheet name for " + logicalSheetName,
+  );
+}
+
+function createCanonicalSheetName_(logicalSheetName, hash, collisionIndex) {
+  const suffix = "_" + hash + (collisionIndex === 0 ? "" : "_" + collisionIndex);
+  const maxSlugLength =
+    TYPED_SHEETS_MAX_SHEET_NAME_LENGTH
+    - TYPED_SHEETS_DATA_SHEET_PREFIX.length
+    - suffix.length;
+  const slug = createSheetNameSlug_(logicalSheetName).slice(
+    0,
+    Math.max(1, maxSlugLength),
+  );
+
+  return TYPED_SHEETS_DATA_SHEET_PREFIX + slug + suffix;
+}
+
+function createSheetNameSlug_(value) {
+  const slug = value
+    .replace(/[^A-Za-z0-9_-]/g, "_")
+    .replace(/_+/g, "_")
+    .replace(/^_+|_+$/g, "");
+
+  return slug || "sheet";
+}
+
+function createShortHash_(value) {
+  return bytesToHex_(Utilities.computeDigest(
+    Utilities.DigestAlgorithm.SHA_256,
+    value,
+  )).slice(0, 12);
+}
+
+/**
+ * Creates a stable fingerprint for one enqueue request. Mutable queue state is
+ * intentionally excluded so the fingerprint survives processing and retries.
+ */
+
+function getCanonicalSheetMapping_(spreadsheet, logicalSheetName) {
+  const sheet = spreadsheet.getSheetByName(TYPED_SHEETS_META_SHEET_NAME);
+
+  if (!sheet) {
+    return null;
+  }
+
+  const rows = readMetaRows_(sheet);
+  const key = TYPED_SHEETS_META_MAPPING_KEY_PREFIX + logicalSheetName;
+
+  for (let index = 0; index < rows.length; index += 1) {
+    if (rows[index][0] !== key) {
+      continue;
+    }
+
+    try {
+      const mapping = JSON.parse(String(rows[index][1]));
+
+      if (
+        mapping
+        && mapping.logicalSheetName === logicalSheetName
+        && typeof mapping.canonicalSheetName === "string"
+        && mapping.canonicalSheetName.trim() !== ""
+      ) {
+        return mapping;
+      }
+    } catch (error) {
+      throw gatewayError_(
+        "invalid_meta",
+        "Invalid canonical sheet mapping for " + logicalSheetName,
+      );
+    }
+  }
+
+  return null;
+}
+
+function persistCanonicalSheetMapping_(spreadsheet, mapping) {
+  const sheet = ensureMetaSheetStructure_(spreadsheet);
+  const rows = readMetaRows_(sheet);
+  const key = TYPED_SHEETS_META_MAPPING_KEY_PREFIX + mapping.logicalSheetName;
+  const value = JSON.stringify(mapping);
+
+  for (let index = 0; index < rows.length; index += 1) {
+    if (rows[index][0] === key) {
+      sheet.getRange(index + 2, 2, 1, 1).setValues([[value]]);
+      return;
+    }
+  }
+
+  sheet.getRange(sheet.getLastRow() + 1, 1, 1, 2).setValues([[key, value]]);
+}
+
+function isProjectionMigrationCompleted_(
+  spreadsheet,
+  logicalSheetName,
+  canonicalSheetName,
+) {
+  const sheet = spreadsheet.getSheetByName(TYPED_SHEETS_META_SHEET_NAME);
+
+  if (!sheet) {
+    return false;
+  }
+
+  const key = TYPED_SHEETS_META_MIGRATION_KEY_PREFIX + logicalSheetName;
+  const rows = readMetaRows_(sheet);
+
+  for (let index = 0; index < rows.length; index += 1) {
+    if (rows[index][0] !== key) {
+      continue;
+    }
+
+    try {
+      const migration = JSON.parse(String(rows[index][1]));
+
+      return migration
+        && migration.status === "completed"
+        && migration.canonicalSheetName === canonicalSheetName;
+    } catch (error) {
+      throw gatewayError_(
+        "invalid_meta",
+        "Invalid projection migration metadata for " + logicalSheetName,
+      );
+    }
+  }
+
+  return false;
+}
+
+function markProjectionMigrationCompleted_(
+  spreadsheet,
+  logicalSheetName,
+  canonicalSheetName,
+) {
+  const sheet = ensureMetaSheetStructure_(spreadsheet);
+  const rows = readMetaRows_(sheet);
+  const key = TYPED_SHEETS_META_MIGRATION_KEY_PREFIX + logicalSheetName;
+  const value = JSON.stringify({
+    logicalSheetName: logicalSheetName,
+    canonicalSheetName: canonicalSheetName,
+    status: "completed",
+  });
+
+  for (let index = 0; index < rows.length; index += 1) {
+    if (rows[index][0] === key) {
+      sheet.getRange(index + 2, 2, 1, 1).setValues([[value]]);
+      return;
+    }
+  }
+
+  sheet.getRange(sheet.getLastRow() + 1, 1, 1, 2).setValues([[key, value]]);
+}
+
+function readMetaRows_(sheet) {
+  const lastRow = sheet.getLastRow();
+
+  if (lastRow < 2) {
+    return [];
+  }
+
+  return sheet.getRange(2, 1, lastRow - 1, 2).getValues().map(function(row) {
+    return [String(row[0] || ""), String(row[1] || "")];
+  });
+}
+
+function requireProjectionSheetName_(value, name) {
+  const sheetName = requireString_(value, name);
+
+  if (sheetName.indexOf(TYPED_SHEETS_INTERNAL_PREFIX) === 0) {
+    throw gatewayError_(
+      "invalid_request",
+      name + " must not start with " + TYPED_SHEETS_INTERNAL_PREFIX,
+    );
+  }
+
+  return sheetName;
+}
+
+function ensureProjectionSheet_(spreadsheet, sheetName, headers) {
+  // Validate the requested schema even when the sheet is being created. This
+  // catches duplicate headers before they become a new, invalid system sheet.
+  assertExpectedHeaders_(headers, headers, "projection initialization");
+
+  let sheet = spreadsheet.getSheetByName(sheetName);
+
+  if (!sheet) {
+    sheet = spreadsheet.insertSheet(sheetName);
+  }
+
+  if (isHeaderRowEmpty_(sheet)) {
+    sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+  } else {
+    assertExpectedHeaders_(
+      readHeaderRow_(sheet),
+      headers,
+      "projection initialization",
+    );
+  }
+}
+
+function ensureInternalSheet_(spreadsheet, sheetName, headers) {
+  let sheet = spreadsheet.getSheetByName(sheetName);
+
+  if (!sheet) {
+    sheet = spreadsheet.insertSheet(sheetName);
+  }
+
+  if (isHeaderRowEmpty_(sheet)) {
+    sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+  } else {
+    assertExpectedHeaders_(
+      readHeaderRow_(sheet),
+      headers,
+      "canonical initialization",
+    );
+  }
+
+  hideInternalSheet_(sheet);
+  protectInternalSheet_(sheet, sheetName);
+}
+
+function hideInternalSheet_(sheet) {
+  sheet.hideSheet();
+}
+
+function protectInternalSheet_(sheet, sheetName) {
+  try {
+    const protection = sheet.protect();
+    protection.setDescription("typed-sheets internal sheet: " + sheetName);
+
+    if (typeof protection.setWarningOnly === "function") {
+      protection.setWarningOnly(false);
+    }
+
+    if (
+      typeof protection.getEditors === "function"
+      && typeof protection.removeEditors === "function"
+    ) {
+      protection.removeEditors(protection.getEditors());
+    }
+
+    if (
+      typeof protection.canDomainEdit === "function"
+      && protection.canDomainEdit()
+      && typeof protection.setDomainEdit === "function"
+    ) {
+      protection.setDomainEdit(false);
+    }
+  } catch (error) {
+    Logger.log(
+      "typed-sheets could not protect internal sheet "
+        + sheetName
+        + ": "
+        + (error && error.message ? error.message : String(error)),
+    );
+  }
+}
+
+function writeHeaderIfEmpty_(sheet, headers) {
+  if (!isHeaderRowEmpty_(sheet)) {
+    throw gatewayError_(
+      "header_not_empty",
+      "Header row is not empty; refusing to overwrite existing data",
+    );
+  }
+
+  sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+}
+
+
+function createTypedSheetsConfig_() {
+  const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+  const activeSheet = spreadsheet.getActiveSheet();
+  const lock = LockService.getDocumentLock();
+
+  lock.waitLock(30000);
+
+  try {
+    const existing = getTypedSheetsConfig_();
+    const gatewayUrl = getGatewayUrl_(existing);
+    const gatewaySecret = existing && existing.auth.gatewaySecret
+      ? existing.auth.gatewaySecret
+      : Utilities.getUuid();
+
+    const config = {
+      spreadsheetUrl: spreadsheet.getUrl(),
+      defaultSheetName: activeSheet.getName(),
+      auth: {
+        type: "apps-script-gateway",
+        gatewayUrl: gatewayUrl,
+        gatewaySecret: gatewaySecret,
+      },
+    };
+
+    PropertiesService.getDocumentProperties().setProperty(
+      TYPED_SHEETS_CONFIG_PROPERTY,
+      JSON.stringify(config),
+    );
+
+    ensureMetaSheet_(spreadsheet, config);
+
+    return config;
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function getTypedSheetsConfig_() {
+  const raw = PropertiesService.getDocumentProperties().getProperty(
+    TYPED_SHEETS_CONFIG_PROPERTY,
+  );
+
+  return raw ? JSON.parse(raw) : null;
+}
+
+function ensureMetaSheet_(spreadsheet, config) {
+  const sheet = ensureMetaSheetStructure_(spreadsheet);
+  const preservedRows = readMetaRows_(sheet).filter(function(row) {
+    return row[0].indexOf(TYPED_SHEETS_META_MAPPING_KEY_PREFIX) === 0
+      || row[0].indexOf(TYPED_SHEETS_META_MIGRATION_KEY_PREFIX) === 0;
+  });
+  const rows = [
+    ["spreadsheetUrl", config.spreadsheetUrl],
+    ["defaultSheetName", config.defaultSheetName],
+    ["gatewayUrl", config.auth.gatewayUrl],
+    ["authType", config.auth.type],
+    ["connectedAt", new Date().toISOString()],
+  ].concat(preservedRows);
+
+  sheet.clear();
+  sheet.hideSheet();
+  sheet.getRange(1, 1, 1, 2).setValues([["key", "value"]]);
+  sheet.getRange(2, 1, rows.length, 2).setValues(rows);
+}
+
+function ensureMetaSheetStructure_(spreadsheet) {
+  const sheet = spreadsheet.getSheetByName(TYPED_SHEETS_META_SHEET_NAME)
+    || spreadsheet.insertSheet(TYPED_SHEETS_META_SHEET_NAME);
+
+  sheet.hideSheet();
+
+  if (isHeaderRowEmpty_(sheet)) {
+    sheet.getRange(1, 1, 1, 2).setValues([["key", "value"]]);
+  }
+
+  return sheet;
+}
+
+function getGatewayUrl_(existingConfig) {
+  if (TYPED_SHEETS_GATEWAY_URL.trim() !== "") {
+    return requireGatewayUrl_(TYPED_SHEETS_GATEWAY_URL.trim());
+  }
+
+  if (
+    existingConfig
+    && existingConfig.auth
+    && typeof existingConfig.auth.gatewayUrl === "string"
+    && existingConfig.auth.gatewayUrl.trim() !== ""
+  ) {
+    return requireGatewayUrl_(existingConfig.auth.gatewayUrl.trim());
+  }
+
+  throw gatewayError_(
+    "missing_gateway_url",
+    "Set TYPED_SHEETS_GATEWAY_URL to the deployed Web App URL that ends with /exec before running setupTypedSheets()",
+  );
+}
+
+function requireGatewayUrl_(gatewayUrl) {
+  if (!/^https:\/\/script\.google\.com\/macros\/s\/[^/]+\/exec$/.test(gatewayUrl)) {
+    throw gatewayError_(
+      "invalid_gateway_url",
+      "TYPED_SHEETS_GATEWAY_URL must be a deployed Apps Script Web App URL that ends with /exec",
+    );
+  }
+
+  return gatewayUrl;
+}
+
+// ----- 04-queue-enqueue.gs -----
+
+// Source module for the generated manual Apps Script gateway.
+
 function enqueueTasks_(spreadsheet, request) {
   const tasks = requireQueueTasks_(request.tasks, "tasks");
   const queueSheet = ensureTaskQueueSheet_(spreadsheet);
@@ -535,6 +1265,10 @@ function enqueueTasks_(spreadsheet, request) {
     tasks: enqueuedTasks,
   };
 }
+
+// ----- 05-queue-storage.gs -----
+
+// Source module for the generated manual Apps Script gateway.
 
 function ensureTaskQueueSheet_(spreadsheet) {
   const existingQueueSheet = spreadsheet.getSheetByName(
@@ -813,349 +1547,6 @@ function isTerminalQueueTask_(task) {
  * affected canonical sheets in bulk, and recovers processing claims whose
  * lease expired after an interrupted execution.
  */
-function processTaskQueue_(spreadsheet, request) {
-  const options = requireProcessTaskQueueOptions_(request);
-  const queueSheet = ensureTaskQueueSheet_(spreadsheet);
-  const queuedTasks = readQueuedTasks_(queueSheet);
-  retryCompletedTaskRedactions_(queueSheet, queuedTasks);
-  const now = new Date();
-  const result = {
-    ok: true,
-    processedTransactions: 0,
-    failedTransactions: 0,
-    processedTasks: 0,
-    failedTasks: 0,
-    remainingPendingTasks: 0,
-  };
-
-  // Reconcile stale claims before selecting new work. Recovery is performed
-  // for the complete transaction so a partial status update cannot leave a
-  // permanently incomplete done/pending group.
-  const recoveryResult = reconcileStaleProcessingTransactions_(
-    spreadsheet,
-    queueSheet,
-    queuedTasks,
-    now,
-    options.maxTransactions,
-  );
-  result.processedTransactions += recoveryResult.processedTransactions;
-  result.failedTransactions += recoveryResult.failedTransactions;
-  result.processedTasks += recoveryResult.processedTasks;
-  result.failedTasks += recoveryResult.failedTasks;
-
-  const remainingTransactionBudget = Math.max(
-    0,
-    options.maxTransactions - recoveryResult.recoveredTransactions,
-  );
-  const pendingGroups = groupPendingTasksByTransaction_(queuedTasks)
-    .slice(0, remainingTransactionBudget);
-  const processingStartedAt = now.toISOString();
-
-  for (let groupIndex = 0; groupIndex < pendingGroups.length; groupIndex += 1) {
-    const group = pendingGroups[groupIndex];
-
-    if (hasReachedQueueAttemptLimit_(group.tasks)) {
-      markQueueTasks_(queueSheet, group.tasks, {
-        status: "failed",
-        lastErrorCode: "retry_limit_exceeded",
-        lastErrorMessage:
-          "Transaction exceeded the maximum queue processing attempts",
-        updatedAt: new Date().toISOString(),
-      });
-      result.failedTransactions += 1;
-      result.failedTasks += group.tasks.length;
-      continue;
-    }
-
-    markQueueTasks_(queueSheet, group.tasks, {
-      status: "processing",
-      updatedAt: processingStartedAt,
-    });
-
-    try {
-      applyQueueTransaction_(spreadsheet, group.tasks);
-    } catch (error) {
-      const code = error && error.code ? error.code : "internal_error";
-      const message = error && error.message ? error.message : String(error);
-
-      if (error && error.canonicalWriteStarted === true) {
-        recordCanonicalWriteFailure_(queueSheet, group.tasks, error);
-        // The canonical outcome is unknown. Later transactions must remain
-        // pending until this transaction is reconciled in sequence order.
-        break;
-      }
-
-      markQueueTasks_(queueSheet, group.tasks, {
-        status: "failed",
-        lastErrorCode: code,
-        lastErrorMessage: message,
-        updatedAt: new Date().toISOString(),
-      });
-
-      result.failedTransactions += 1;
-      result.failedTasks += group.tasks.length;
-      continue;
-    }
-
-    try {
-      // Keep the claim in processing if this status write is interrupted.
-      // The canonical write already happened, so the next processor run must
-      // reconcile the postcondition instead of treating it as a normal apply
-      // failure and permanently dead-lettering the transaction.
-      markQueueTasks_(queueSheet, group.tasks, {
-        status: "done",
-        payloadJson: JSON.stringify({ redacted: true }),
-        lastErrorCode: "",
-        lastErrorMessage: "",
-        updatedAt: new Date().toISOString(),
-      });
-    } catch (error) {
-      recordQueueCompletionFailure_(queueSheet, group.tasks, error);
-      // Canonical data is already written but the terminal queue state is
-      // unknown. Do not let a later transaction overtake this claim.
-      break;
-    }
-
-    result.processedTransactions += 1;
-    result.processedTasks += group.tasks.length;
-  }
-
-  const remainingTasks = readQueuedTasks_(queueSheet);
-  result.remainingPendingTasks = remainingTasks.filter(function(task) {
-    return task.status === "pending";
-  }).length;
-  const recoveryPendingTasks = remainingTasks.filter(function(task) {
-    return task.status === "processing"
-      || (
-        task.status === "done"
-        && !isRedactedTaskPayload_(task.payloadJson)
-      );
-  }).length;
-
-  // Omit the field for an empty recovery state so older callers that consume
-  // this gateway response remain compatible. When present, the field includes
-  // processing claims and completed tasks whose payload redaction needs retry.
-  if (recoveryPendingTasks > 0) {
-    result.recoveryPendingTasks = recoveryPendingTasks;
-  }
-
-  return result;
-}
-
-function recordQueueCompletionFailure_(queueSheet, tasks, error) {
-  const message = error && error.message ? error.message : String(error);
-
-  try {
-    // Do not change status here. This best-effort diagnostic preserves
-    // processing claims, including partially updated claims, for stale
-    // recovery on a later invocation.
-    markQueueTasks_(queueSheet, tasks, {
-      lastErrorCode: "completion_status_unconfirmed",
-      lastErrorMessage:
-        "Canonical transaction applied, but completion status was not recorded: "
-        + message,
-      updatedAt: new Date().toISOString(),
-    });
-  } catch (diagnosticError) {
-    // The queue write itself may be the failing operation. Leaving the claim
-    // untouched is still safer than marking canonical data as failed.
-  }
-}
-
-function recordCanonicalWriteFailure_(queueSheet, tasks, error) {
-  const message = error && error.message ? error.message : String(error);
-
-  try {
-    // At least one canonical write was attempted. Keep the transaction in
-    // processing so the next lease expiry can inspect every affected sheet
-    // and distinguish unapplied work from a partial canonical apply.
-    markQueueTasks_(queueSheet, tasks, {
-      lastErrorCode: "canonical_write_unconfirmed",
-      lastErrorMessage:
-        "Canonical write outcome is unconfirmed; recovery is required: "
-        + message,
-      updatedAt: new Date().toISOString(),
-    });
-  } catch (diagnosticError) {
-    // If the queue diagnostic also fails, the original processing claim and
-    // timestamp remain available for lease-based recovery.
-  }
-}
-
-function retryCompletedTaskRedactions_(queueSheet, tasks) {
-  const redactedPayload = JSON.stringify({ redacted: true });
-
-  tasks.forEach(function(task) {
-    if (task.status !== "done" || isRedactedTaskPayload_(task.payloadJson)) {
-      return;
-    }
-
-    try {
-      // Status and canonical data may already be durable even when the
-      // original completion call lost its payload redaction write. Retry the
-      // sensitive-data cleanup on every later processor invocation.
-      markQueueTasks_(queueSheet, [task], {
-        payloadJson: redactedPayload,
-        lastErrorCode: "",
-        lastErrorMessage: "",
-        updatedAt: new Date().toISOString(),
-      });
-      task.payloadJson = redactedPayload;
-      task.lastErrorCode = "";
-      task.lastErrorMessage = "";
-    } catch (error) {
-      try {
-        markQueueTasks_(queueSheet, [task], {
-          lastErrorCode: "redaction_unconfirmed",
-          lastErrorMessage:
-            "Completed task payload redaction failed: "
-            + (error && error.message ? error.message : String(error)),
-          updatedAt: new Date().toISOString(),
-        });
-      } catch (diagnosticError) {
-        // Preserve the completed task and retry the cleanup on the next run.
-      }
-    }
-  });
-}
-
-/**
- * Reconciles expired processing claims at transaction granularity. A complete
- * postcondition match is marked done, an unapplied group is returned to
- * pending, and an ambiguous or partial result is failed conservatively.
- */
-function reconcileStaleProcessingTransactions_(
-  spreadsheet,
-  queueSheet,
-  queuedTasks,
-  now,
-  maxTransactions,
-) {
-  const nowMs = now.getTime();
-  const recoveredAt = now.toISOString();
-  const result = {
-    processedTransactions: 0,
-    failedTransactions: 0,
-    processedTasks: 0,
-    failedTasks: 0,
-    recoveredTransactions: 0,
-  };
-  const canonicalTables = Object.create(null);
-
-  const groups = groupTasksByTransaction_(queuedTasks);
-
-  for (let groupIndex = 0; groupIndex < groups.length; groupIndex += 1) {
-    const group = groups[groupIndex];
-
-    if (group.allTerminal) {
-      continue;
-    }
-
-    // A pending group is the earliest non-terminal work and must be allowed
-    // to run before any later stale claim is reconciled.
-    if (group.allPending || result.recoveredTransactions >= maxTransactions) {
-      break;
-    }
-
-    const hasStaleTask = group.tasks.some(function(task) {
-      return isStaleProcessingTask_(task, nowMs);
-    });
-
-    if (!hasStaleTask) {
-      break;
-    }
-
-    let reconciliation;
-
-    try {
-      reconciliation = reconcileTransactionPostconditions_(
-        spreadsheet,
-        group.tasks,
-        canonicalTables,
-      );
-    } catch (error) {
-      reconciliation = {
-        status: "failed",
-        errorCode: error && error.code ? error.code : "recovery_error",
-        errorMessage: error && error.message
-          ? error.message
-          : String(error),
-      };
-    }
-
-    if (reconciliation.status === "done") {
-      markQueueTasks_(queueSheet, group.tasks, {
-        status: "done",
-        payloadJson: JSON.stringify({ redacted: true }),
-        lastErrorCode: "",
-        lastErrorMessage: "",
-        updatedAt: recoveredAt,
-      });
-
-      group.tasks.forEach(function(task) {
-        task.status = "done";
-        task.payloadJson = JSON.stringify({ redacted: true });
-        task.updatedAt = recoveredAt;
-      });
-      result.processedTransactions += 1;
-      result.processedTasks += group.tasks.length;
-      result.recoveredTransactions += 1;
-      continue;
-    }
-
-    if (reconciliation.status === "pending") {
-      if (hasReachedQueueAttemptLimit_(group.tasks)) {
-        markQueueTasks_(queueSheet, group.tasks, {
-          status: "failed",
-          lastErrorCode: "retry_limit_exceeded",
-          lastErrorMessage:
-            "Transaction exceeded the maximum queue processing attempts",
-          updatedAt: recoveredAt,
-        });
-
-        group.tasks.forEach(function(task) {
-          task.status = "failed";
-          task.updatedAt = recoveredAt;
-        });
-        result.failedTransactions += 1;
-        result.failedTasks += group.tasks.length;
-        result.recoveredTransactions += 1;
-        continue;
-      }
-
-      markQueueTasks_(queueSheet, group.tasks, {
-        status: "pending",
-        lastErrorCode: "stale_processing_recovered",
-        lastErrorMessage: "Recovered an unapplied transaction claim",
-        updatedAt: recoveredAt,
-      });
-
-      group.tasks.forEach(function(task) {
-        task.status = "pending";
-        task.updatedAt = recoveredAt;
-      });
-      break;
-    }
-
-    markQueueTasks_(queueSheet, group.tasks, {
-      status: "failed",
-      lastErrorCode: reconciliation.errorCode || "partial_apply",
-      lastErrorMessage: reconciliation.errorMessage
-        || "Transaction postconditions are ambiguous; manual recovery is required",
-      updatedAt: recoveredAt,
-    });
-
-    group.tasks.forEach(function(task) {
-      task.status = "failed";
-      task.updatedAt = recoveredAt;
-    });
-    result.failedTransactions += 1;
-    result.failedTasks += group.tasks.length;
-    result.recoveredTransactions += 1;
-  }
-
-  return result;
-}
 
 function isStaleProcessingTask_(task, nowMs) {
   if (task.status !== "processing") {
@@ -1384,6 +1775,447 @@ function groupTasksByTransaction_(queuedTasks) {
  * states. Reading one canonical table per sheet avoids an Apps Script read for
  * every task while preserving transactionIndex ordering during recovery.
  */
+
+function markQueueTasks_(queueSheet, tasks, patch) {
+  const statusIndex = TYPED_SHEETS_TASK_QUEUE_HEADERS.indexOf("status") + 1;
+  const payloadJsonIndex =
+    TYPED_SHEETS_TASK_QUEUE_HEADERS.indexOf("payloadJson") + 1;
+  const attemptsIndex =
+    TYPED_SHEETS_TASK_QUEUE_HEADERS.indexOf("attempts") + 1;
+  const lastErrorCodeIndex =
+    TYPED_SHEETS_TASK_QUEUE_HEADERS.indexOf("lastErrorCode") + 1;
+  const lastErrorMessageIndex =
+    TYPED_SHEETS_TASK_QUEUE_HEADERS.indexOf("lastErrorMessage") + 1;
+  const updatedAtIndex =
+    TYPED_SHEETS_TASK_QUEUE_HEADERS.indexOf("updatedAt") + 1;
+
+  tasks.forEach(function(task) {
+    if (patch.status !== undefined) {
+      queueSheet.getRange(task.rowNumber, statusIndex, 1, 1).setValues([
+        [patch.status],
+      ]);
+    }
+
+    if (patch.payloadJson !== undefined) {
+      queueSheet.getRange(task.rowNumber, payloadJsonIndex, 1, 1).setValues([
+        [patch.payloadJson],
+      ]);
+    }
+
+    if (patch.status === "processing") {
+      const nextAttempts = Number(task.attempts || 0) + 1;
+
+      queueSheet.getRange(task.rowNumber, attemptsIndex, 1, 1).setValues([
+        [nextAttempts],
+      ]);
+      task.attempts = nextAttempts;
+    }
+
+    if (patch.lastErrorCode !== undefined) {
+      queueSheet.getRange(task.rowNumber, lastErrorCodeIndex, 1, 1).setValues([
+        [patch.lastErrorCode],
+      ]);
+    }
+
+    if (patch.lastErrorMessage !== undefined) {
+      queueSheet
+        .getRange(task.rowNumber, lastErrorMessageIndex, 1, 1)
+        .setValues([[patch.lastErrorMessage]]);
+    }
+
+    if (patch.updatedAt !== undefined) {
+      queueSheet.getRange(task.rowNumber, updatedAtIndex, 1, 1).setValues([
+        [patch.updatedAt],
+      ]);
+    }
+  });
+}
+
+
+function createTaskFingerprint_(task) {
+  const canonicalValue = [
+    task.taskId,
+    task.transactionId,
+    task.transactionIndex,
+    task.operation,
+    task.sheetName,
+    task.keyHeader,
+    task.keyValue,
+    task.expectedVersion === null ? "" : task.expectedVersion,
+    task.payloadJson,
+  ].join("\u001f");
+
+  return bytesToHex_(Utilities.computeDigest(
+    Utilities.DigestAlgorithm.SHA_256,
+    canonicalValue,
+  ));
+}
+
+function bytesToHex_(bytes) {
+  let hex = "";
+
+  for (let index = 0; index < bytes.length; index += 1) {
+    const byte = bytes[index];
+    const unsignedByte = byte < 0 ? byte + 256 : byte;
+    hex += ("0" + unsignedByte.toString(16)).slice(-2);
+  }
+
+  return hex;
+}
+
+// ----- 06-queue-processor.gs -----
+
+// Source module for the generated manual Apps Script gateway.
+
+function processTaskQueue_(spreadsheet, request) {
+  const options = requireProcessTaskQueueOptions_(request);
+  const queueSheet = ensureTaskQueueSheet_(spreadsheet);
+  const queuedTasks = readQueuedTasks_(queueSheet);
+  retryCompletedTaskRedactions_(queueSheet, queuedTasks);
+  const now = new Date();
+  const result = {
+    ok: true,
+    processedTransactions: 0,
+    failedTransactions: 0,
+    processedTasks: 0,
+    failedTasks: 0,
+    remainingPendingTasks: 0,
+  };
+
+  // Reconcile stale claims before selecting new work. Recovery is performed
+  // for the complete transaction so a partial status update cannot leave a
+  // permanently incomplete done/pending group.
+  const recoveryResult = reconcileStaleProcessingTransactions_(
+    spreadsheet,
+    queueSheet,
+    queuedTasks,
+    now,
+    options.maxTransactions,
+  );
+  result.processedTransactions += recoveryResult.processedTransactions;
+  result.failedTransactions += recoveryResult.failedTransactions;
+  result.processedTasks += recoveryResult.processedTasks;
+  result.failedTasks += recoveryResult.failedTasks;
+
+  const remainingTransactionBudget = Math.max(
+    0,
+    options.maxTransactions - recoveryResult.recoveredTransactions,
+  );
+  const pendingGroups = groupPendingTasksByTransaction_(queuedTasks)
+    .slice(0, remainingTransactionBudget);
+  const processingStartedAt = now.toISOString();
+
+  for (let groupIndex = 0; groupIndex < pendingGroups.length; groupIndex += 1) {
+    const group = pendingGroups[groupIndex];
+
+    if (hasReachedQueueAttemptLimit_(group.tasks)) {
+      markQueueTasks_(queueSheet, group.tasks, {
+        status: "failed",
+        lastErrorCode: "retry_limit_exceeded",
+        lastErrorMessage:
+          "Transaction exceeded the maximum queue processing attempts",
+        updatedAt: new Date().toISOString(),
+      });
+      result.failedTransactions += 1;
+      result.failedTasks += group.tasks.length;
+      continue;
+    }
+
+    markQueueTasks_(queueSheet, group.tasks, {
+      status: "processing",
+      updatedAt: processingStartedAt,
+    });
+
+    try {
+      applyQueueTransaction_(spreadsheet, group.tasks);
+    } catch (error) {
+      const code = error && error.code ? error.code : "internal_error";
+      const message = error && error.message ? error.message : String(error);
+
+      if (error && error.canonicalWriteStarted === true) {
+        recordCanonicalWriteFailure_(queueSheet, group.tasks, error);
+        // The canonical outcome is unknown. Later transactions must remain
+        // pending until this transaction is reconciled in sequence order.
+        break;
+      }
+
+      markQueueTasks_(queueSheet, group.tasks, {
+        status: "failed",
+        lastErrorCode: code,
+        lastErrorMessage: message,
+        updatedAt: new Date().toISOString(),
+      });
+
+      result.failedTransactions += 1;
+      result.failedTasks += group.tasks.length;
+      continue;
+    }
+
+    try {
+      // Keep the claim in processing if this status write is interrupted.
+      // The canonical write already happened, so the next processor run must
+      // reconcile the postcondition instead of treating it as a normal apply
+      // failure and permanently dead-lettering the transaction.
+      markQueueTasks_(queueSheet, group.tasks, {
+        status: "done",
+        payloadJson: JSON.stringify({ redacted: true }),
+        lastErrorCode: "",
+        lastErrorMessage: "",
+        updatedAt: new Date().toISOString(),
+      });
+    } catch (error) {
+      recordQueueCompletionFailure_(queueSheet, group.tasks, error);
+      // Canonical data is already written but the terminal queue state is
+      // unknown. Do not let a later transaction overtake this claim.
+      break;
+    }
+
+    result.processedTransactions += 1;
+    result.processedTasks += group.tasks.length;
+  }
+
+  const remainingTasks = readQueuedTasks_(queueSheet);
+  result.remainingPendingTasks = remainingTasks.filter(function(task) {
+    return task.status === "pending";
+  }).length;
+  const recoveryPendingTasks = remainingTasks.filter(function(task) {
+    return task.status === "processing"
+      || (
+        task.status === "done"
+        && !isRedactedTaskPayload_(task.payloadJson)
+      );
+  }).length;
+
+  // Omit the field for an empty recovery state so older callers that consume
+  // this gateway response remain compatible. When present, the field includes
+  // processing claims and completed tasks whose payload redaction needs retry.
+  if (recoveryPendingTasks > 0) {
+    result.recoveryPendingTasks = recoveryPendingTasks;
+  }
+
+  return result;
+}
+
+function recordQueueCompletionFailure_(queueSheet, tasks, error) {
+  const message = error && error.message ? error.message : String(error);
+
+  try {
+    // Do not change status here. This best-effort diagnostic preserves
+    // processing claims, including partially updated claims, for stale
+    // recovery on a later invocation.
+    markQueueTasks_(queueSheet, tasks, {
+      lastErrorCode: "completion_status_unconfirmed",
+      lastErrorMessage:
+        "Canonical transaction applied, but completion status was not recorded: "
+        + message,
+      updatedAt: new Date().toISOString(),
+    });
+  } catch (diagnosticError) {
+    // The queue write itself may be the failing operation. Leaving the claim
+    // untouched is still safer than marking canonical data as failed.
+  }
+}
+
+function recordCanonicalWriteFailure_(queueSheet, tasks, error) {
+  const message = error && error.message ? error.message : String(error);
+
+  try {
+    // At least one canonical write was attempted. Keep the transaction in
+    // processing so the next lease expiry can inspect every affected sheet
+    // and distinguish unapplied work from a partial canonical apply.
+    markQueueTasks_(queueSheet, tasks, {
+      lastErrorCode: "canonical_write_unconfirmed",
+      lastErrorMessage:
+        "Canonical write outcome is unconfirmed; recovery is required: "
+        + message,
+      updatedAt: new Date().toISOString(),
+    });
+  } catch (diagnosticError) {
+    // If the queue diagnostic also fails, the original processing claim and
+    // timestamp remain available for lease-based recovery.
+  }
+}
+
+function retryCompletedTaskRedactions_(queueSheet, tasks) {
+  const redactedPayload = JSON.stringify({ redacted: true });
+
+  tasks.forEach(function(task) {
+    if (task.status !== "done" || isRedactedTaskPayload_(task.payloadJson)) {
+      return;
+    }
+
+    try {
+      // Status and canonical data may already be durable even when the
+      // original completion call lost its payload redaction write. Retry the
+      // sensitive-data cleanup on every later processor invocation.
+      markQueueTasks_(queueSheet, [task], {
+        payloadJson: redactedPayload,
+        lastErrorCode: "",
+        lastErrorMessage: "",
+        updatedAt: new Date().toISOString(),
+      });
+      task.payloadJson = redactedPayload;
+      task.lastErrorCode = "";
+      task.lastErrorMessage = "";
+    } catch (error) {
+      try {
+        markQueueTasks_(queueSheet, [task], {
+          lastErrorCode: "redaction_unconfirmed",
+          lastErrorMessage:
+            "Completed task payload redaction failed: "
+            + (error && error.message ? error.message : String(error)),
+          updatedAt: new Date().toISOString(),
+        });
+      } catch (diagnosticError) {
+        // Preserve the completed task and retry the cleanup on the next run.
+      }
+    }
+  });
+}
+
+/**
+ * Reconciles expired processing claims at transaction granularity. A complete
+ * postcondition match is marked done, an unapplied group is returned to
+ * pending, and an ambiguous or partial result is failed conservatively.
+ */
+
+// ----- 07-queue-recovery.gs -----
+
+// Source module for the generated manual Apps Script gateway.
+
+function reconcileStaleProcessingTransactions_(
+  spreadsheet,
+  queueSheet,
+  queuedTasks,
+  now,
+  maxTransactions,
+) {
+  const nowMs = now.getTime();
+  const recoveredAt = now.toISOString();
+  const result = {
+    processedTransactions: 0,
+    failedTransactions: 0,
+    processedTasks: 0,
+    failedTasks: 0,
+    recoveredTransactions: 0,
+  };
+  const canonicalTables = Object.create(null);
+
+  const groups = groupTasksByTransaction_(queuedTasks);
+
+  for (let groupIndex = 0; groupIndex < groups.length; groupIndex += 1) {
+    const group = groups[groupIndex];
+
+    if (group.allTerminal) {
+      continue;
+    }
+
+    // A pending group is the earliest non-terminal work and must be allowed
+    // to run before any later stale claim is reconciled.
+    if (group.allPending || result.recoveredTransactions >= maxTransactions) {
+      break;
+    }
+
+    const hasStaleTask = group.tasks.some(function(task) {
+      return isStaleProcessingTask_(task, nowMs);
+    });
+
+    if (!hasStaleTask) {
+      break;
+    }
+
+    let reconciliation;
+
+    try {
+      reconciliation = reconcileTransactionPostconditions_(
+        spreadsheet,
+        group.tasks,
+        canonicalTables,
+      );
+    } catch (error) {
+      reconciliation = {
+        status: "failed",
+        errorCode: error && error.code ? error.code : "recovery_error",
+        errorMessage: error && error.message
+          ? error.message
+          : String(error),
+      };
+    }
+
+    if (reconciliation.status === "done") {
+      markQueueTasks_(queueSheet, group.tasks, {
+        status: "done",
+        payloadJson: JSON.stringify({ redacted: true }),
+        lastErrorCode: "",
+        lastErrorMessage: "",
+        updatedAt: recoveredAt,
+      });
+
+      group.tasks.forEach(function(task) {
+        task.status = "done";
+        task.payloadJson = JSON.stringify({ redacted: true });
+        task.updatedAt = recoveredAt;
+      });
+      result.processedTransactions += 1;
+      result.processedTasks += group.tasks.length;
+      result.recoveredTransactions += 1;
+      continue;
+    }
+
+    if (reconciliation.status === "pending") {
+      if (hasReachedQueueAttemptLimit_(group.tasks)) {
+        markQueueTasks_(queueSheet, group.tasks, {
+          status: "failed",
+          lastErrorCode: "retry_limit_exceeded",
+          lastErrorMessage:
+            "Transaction exceeded the maximum queue processing attempts",
+          updatedAt: recoveredAt,
+        });
+
+        group.tasks.forEach(function(task) {
+          task.status = "failed";
+          task.updatedAt = recoveredAt;
+        });
+        result.failedTransactions += 1;
+        result.failedTasks += group.tasks.length;
+        result.recoveredTransactions += 1;
+        continue;
+      }
+
+      markQueueTasks_(queueSheet, group.tasks, {
+        status: "pending",
+        lastErrorCode: "stale_processing_recovered",
+        lastErrorMessage: "Recovered an unapplied transaction claim",
+        updatedAt: recoveredAt,
+      });
+
+      group.tasks.forEach(function(task) {
+        task.status = "pending";
+        task.updatedAt = recoveredAt;
+      });
+      break;
+    }
+
+    markQueueTasks_(queueSheet, group.tasks, {
+      status: "failed",
+      lastErrorCode: reconciliation.errorCode || "partial_apply",
+      lastErrorMessage: reconciliation.errorMessage
+        || "Transaction postconditions are ambiguous; manual recovery is required",
+      updatedAt: recoveredAt,
+    });
+
+    group.tasks.forEach(function(task) {
+      task.status = "failed";
+      task.updatedAt = recoveredAt;
+    });
+    result.failedTransactions += 1;
+    result.failedTasks += group.tasks.length;
+    result.recoveredTransactions += 1;
+  }
+
+  return result;
+}
+
 function reconcileTransactionPostconditions_(
   spreadsheet,
   tasks,
@@ -1810,6 +2642,10 @@ function areCanonicalCellsEqual_(left, right) {
   return String(left) === String(right);
 }
 
+// ----- 08-canonical-store.gs -----
+
+// Source module for the generated manual Apps Script gateway.
+
 function applyQueueTransaction_(spreadsheet, tasks) {
   const tables = Object.create(null);
   const affectedSheetNames = [];
@@ -2203,393 +3039,9 @@ function clearTrailingCanonicalColumns_(sheet, firstTrailingColumn) {
   }
 }
 
-function markQueueTasks_(queueSheet, tasks, patch) {
-  const statusIndex = TYPED_SHEETS_TASK_QUEUE_HEADERS.indexOf("status") + 1;
-  const payloadJsonIndex =
-    TYPED_SHEETS_TASK_QUEUE_HEADERS.indexOf("payloadJson") + 1;
-  const attemptsIndex =
-    TYPED_SHEETS_TASK_QUEUE_HEADERS.indexOf("attempts") + 1;
-  const lastErrorCodeIndex =
-    TYPED_SHEETS_TASK_QUEUE_HEADERS.indexOf("lastErrorCode") + 1;
-  const lastErrorMessageIndex =
-    TYPED_SHEETS_TASK_QUEUE_HEADERS.indexOf("lastErrorMessage") + 1;
-  const updatedAtIndex =
-    TYPED_SHEETS_TASK_QUEUE_HEADERS.indexOf("updatedAt") + 1;
+// ----- 09-direct-operations.gs -----
 
-  tasks.forEach(function(task) {
-    if (patch.status !== undefined) {
-      queueSheet.getRange(task.rowNumber, statusIndex, 1, 1).setValues([
-        [patch.status],
-      ]);
-    }
-
-    if (patch.payloadJson !== undefined) {
-      queueSheet.getRange(task.rowNumber, payloadJsonIndex, 1, 1).setValues([
-        [patch.payloadJson],
-      ]);
-    }
-
-    if (patch.status === "processing") {
-      const nextAttempts = Number(task.attempts || 0) + 1;
-
-      queueSheet.getRange(task.rowNumber, attemptsIndex, 1, 1).setValues([
-        [nextAttempts],
-      ]);
-      task.attempts = nextAttempts;
-    }
-
-    if (patch.lastErrorCode !== undefined) {
-      queueSheet.getRange(task.rowNumber, lastErrorCodeIndex, 1, 1).setValues([
-        [patch.lastErrorCode],
-      ]);
-    }
-
-    if (patch.lastErrorMessage !== undefined) {
-      queueSheet
-        .getRange(task.rowNumber, lastErrorMessageIndex, 1, 1)
-        .setValues([[patch.lastErrorMessage]]);
-    }
-
-    if (patch.updatedAt !== undefined) {
-      queueSheet.getRange(task.rowNumber, updatedAtIndex, 1, 1).setValues([
-        [patch.updatedAt],
-      ]);
-    }
-  });
-}
-
-function getOrCreateCanonicalSheetName_(spreadsheet, logicalSheetName) {
-  const existingMapping = getCanonicalSheetMapping_(
-    spreadsheet,
-    logicalSheetName,
-  );
-
-  if (existingMapping) {
-    return existingMapping.canonicalSheetName;
-  }
-
-  const hash = createShortHash_(logicalSheetName);
-  let collisionIndex = 0;
-
-  while (collisionIndex < 100) {
-    const canonicalSheetName = createCanonicalSheetName_(
-      logicalSheetName,
-      hash,
-      collisionIndex,
-    );
-
-    if (!spreadsheet.getSheetByName(canonicalSheetName)) {
-      persistCanonicalSheetMapping_(spreadsheet, {
-        logicalSheetName: logicalSheetName,
-        canonicalSheetName: canonicalSheetName,
-        projectionSheetName: logicalSheetName,
-      });
-
-      return canonicalSheetName;
-    }
-
-    collisionIndex += 1;
-  }
-
-  throw gatewayError_(
-    "system_sheet_name_collision",
-    "Could not allocate a canonical sheet name for " + logicalSheetName,
-  );
-}
-
-function createCanonicalSheetName_(logicalSheetName, hash, collisionIndex) {
-  const suffix = "_" + hash + (collisionIndex === 0 ? "" : "_" + collisionIndex);
-  const maxSlugLength =
-    TYPED_SHEETS_MAX_SHEET_NAME_LENGTH
-    - TYPED_SHEETS_DATA_SHEET_PREFIX.length
-    - suffix.length;
-  const slug = createSheetNameSlug_(logicalSheetName).slice(
-    0,
-    Math.max(1, maxSlugLength),
-  );
-
-  return TYPED_SHEETS_DATA_SHEET_PREFIX + slug + suffix;
-}
-
-function createSheetNameSlug_(value) {
-  const slug = value
-    .replace(/[^A-Za-z0-9_-]/g, "_")
-    .replace(/_+/g, "_")
-    .replace(/^_+|_+$/g, "");
-
-  return slug || "sheet";
-}
-
-function createShortHash_(value) {
-  return bytesToHex_(Utilities.computeDigest(
-    Utilities.DigestAlgorithm.SHA_256,
-    value,
-  )).slice(0, 12);
-}
-
-/**
- * Creates a stable fingerprint for one enqueue request. Mutable queue state is
- * intentionally excluded so the fingerprint survives processing and retries.
- */
-function createTaskFingerprint_(task) {
-  const canonicalValue = [
-    task.taskId,
-    task.transactionId,
-    task.transactionIndex,
-    task.operation,
-    task.sheetName,
-    task.keyHeader,
-    task.keyValue,
-    task.expectedVersion === null ? "" : task.expectedVersion,
-    task.payloadJson,
-  ].join("\u001f");
-
-  return bytesToHex_(Utilities.computeDigest(
-    Utilities.DigestAlgorithm.SHA_256,
-    canonicalValue,
-  ));
-}
-
-function bytesToHex_(bytes) {
-  let hex = "";
-
-  for (let index = 0; index < bytes.length; index += 1) {
-    const byte = bytes[index];
-    const unsignedByte = byte < 0 ? byte + 256 : byte;
-    hex += ("0" + unsignedByte.toString(16)).slice(-2);
-  }
-
-  return hex;
-}
-
-function getCanonicalSheetMapping_(spreadsheet, logicalSheetName) {
-  const sheet = spreadsheet.getSheetByName(TYPED_SHEETS_META_SHEET_NAME);
-
-  if (!sheet) {
-    return null;
-  }
-
-  const rows = readMetaRows_(sheet);
-  const key = TYPED_SHEETS_META_MAPPING_KEY_PREFIX + logicalSheetName;
-
-  for (let index = 0; index < rows.length; index += 1) {
-    if (rows[index][0] !== key) {
-      continue;
-    }
-
-    try {
-      const mapping = JSON.parse(String(rows[index][1]));
-
-      if (
-        mapping
-        && mapping.logicalSheetName === logicalSheetName
-        && typeof mapping.canonicalSheetName === "string"
-        && mapping.canonicalSheetName.trim() !== ""
-      ) {
-        return mapping;
-      }
-    } catch (error) {
-      throw gatewayError_(
-        "invalid_meta",
-        "Invalid canonical sheet mapping for " + logicalSheetName,
-      );
-    }
-  }
-
-  return null;
-}
-
-function persistCanonicalSheetMapping_(spreadsheet, mapping) {
-  const sheet = ensureMetaSheetStructure_(spreadsheet);
-  const rows = readMetaRows_(sheet);
-  const key = TYPED_SHEETS_META_MAPPING_KEY_PREFIX + mapping.logicalSheetName;
-  const value = JSON.stringify(mapping);
-
-  for (let index = 0; index < rows.length; index += 1) {
-    if (rows[index][0] === key) {
-      sheet.getRange(index + 2, 2, 1, 1).setValues([[value]]);
-      return;
-    }
-  }
-
-  sheet.getRange(sheet.getLastRow() + 1, 1, 1, 2).setValues([[key, value]]);
-}
-
-function isProjectionMigrationCompleted_(
-  spreadsheet,
-  logicalSheetName,
-  canonicalSheetName,
-) {
-  const sheet = spreadsheet.getSheetByName(TYPED_SHEETS_META_SHEET_NAME);
-
-  if (!sheet) {
-    return false;
-  }
-
-  const key = TYPED_SHEETS_META_MIGRATION_KEY_PREFIX + logicalSheetName;
-  const rows = readMetaRows_(sheet);
-
-  for (let index = 0; index < rows.length; index += 1) {
-    if (rows[index][0] !== key) {
-      continue;
-    }
-
-    try {
-      const migration = JSON.parse(String(rows[index][1]));
-
-      return migration
-        && migration.status === "completed"
-        && migration.canonicalSheetName === canonicalSheetName;
-    } catch (error) {
-      throw gatewayError_(
-        "invalid_meta",
-        "Invalid projection migration metadata for " + logicalSheetName,
-      );
-    }
-  }
-
-  return false;
-}
-
-function markProjectionMigrationCompleted_(
-  spreadsheet,
-  logicalSheetName,
-  canonicalSheetName,
-) {
-  const sheet = ensureMetaSheetStructure_(spreadsheet);
-  const rows = readMetaRows_(sheet);
-  const key = TYPED_SHEETS_META_MIGRATION_KEY_PREFIX + logicalSheetName;
-  const value = JSON.stringify({
-    logicalSheetName: logicalSheetName,
-    canonicalSheetName: canonicalSheetName,
-    status: "completed",
-  });
-
-  for (let index = 0; index < rows.length; index += 1) {
-    if (rows[index][0] === key) {
-      sheet.getRange(index + 2, 2, 1, 1).setValues([[value]]);
-      return;
-    }
-  }
-
-  sheet.getRange(sheet.getLastRow() + 1, 1, 1, 2).setValues([[key, value]]);
-}
-
-function readMetaRows_(sheet) {
-  const lastRow = sheet.getLastRow();
-
-  if (lastRow < 2) {
-    return [];
-  }
-
-  return sheet.getRange(2, 1, lastRow - 1, 2).getValues().map(function(row) {
-    return [String(row[0] || ""), String(row[1] || "")];
-  });
-}
-
-function requireProjectionSheetName_(value, name) {
-  const sheetName = requireString_(value, name);
-
-  if (sheetName.indexOf(TYPED_SHEETS_INTERNAL_PREFIX) === 0) {
-    throw gatewayError_(
-      "invalid_request",
-      name + " must not start with " + TYPED_SHEETS_INTERNAL_PREFIX,
-    );
-  }
-
-  return sheetName;
-}
-
-function ensureProjectionSheet_(spreadsheet, sheetName, headers) {
-  // Validate the requested schema even when the sheet is being created. This
-  // catches duplicate headers before they become a new, invalid system sheet.
-  assertExpectedHeaders_(headers, headers, "projection initialization");
-
-  let sheet = spreadsheet.getSheetByName(sheetName);
-
-  if (!sheet) {
-    sheet = spreadsheet.insertSheet(sheetName);
-  }
-
-  if (isHeaderRowEmpty_(sheet)) {
-    sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
-  } else {
-    assertExpectedHeaders_(
-      readHeaderRow_(sheet),
-      headers,
-      "projection initialization",
-    );
-  }
-}
-
-function ensureInternalSheet_(spreadsheet, sheetName, headers) {
-  let sheet = spreadsheet.getSheetByName(sheetName);
-
-  if (!sheet) {
-    sheet = spreadsheet.insertSheet(sheetName);
-  }
-
-  if (isHeaderRowEmpty_(sheet)) {
-    sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
-  } else {
-    assertExpectedHeaders_(
-      readHeaderRow_(sheet),
-      headers,
-      "canonical initialization",
-    );
-  }
-
-  hideInternalSheet_(sheet);
-  protectInternalSheet_(sheet, sheetName);
-}
-
-function hideInternalSheet_(sheet) {
-  sheet.hideSheet();
-}
-
-function protectInternalSheet_(sheet, sheetName) {
-  try {
-    const protection = sheet.protect();
-    protection.setDescription("typed-sheets internal sheet: " + sheetName);
-
-    if (typeof protection.setWarningOnly === "function") {
-      protection.setWarningOnly(false);
-    }
-
-    if (
-      typeof protection.getEditors === "function"
-      && typeof protection.removeEditors === "function"
-    ) {
-      protection.removeEditors(protection.getEditors());
-    }
-
-    if (
-      typeof protection.canDomainEdit === "function"
-      && protection.canDomainEdit()
-      && typeof protection.setDomainEdit === "function"
-    ) {
-      protection.setDomainEdit(false);
-    }
-  } catch (error) {
-    Logger.log(
-      "typed-sheets could not protect internal sheet "
-        + sheetName
-        + ": "
-        + (error && error.message ? error.message : String(error)),
-    );
-  }
-}
-
-function writeHeaderIfEmpty_(sheet, headers) {
-  if (!isHeaderRowEmpty_(sheet)) {
-    throw gatewayError_(
-      "header_not_empty",
-      "Header row is not empty; refusing to overwrite existing data",
-    );
-  }
-
-  sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
-}
+// Source module for the generated manual Apps Script gateway.
 
 function readSheet_(spreadsheet, request) {
   const sheet = getSheet_(spreadsheet, request.sheetName);
@@ -2959,296 +3411,9 @@ function deleteRowsByKey_(spreadsheet, request) {
   };
 }
 
-function getSheet_(spreadsheet, sheetName) {
-  const name = requireString_(sheetName, "sheetName");
-  const sheet = spreadsheet.getSheetByName(name);
+// ----- 10-shared-utils.gs -----
 
-  if (!sheet) {
-    throw gatewayError_("sheet_not_found", "Sheet not found: " + name);
-  }
-
-  return sheet;
-}
-
-function requireString_(value, name) {
-  if (typeof value !== "string" || value.trim() === "") {
-    throw gatewayError_("invalid_request", name + " must be a non-empty string");
-  }
-
-  return value;
-}
-
-function requireStringArray_(value, name) {
-  if (!Array.isArray(value) || value.length === 0) {
-    throw gatewayError_(
-      "invalid_request",
-      name + " must be a non-empty string array",
-    );
-  }
-
-  value.forEach(function(item, index) {
-    if (typeof item !== "string" || item.trim() === "") {
-      throw gatewayError_(
-        "invalid_request",
-        name + "[" + index + "] must be a non-empty string",
-      );
-    }
-  });
-
-  return value;
-}
-
-function requireSheetCellArray_(value, name) {
-  if (!Array.isArray(value)) {
-    throw gatewayError_("invalid_request", name + " must be an array");
-  }
-
-  value.forEach(function(item, index) {
-    if (
-      item !== null &&
-      typeof item !== "string" &&
-      typeof item !== "number" &&
-      typeof item !== "boolean"
-    ) {
-      throw gatewayError_(
-        "invalid_request",
-        name + "[" + index + "] must be a string, number, boolean, or null",
-      );
-    }
-  });
-
-  return value;
-}
-
-function requireSheetCellRows_(value, name) {
-  if (!Array.isArray(value)) {
-    throw gatewayError_("invalid_request", name + " must be an array");
-  }
-
-  value.forEach(function(row, index) {
-    requireSheetCellArray_(row, name + "[" + index + "]");
-  });
-
-  return value;
-}
-
-function requireUpdateRows_(value, name) {
-  if (!Array.isArray(value) || value.length === 0) {
-    throw gatewayError_("invalid_request", name + " must be a non-empty array");
-  }
-
-  value.forEach(function(update, index) {
-    if (!update || typeof update !== "object" || Array.isArray(update)) {
-      throw gatewayError_(
-        "invalid_request",
-        name + "[" + index + "] must be an object",
-      );
-    }
-
-    requireString_(update.id, name + "[" + index + "].id");
-    requireFiniteNumber_(
-      update.expectedVersion,
-      name + "[" + index + "].expectedVersion",
-    );
-    requireSheetCellArray_(update.row, name + "[" + index + "].row");
-  });
-
-  return value;
-}
-
-function requireQueueTasks_(value, name) {
-  if (!Array.isArray(value) || value.length === 0) {
-    throw gatewayError_("invalid_request", name + " must be a non-empty array");
-  }
-
-  return value.map(function(task, index) {
-    const taskName = name + "[" + index + "]";
-
-    if (!task || typeof task !== "object" || Array.isArray(task)) {
-      throw gatewayError_("invalid_request", taskName + " must be an object");
-    }
-
-    const operation = requireQueueOperation_(
-      task.operation,
-      taskName + ".operation",
-    );
-
-    return {
-      taskId: requireString_(task.taskId, taskName + ".taskId"),
-      transactionId: requireString_(
-        task.transactionId,
-        taskName + ".transactionId",
-      ),
-      transactionIndex: requireNonNegativeInteger_(
-        task.transactionIndex,
-        taskName + ".transactionIndex",
-      ),
-      operation: operation,
-      sheetName: requireProjectionSheetName_(
-        task.sheetName,
-        taskName + ".sheetName",
-      ),
-      keyHeader: requireString_(task.keyHeader, taskName + ".keyHeader"),
-      keyValue: requireString_(task.keyValue, taskName + ".keyValue"),
-      expectedVersion: requireQueueExpectedVersion_(
-        task.expectedVersion,
-        operation,
-        taskName + ".expectedVersion",
-      ),
-      payloadJson: requireJsonObjectString_(
-        task.payloadJson,
-        taskName + ".payloadJson",
-      ),
-    };
-  });
-}
-
-function requireProcessTaskQueueOptions_(request) {
-  const maxTransactions = request.maxTransactions === undefined
-    ? 1
-    : requirePositiveInteger_(request.maxTransactions, "maxTransactions");
-
-  return {
-    maxTransactions: maxTransactions,
-  };
-}
-
-function requireQueueOperation_(value, name) {
-  const operation = requireString_(value, name);
-
-  if (["insert", "update", "delete"].indexOf(operation) === -1) {
-    throw gatewayError_(
-      "invalid_request",
-      name + " must be insert, update, or delete",
-    );
-  }
-
-  return operation;
-}
-
-function requireQueueExpectedVersion_(value, operation, name) {
-  if (operation === "insert") {
-    if (value === null || value === "" || value === undefined) {
-      return null;
-    }
-
-    throw gatewayError_(
-      "invalid_request",
-      name + " must be null or blank for insert tasks",
-    );
-  }
-
-  return requireFiniteNumber_(value, name);
-}
-
-function requireJsonObjectString_(value, name) {
-  const json = requireString_(value, name);
-  let parsed;
-
-  try {
-    parsed = JSON.parse(json);
-  } catch (error) {
-    throw gatewayError_("invalid_request", name + " must be valid JSON");
-  }
-
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw gatewayError_("invalid_request", name + " must encode an object");
-  }
-
-  return json;
-}
-
-function requirePositiveInteger_(value, name) {
-  const numberValue = Number(value);
-
-  if (!Number.isInteger(numberValue) || numberValue < 1) {
-    throw gatewayError_("invalid_request", name + " must be a positive integer");
-  }
-
-  return numberValue;
-}
-
-function requireNonNegativeInteger_(value, name) {
-  if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
-    throw gatewayError_(
-      "invalid_request",
-      name + " must be a non-negative integer",
-    );
-  }
-
-  return value;
-}
-
-function requirePositiveIntegerArray_(value, name) {
-  if (!Array.isArray(value)) {
-    throw gatewayError_("invalid_request", name + " must be an array");
-  }
-
-  value.forEach(function(item, index) {
-    requirePositiveInteger_(item, name + "[" + index + "]");
-  });
-
-  return value.map(function(item) {
-    return Number(item);
-  });
-}
-
-function requireFiniteNumber_(value, name) {
-  if (typeof value !== "number" || !Number.isFinite(value)) {
-    throw gatewayError_("invalid_request", name + " must be a number");
-  }
-
-  return value;
-}
-
-function requireNumberRecord_(value, name) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw gatewayError_("invalid_request", name + " must be an object");
-  }
-
-  Object.keys(value).forEach(function(key) {
-    if (typeof value[key] !== "number" || !Number.isFinite(value[key])) {
-      throw gatewayError_("invalid_request", name + "." + key + " must be a number");
-    }
-  });
-
-  return value;
-}
-
-function assertExpectedHeaders_(actualHeaders, expectedHeaders, operation) {
-  if (actualHeaders.length < expectedHeaders.length) {
-    throw gatewayError_(
-      "schema_drift",
-      "Header row changed before " + operation,
-    );
-  }
-
-  const seenHeaders = Object.create(null);
-
-  actualHeaders.forEach(function(header) {
-    if (header === "") {
-      return;
-    }
-
-    if (seenHeaders[header]) {
-      throw gatewayError_(
-        "schema_drift",
-        "Duplicate header before " + operation + ": " + header,
-      );
-    }
-
-    seenHeaders[header] = true;
-  });
-
-  expectedHeaders.forEach(function(expectedHeader, index) {
-    if (actualHeaders[index] !== expectedHeader) {
-      throw gatewayError_(
-        "schema_drift",
-        "Header row changed before " + operation,
-      );
-    }
-  });
-}
+// Source module for the generated manual Apps Script gateway.
 
 function readHeaderRow_(sheet) {
   const lastColumn = sheet.getLastColumn();
@@ -3306,114 +3471,6 @@ function error_(code, message) {
   });
 }
 
-function createTypedSheetsConfig_() {
-  const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
-  const activeSheet = spreadsheet.getActiveSheet();
-  const lock = LockService.getDocumentLock();
-
-  lock.waitLock(30000);
-
-  try {
-    const existing = getTypedSheetsConfig_();
-    const gatewayUrl = getGatewayUrl_(existing);
-    const gatewaySecret = existing && existing.auth.gatewaySecret
-      ? existing.auth.gatewaySecret
-      : Utilities.getUuid();
-
-    const config = {
-      spreadsheetUrl: spreadsheet.getUrl(),
-      defaultSheetName: activeSheet.getName(),
-      auth: {
-        type: "apps-script-gateway",
-        gatewayUrl: gatewayUrl,
-        gatewaySecret: gatewaySecret,
-      },
-    };
-
-    PropertiesService.getDocumentProperties().setProperty(
-      TYPED_SHEETS_CONFIG_PROPERTY,
-      JSON.stringify(config),
-    );
-
-    ensureMetaSheet_(spreadsheet, config);
-
-    return config;
-  } finally {
-    lock.releaseLock();
-  }
-}
-
-function getTypedSheetsConfig_() {
-  const raw = PropertiesService.getDocumentProperties().getProperty(
-    TYPED_SHEETS_CONFIG_PROPERTY,
-  );
-
-  return raw ? JSON.parse(raw) : null;
-}
-
-function ensureMetaSheet_(spreadsheet, config) {
-  const sheet = ensureMetaSheetStructure_(spreadsheet);
-  const preservedRows = readMetaRows_(sheet).filter(function(row) {
-    return row[0].indexOf(TYPED_SHEETS_META_MAPPING_KEY_PREFIX) === 0
-      || row[0].indexOf(TYPED_SHEETS_META_MIGRATION_KEY_PREFIX) === 0;
-  });
-  const rows = [
-    ["spreadsheetUrl", config.spreadsheetUrl],
-    ["defaultSheetName", config.defaultSheetName],
-    ["gatewayUrl", config.auth.gatewayUrl],
-    ["authType", config.auth.type],
-    ["connectedAt", new Date().toISOString()],
-  ].concat(preservedRows);
-
-  sheet.clear();
-  sheet.hideSheet();
-  sheet.getRange(1, 1, 1, 2).setValues([["key", "value"]]);
-  sheet.getRange(2, 1, rows.length, 2).setValues(rows);
-}
-
-function ensureMetaSheetStructure_(spreadsheet) {
-  const sheet = spreadsheet.getSheetByName(TYPED_SHEETS_META_SHEET_NAME)
-    || spreadsheet.insertSheet(TYPED_SHEETS_META_SHEET_NAME);
-
-  sheet.hideSheet();
-
-  if (isHeaderRowEmpty_(sheet)) {
-    sheet.getRange(1, 1, 1, 2).setValues([["key", "value"]]);
-  }
-
-  return sheet;
-}
-
-function getGatewayUrl_(existingConfig) {
-  if (TYPED_SHEETS_GATEWAY_URL.trim() !== "") {
-    return requireGatewayUrl_(TYPED_SHEETS_GATEWAY_URL.trim());
-  }
-
-  if (
-    existingConfig
-    && existingConfig.auth
-    && typeof existingConfig.auth.gatewayUrl === "string"
-    && existingConfig.auth.gatewayUrl.trim() !== ""
-  ) {
-    return requireGatewayUrl_(existingConfig.auth.gatewayUrl.trim());
-  }
-
-  throw gatewayError_(
-    "missing_gateway_url",
-    "Set TYPED_SHEETS_GATEWAY_URL to the deployed Web App URL that ends with /exec before running setupTypedSheets()",
-  );
-}
-
-function requireGatewayUrl_(gatewayUrl) {
-  if (!/^https:\/\/script\.google\.com\/macros\/s\/[^/]+\/exec$/.test(gatewayUrl)) {
-    throw gatewayError_(
-      "invalid_gateway_url",
-      "TYPED_SHEETS_GATEWAY_URL must be a deployed Apps Script Web App URL that ends with /exec",
-    );
-  }
-
-  return gatewayUrl;
-}
 
 function json_(value) {
   return ContentService
