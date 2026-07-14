@@ -1,5 +1,8 @@
 import type { AppsScriptQueueAdapter } from "../../../adapter/queued/QueuedSheetAdapter.js";
 import type { ColumnMap } from "../../shared/RepositoryTypes.js";
+import type { QueuedRepositoryReadCacheOptions } from "../cache/QueuedRepositoryReadCache.js";
+
+export type { QueuedRepositoryReadCacheOptions } from "../cache/QueuedRepositoryReadCache.js";
 
 export type QueuedColumnMap<T extends object> = ColumnMap<T>;
 
@@ -10,6 +13,8 @@ export interface CreateQueuedSheetRepositoryInput<
   sheetName: string;
   key: keyof T & string;
   columns: QueuedColumnMap<T>;
+  /** Optional repository-local cache for confirmed canonical reads. */
+  cache?: QueuedRepositoryReadCacheOptions;
 }
 
 /** Public queued repository contract with an explicit transaction boundary. */
