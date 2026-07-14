@@ -826,7 +826,9 @@ function processTaskQueue_(spreadsheet, request) {
     .slice(0, remainingTransactionBudget);
   const processingStartedAt = now.toISOString();
 
-  pendingGroups.forEach(function(group) {
+  for (let groupIndex = 0; groupIndex < pendingGroups.length; groupIndex += 1) {
+    const group = pendingGroups[groupIndex];
+
     if (hasReachedQueueAttemptLimit_(group.tasks)) {
       markQueueTasks_(queueSheet, group.tasks, {
         status: "failed",
@@ -837,7 +839,7 @@ function processTaskQueue_(spreadsheet, request) {
       });
       result.failedTransactions += 1;
       result.failedTasks += group.tasks.length;
-      return;
+      continue;
     }
 
     markQueueTasks_(queueSheet, group.tasks, {
@@ -853,7 +855,9 @@ function processTaskQueue_(spreadsheet, request) {
 
       if (error && error.canonicalWriteStarted === true) {
         recordCanonicalWriteFailure_(queueSheet, group.tasks, error);
-        return;
+        // The canonical outcome is unknown. Later transactions must remain
+        // pending until this transaction is reconciled in sequence order.
+        break;
       }
 
       markQueueTasks_(queueSheet, group.tasks, {
@@ -865,7 +869,7 @@ function processTaskQueue_(spreadsheet, request) {
 
       result.failedTransactions += 1;
       result.failedTasks += group.tasks.length;
-      return;
+      continue;
     }
 
     try {
@@ -882,16 +886,33 @@ function processTaskQueue_(spreadsheet, request) {
       });
     } catch (error) {
       recordQueueCompletionFailure_(queueSheet, group.tasks, error);
-      return;
+      // Canonical data is already written but the terminal queue state is
+      // unknown. Do not let a later transaction overtake this claim.
+      break;
     }
 
     result.processedTransactions += 1;
     result.processedTasks += group.tasks.length;
-  });
+  }
 
-  result.remainingPendingTasks = readQueuedTasks_(queueSheet).filter(function(task) {
+  const remainingTasks = readQueuedTasks_(queueSheet);
+  result.remainingPendingTasks = remainingTasks.filter(function(task) {
     return task.status === "pending";
   }).length;
+  const recoveryPendingTasks = remainingTasks.filter(function(task) {
+    return task.status === "processing"
+      || (
+        task.status === "done"
+        && !isRedactedTaskPayload_(task.payloadJson)
+      );
+  }).length;
+
+  // Omit the field for an empty recovery state so older callers that consume
+  // this gateway response remain compatible. When present, the field includes
+  // processing claims and completed tasks whose payload redaction needs retry.
+  if (recoveryPendingTasks > 0) {
+    result.recoveryPendingTasks = recoveryPendingTasks;
+  }
 
   return result;
 }
@@ -1205,11 +1226,17 @@ function parseQueuedTaskRow_(row, rowNumber) {
  * transaction stuck in recovery indefinitely.
  */
 function parseQueuedTaskAttempts_(value, rowNumber) {
-  const attempts = value === "" || value === null || value === undefined
-    ? 0
-    : Number(value);
+  if (value === "" || value === null || value === undefined) {
+    return 0;
+  }
 
-  if (!Number.isInteger(attempts) || attempts < 0) {
+  const attempts = value;
+
+  if (
+    typeof attempts !== "number"
+    || !Number.isInteger(attempts)
+    || attempts < 0
+  ) {
     throw gatewayError_(
       "invalid_task",
       "Invalid attempts at queue row " + rowNumber,

@@ -641,6 +641,30 @@ describe("AppsScriptGatewayAdapter", () => {
     });
   });
 
+  it("preserves processing claims in the queue processor result", async () => {
+    const fetch = vi.fn().mockResolvedValue(
+      createJsonResponse({
+        ok: true,
+        processedTransactions: 0,
+        failedTransactions: 0,
+        processedTasks: 0,
+        failedTasks: 0,
+        remainingPendingTasks: 1,
+        recoveryPendingTasks: 2,
+      }),
+    );
+    const adapter = new AppsScriptGatewayAdapter({
+      gatewayUrl: "https://script.google.com/macros/s/deployment-id/exec",
+      gatewaySecret: "gateway-secret",
+      fetch,
+    });
+
+    await expect(adapter.processTaskQueue()).resolves.toMatchObject({
+      remainingPendingTasks: 1,
+      recoveryPendingTasks: 2,
+    });
+  });
+
   it("rejects invalid processTaskQueue response payloads", async () => {
     const fetch = vi.fn().mockResolvedValue(
       createJsonResponse({

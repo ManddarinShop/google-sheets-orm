@@ -96,10 +96,16 @@ export function createQueuedSheetRepository<
       result = await callback(transactionScope);
     } catch (error) {
       transactionScope.clear();
+      transactionScope.close();
       throw error;
     }
 
-    await transactionScope.flush();
+    try {
+      await transactionScope.flush();
+    } finally {
+      transactionScope.close();
+    }
+
     return result;
   }
 
