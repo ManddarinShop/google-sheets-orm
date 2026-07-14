@@ -11,6 +11,10 @@ const TYPED_SHEETS_DATA_SHEET_PREFIX = "_typed_sheets_data_";
 const TYPED_SHEETS_META_MAPPING_KEY_PREFIX = "sheetMapping:";
 const TYPED_SHEETS_MAX_SHEET_NAME_LENGTH = 100;
 const TYPED_SHEETS_TASK_QUEUE_SHEET_NAME = "_typed_sheets_task_queue";
+// Apps Script executions cannot retain a document lock after they terminate.
+// A processing claim older than this lease is therefore safe to return to the
+// pending state on the next processor invocation.
+const TYPED_SHEETS_PROCESSING_LEASE_MS = 5 * 60 * 1000;
 const TYPED_SHEETS_TASK_QUEUE_HEADERS = [
   "taskId",
   "transactionId",
@@ -28,11 +32,17 @@ const TYPED_SHEETS_TASK_QUEUE_HEADERS = [
   "lastErrorMessage",
   "createdAt",
   "updatedAt",
+  "taskFingerprint",
 ];
+const TYPED_SHEETS_LEGACY_TASK_QUEUE_HEADERS =
+  TYPED_SHEETS_TASK_QUEUE_HEADERS.slice(0, -1);
+const TYPED_SHEETS_LEGACY_REDACTED_FINGERPRINT_PREFIX =
+  "legacy-redacted:";
 const TYPED_SHEETS_QUEUE_OPERATIONS = [
   "initializeSystemSheets",
   "enqueueTasks",
   "processTaskQueue",
+  "readCanonicalSheet",
 ];
 const TYPED_SHEETS_LEGACY_DIRECT_OPERATIONS = [
   "ensureSheet",
@@ -105,6 +115,10 @@ function doPost(e) {
 
       if (operation === "processTaskQueue") {
         return json_(processTaskQueue_(spreadsheet, request));
+      }
+
+      if (operation === "readCanonicalSheet") {
+        return json_(readCanonicalSheet_(spreadsheet, request));
       }
 
       if (operation === "readSheet") {
@@ -223,7 +237,7 @@ function validateOperation_(request) {
     return operation;
   }
 
-  if (operation === "readSheet") {
+  if (operation === "readSheet" || operation === "readCanonicalSheet") {
     requireString_(request.sheetName, "sheetName");
     return operation;
   }
@@ -321,11 +335,13 @@ function initializeSystemSheets_(spreadsheet, request) {
 
   ensureProjectionSheet_(spreadsheet, logicalSheetName, headers);
   ensureInternalSheet_(spreadsheet, canonicalSheetName, headers);
-  ensureInternalSheet_(
+  migrateProjectionToCanonicalIfNeeded_(
     spreadsheet,
-    TYPED_SHEETS_TASK_QUEUE_SHEET_NAME,
-    TYPED_SHEETS_TASK_QUEUE_HEADERS,
+    logicalSheetName,
+    canonicalSheetName,
+    headers,
   );
+  ensureTaskQueueSheet_(spreadsheet);
 
   return {
     logicalSheetName: logicalSheetName,
@@ -333,6 +349,52 @@ function initializeSystemSheets_(spreadsheet, request) {
     projectionSheetName: logicalSheetName,
     taskQueueSheetName: TYPED_SHEETS_TASK_QUEUE_SHEET_NAME,
   };
+}
+
+/**
+ * Seeds an empty canonical sheet from an existing direct-write projection.
+ * This one-time copy preserves legacy rows before queued processing takes
+ * ownership of the canonical state.
+ */
+function migrateProjectionToCanonicalIfNeeded_(
+  spreadsheet,
+  logicalSheetName,
+  canonicalSheetName,
+  headers,
+) {
+  const projectionSheet = getSheet_(spreadsheet, logicalSheetName);
+  const canonicalSheet = getSheet_(spreadsheet, canonicalSheetName);
+
+  if (canonicalSheet.getLastRow() > 1) {
+    return;
+  }
+
+  const projectionLastRow = projectionSheet.getLastRow();
+
+  if (projectionLastRow <= 1) {
+    return;
+  }
+
+  const projectionLastColumn = projectionSheet.getLastColumn();
+  const projectionHeaders = projectionSheet
+    .getRange(1, 1, 1, projectionLastColumn)
+    .getValues()[0]
+    .map(function(value) {
+      return String(value);
+    });
+
+  assertExpectedHeaders_(projectionHeaders, headers, "canonical migration");
+
+  const rows = projectionSheet
+    .getRange(2, 1, projectionLastRow - 1, headers.length)
+    .getValues()
+    .map(function(row) {
+      return row.map(toSheetCell_);
+    });
+
+  canonicalSheet
+    .getRange(2, 1, rows.length, headers.length)
+    .setValues(rows);
 }
 
 /**
@@ -351,7 +413,7 @@ function enqueueTasks_(spreadsheet, request) {
   const rows = [];
   const enqueuedTasks = [];
 
-  tasks.forEach(function(task, index) {
+  tasks.forEach(function(task) {
     if (seenTaskIds[task.taskId]) {
       throw gatewayError_(
         "invalid_request",
@@ -359,48 +421,55 @@ function enqueueTasks_(spreadsheet, request) {
       );
     }
 
-    const existingTask = queueState.tasksById[task.taskId];
+    const taskWithFingerprint = {
+      ...task,
+      taskFingerprint: createTaskFingerprint_(task),
+    };
+    const existingTask = queueState.tasksById[taskWithFingerprint.taskId];
 
-    if (existingTask && isSameQueuedTask_(existingTask, task)) {
+    if (existingTask && isSameQueuedTask_(existingTask, taskWithFingerprint)) {
       enqueuedTasks.push({
-        taskId: task.taskId,
+        taskId: taskWithFingerprint.taskId,
         sequence: existingTask.sequence,
       });
-      seenTaskIds[task.taskId] = true;
+      seenTaskIds[taskWithFingerprint.taskId] = true;
       return;
     }
 
     if (existingTask) {
       throw gatewayError_(
         "duplicate_task",
-        "Task already exists: " + task.taskId,
+        "Task already exists: " + taskWithFingerprint.taskId,
       );
     }
 
-    seenTaskIds[task.taskId] = true;
+    seenTaskIds[taskWithFingerprint.taskId] = true;
 
     const sequence = queueState.maxSequence + rows.length + 1;
 
     rows.push([
-      task.taskId,
-      task.transactionId,
-      task.transactionIndex,
+      taskWithFingerprint.taskId,
+      taskWithFingerprint.transactionId,
+      taskWithFingerprint.transactionIndex,
       sequence,
       "pending",
-      task.operation,
-      task.sheetName,
-      task.keyHeader,
-      task.keyValue,
-      task.expectedVersion === null ? "" : task.expectedVersion,
-      task.payloadJson,
+      taskWithFingerprint.operation,
+      taskWithFingerprint.sheetName,
+      taskWithFingerprint.keyHeader,
+      taskWithFingerprint.keyValue,
+      taskWithFingerprint.expectedVersion === null
+        ? ""
+        : taskWithFingerprint.expectedVersion,
+      taskWithFingerprint.payloadJson,
       0,
       "",
       "",
       now,
       now,
+      taskWithFingerprint.taskFingerprint,
     ]);
     enqueuedTasks.push({
-      taskId: task.taskId,
+      taskId: taskWithFingerprint.taskId,
       sequence: sequence,
     });
   });
@@ -440,6 +509,12 @@ function ensureTaskQueueSheet_(spreadsheet) {
       return String(value);
     });
 
+  if (isLegacyTaskQueueHeader_(headerValues)) {
+    migrateLegacyTaskQueueSheet_(queueSheet);
+    headerValues[TYPED_SHEETS_LEGACY_TASK_QUEUE_HEADERS.length] =
+      "taskFingerprint";
+  }
+
   assertExpectedHeaders_(
     headerValues,
     TYPED_SHEETS_TASK_QUEUE_HEADERS,
@@ -447,6 +522,83 @@ function ensureTaskQueueSheet_(spreadsheet) {
   );
 
   return queueSheet;
+}
+
+function isLegacyTaskQueueHeader_(headerValues) {
+  return TYPED_SHEETS_LEGACY_TASK_QUEUE_HEADERS.every(function(header, index) {
+    return headerValues[index] === header;
+  }) && (
+    headerValues[TYPED_SHEETS_LEGACY_TASK_QUEUE_HEADERS.length] === ""
+    || headerValues[TYPED_SHEETS_LEGACY_TASK_QUEUE_HEADERS.length] === null
+  );
+}
+
+/**
+ * Appends the fingerprint column to a pre-fingerprint queue without changing
+ * existing task rows. Legacy rows whose payload was already redacted retain a
+ * task-id-only compatibility marker because their original payload is gone.
+ */
+function migrateLegacyTaskQueueSheet_(queueSheet) {
+  const fingerprintColumn = TYPED_SHEETS_TASK_QUEUE_HEADERS.length;
+
+  queueSheet
+    .getRange(1, fingerprintColumn, 1, 1)
+    .setValues([["taskFingerprint"]]);
+
+  const lastRow = queueSheet.getLastRow();
+
+  if (lastRow < 2) {
+    return;
+  }
+
+  const legacyRows = queueSheet
+    .getRange(2, 1, lastRow - 1, TYPED_SHEETS_LEGACY_TASK_QUEUE_HEADERS.length)
+    .getValues();
+  const fingerprints = legacyRows.map(function(row) {
+    return [createLegacyTaskFingerprint_(row)];
+  });
+
+  queueSheet
+    .getRange(2, fingerprintColumn, fingerprints.length, 1)
+    .setValues(fingerprints);
+}
+
+function createLegacyTaskFingerprint_(row) {
+  const taskId = String(row[0] || "");
+  const status = String(row[4] || "");
+  const payloadJson = String(row[10] || "");
+
+  if (taskId === "") {
+    return "";
+  }
+
+  if (status === "done" && isRedactedTaskPayload_(payloadJson)) {
+    return TYPED_SHEETS_LEGACY_REDACTED_FINGERPRINT_PREFIX + taskId;
+  }
+
+  return createTaskFingerprint_({
+    taskId: taskId,
+    transactionId: String(row[1] || ""),
+    transactionIndex: Number(row[2]),
+    operation: String(row[5] || ""),
+    sheetName: String(row[6] || ""),
+    keyHeader: String(row[7] || ""),
+    keyValue: String(row[8] || ""),
+    expectedVersion: row[9] === "" || row[9] === null ? null : Number(row[9]),
+    payloadJson: payloadJson,
+  });
+}
+
+function isRedactedTaskPayload_(payloadJson) {
+  try {
+    const payload = JSON.parse(payloadJson);
+
+    return payload
+      && payload.redacted === true
+      && Object.keys(payload).length === 1;
+  } catch (error) {
+    return false;
+  }
 }
 
 function readTaskQueueState_(queueSheet) {
@@ -466,6 +618,7 @@ function readTaskQueueState_(queueSheet) {
   const transactionIndexIndex =
     TYPED_SHEETS_TASK_QUEUE_HEADERS.indexOf("transactionIndex");
   const sequenceIndex = TYPED_SHEETS_TASK_QUEUE_HEADERS.indexOf("sequence");
+  const statusIndex = TYPED_SHEETS_TASK_QUEUE_HEADERS.indexOf("status");
   const operationIndex = TYPED_SHEETS_TASK_QUEUE_HEADERS.indexOf("operation");
   const sheetNameIndex = TYPED_SHEETS_TASK_QUEUE_HEADERS.indexOf("sheetName");
   const keyHeaderIndex = TYPED_SHEETS_TASK_QUEUE_HEADERS.indexOf("keyHeader");
@@ -474,6 +627,8 @@ function readTaskQueueState_(queueSheet) {
     TYPED_SHEETS_TASK_QUEUE_HEADERS.indexOf("expectedVersion");
   const payloadJsonIndex =
     TYPED_SHEETS_TASK_QUEUE_HEADERS.indexOf("payloadJson");
+  const taskFingerprintIndex =
+    TYPED_SHEETS_TASK_QUEUE_HEADERS.indexOf("taskFingerprint");
   const rows = queueSheet
     .getRange(
       2,
@@ -488,11 +643,12 @@ function readTaskQueueState_(queueSheet) {
     const sequence = Number(row[sequenceIndex]);
 
     if (taskId !== "") {
-      state.tasksById[taskId] = {
+      const task = {
         taskId: taskId,
         transactionId: String(row[transactionIdIndex] || ""),
         transactionIndex: Number(row[transactionIndexIndex]),
         sequence: sequence,
+        status: String(row[statusIndex] || ""),
         operation: String(row[operationIndex] || ""),
         sheetName: String(row[sheetNameIndex] || ""),
         keyHeader: String(row[keyHeaderIndex] || ""),
@@ -502,7 +658,14 @@ function readTaskQueueState_(queueSheet) {
           ? null
           : Number(row[expectedVersionIndex]),
         payloadJson: String(row[payloadJsonIndex] || ""),
+        taskFingerprint: String(row[taskFingerprintIndex] || ""),
       };
+
+      if (task.taskFingerprint === "") {
+        task.taskFingerprint = createTaskFingerprint_(task);
+      }
+
+      state.tasksById[taskId] = task;
     }
 
     if (Number.isFinite(sequence) && sequence > state.maxSequence) {
@@ -514,31 +677,35 @@ function readTaskQueueState_(queueSheet) {
 }
 
 function isSameQueuedTask_(existingTask, task) {
-  return existingTask.transactionId === task.transactionId
-    && existingTask.transactionIndex === task.transactionIndex
-    && existingTask.operation === task.operation
-    && existingTask.sheetName === task.sheetName
-    && existingTask.keyHeader === task.keyHeader
-    && existingTask.keyValue === task.keyValue
-    && existingTask.expectedVersion === task.expectedVersion
-    && existingTask.payloadJson === task.payloadJson;
+  if (
+    existingTask.taskFingerprint
+      === TYPED_SHEETS_LEGACY_REDACTED_FINGERPRINT_PREFIX + existingTask.taskId
+  ) {
+    return existingTask.status === "done";
+  }
+
+  return existingTask.taskFingerprint === task.taskFingerprint;
 }
 
 /**
  * Processes pending queue transaction groups into canonical sheets.
  *
- * This first processor intentionally keeps the lock for the full claim, apply,
- * and status update cycle. It applies complete pending groups in sequence
- * order, rewrites affected canonical sheets in bulk, and leaves projection sync
- * and stale processing recovery for later queue branches.
+ * This processor keeps the document lock for the full claim, apply, and status
+ * update cycle. It applies complete pending groups in sequence order, rewrites
+ * affected canonical sheets in bulk, and recovers processing claims whose
+ * lease expired after an interrupted execution.
  */
 function processTaskQueue_(spreadsheet, request) {
   const options = requireProcessTaskQueueOptions_(request);
   const queueSheet = ensureTaskQueueSheet_(spreadsheet);
   const queuedTasks = readQueuedTasks_(queueSheet);
+  const now = new Date();
+
+  recoverStaleProcessingTasks_(queueSheet, queuedTasks, now);
+
   const pendingGroups = groupPendingTasksByTransaction_(queuedTasks)
     .slice(0, options.maxTransactions);
-  const now = new Date().toISOString();
+  const processingStartedAt = now.toISOString();
   const result = {
     ok: true,
     processedTransactions: 0,
@@ -551,7 +718,7 @@ function processTaskQueue_(spreadsheet, request) {
   pendingGroups.forEach(function(group) {
     markQueueTasks_(queueSheet, group.tasks, {
       status: "processing",
-      updatedAt: now,
+      updatedAt: processingStartedAt,
     });
 
     try {
@@ -587,6 +754,47 @@ function processTaskQueue_(spreadsheet, request) {
   }).length;
 
   return result;
+}
+
+/**
+ * Returns interrupted transaction claims to the pending state after their
+ * processing lease expires. The in-memory task objects are updated as well so
+ * the same invocation can process a recovered group without rereading it.
+ */
+function recoverStaleProcessingTasks_(queueSheet, queuedTasks, now) {
+  const nowMs = now.getTime();
+  const staleTasks = queuedTasks.filter(function(task) {
+    return isStaleProcessingTask_(task, nowMs);
+  });
+
+  if (staleTasks.length === 0) {
+    return;
+  }
+
+  const recoveredAt = now.toISOString();
+
+  markQueueTasks_(queueSheet, staleTasks, {
+    status: "pending",
+    lastErrorCode: "stale_processing_recovered",
+    lastErrorMessage: "Recovered an interrupted processing claim",
+    updatedAt: recoveredAt,
+  });
+
+  staleTasks.forEach(function(task) {
+    task.status = "pending";
+    task.updatedAt = recoveredAt;
+  });
+}
+
+function isStaleProcessingTask_(task, nowMs) {
+  if (task.status !== "processing") {
+    return false;
+  }
+
+  const updatedAtMs = Date.parse(task.updatedAt);
+
+  return !Number.isFinite(updatedAtMs)
+    || nowMs - updatedAtMs >= TYPED_SHEETS_PROCESSING_LEASE_MS;
 }
 
 function readQueuedTasks_(queueSheet) {
@@ -628,6 +836,8 @@ function parseQueuedTaskRow_(row, rowNumber) {
     expectedVersion: row[9] === "" || row[9] === null ? null : Number(row[9]),
     payloadJson: String(row[10] || ""),
     attempts: Number(row[11] || 0),
+    updatedAt: String(row[15] || ""),
+    taskFingerprint: String(row[16] || ""),
   };
 
   if (
@@ -649,6 +859,10 @@ function parseQueuedTaskRow_(row, rowNumber) {
       "invalid_task",
       "Invalid task queue row at " + rowNumber,
     );
+  }
+
+  if (task.taskFingerprint === "") {
+    task.taskFingerprint = createTaskFingerprint_(task);
   }
 
   return task;
@@ -982,6 +1196,8 @@ function markQueueTasks_(queueSheet, tasks, patch) {
   const statusIndex = TYPED_SHEETS_TASK_QUEUE_HEADERS.indexOf("status") + 1;
   const payloadJsonIndex =
     TYPED_SHEETS_TASK_QUEUE_HEADERS.indexOf("payloadJson") + 1;
+  const attemptsIndex =
+    TYPED_SHEETS_TASK_QUEUE_HEADERS.indexOf("attempts") + 1;
   const lastErrorCodeIndex =
     TYPED_SHEETS_TASK_QUEUE_HEADERS.indexOf("lastErrorCode") + 1;
   const lastErrorMessageIndex =
@@ -1000,6 +1216,15 @@ function markQueueTasks_(queueSheet, tasks, patch) {
       queueSheet.getRange(task.rowNumber, payloadJsonIndex, 1, 1).setValues([
         [patch.payloadJson],
       ]);
+    }
+
+    if (patch.status === "processing") {
+      const nextAttempts = Number(task.attempts || 0) + 1;
+
+      queueSheet.getRange(task.rowNumber, attemptsIndex, 1, 1).setValues([
+        [nextAttempts],
+      ]);
+      task.attempts = nextAttempts;
     }
 
     if (patch.lastErrorCode !== undefined) {
@@ -1085,10 +1310,36 @@ function createSheetNameSlug_(value) {
 }
 
 function createShortHash_(value) {
-  const bytes = Utilities.computeDigest(
+  return bytesToHex_(Utilities.computeDigest(
     Utilities.DigestAlgorithm.SHA_256,
     value,
-  );
+  )).slice(0, 12);
+}
+
+/**
+ * Creates a stable fingerprint for one enqueue request. Mutable queue state is
+ * intentionally excluded so the fingerprint survives processing and retries.
+ */
+function createTaskFingerprint_(task) {
+  const canonicalValue = [
+    task.taskId,
+    task.transactionId,
+    task.transactionIndex,
+    task.operation,
+    task.sheetName,
+    task.keyHeader,
+    task.keyValue,
+    task.expectedVersion === null ? "" : task.expectedVersion,
+    task.payloadJson,
+  ].join("\u001f");
+
+  return bytesToHex_(Utilities.computeDigest(
+    Utilities.DigestAlgorithm.SHA_256,
+    canonicalValue,
+  ));
+}
+
+function bytesToHex_(bytes) {
   let hex = "";
 
   for (let index = 0; index < bytes.length; index += 1) {
@@ -1097,7 +1348,7 @@ function createShortHash_(value) {
     hex += ("0" + unsignedByte.toString(16)).slice(-2);
   }
 
-  return hex.slice(0, 12);
+  return hex;
 }
 
 function getCanonicalSheetMapping_(spreadsheet, logicalSheetName) {
@@ -1292,6 +1543,26 @@ function readSheet_(spreadsheet, request) {
     headers: headers,
     rows: rows,
   };
+}
+
+/** Reads canonical rows by logical repository name for queued repositories. */
+function readCanonicalSheet_(spreadsheet, request) {
+  const logicalSheetName = requireProjectionSheetName_(
+    request.sheetName,
+    "sheetName",
+  );
+  const mapping = getCanonicalSheetMapping_(spreadsheet, logicalSheetName);
+
+  if (!mapping) {
+    throw gatewayError_(
+      "schema_drift",
+      "Missing canonical sheet mapping for " + logicalSheetName,
+    );
+  }
+
+  return readSheet_(spreadsheet, {
+    sheetName: mapping.canonicalSheetName,
+  });
 }
 
 // Legacy direct-write gateway helpers. They are kept only for existing

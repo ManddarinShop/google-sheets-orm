@@ -45,6 +45,32 @@ describe("AppsScriptGatewayAdapter", () => {
     });
   });
 
+  it("reads canonical queued state through the Apps Script gateway", async () => {
+    const fetch = vi.fn().mockResolvedValue(
+      createJsonResponse({
+        ok: true,
+        headers: ["id", "_version"],
+        rows: [{ rowNumber: 2, cells: ["u1", 2] }],
+      }),
+    );
+
+    const adapter = new AppsScriptGatewayAdapter({
+      gatewayUrl: "https://script.google.com/macros/s/deployment-id/exec",
+      gatewaySecret: "gateway-secret",
+      fetch,
+    });
+
+    await expect(adapter.readCanonicalSheet("Users")).resolves.toEqual({
+      headers: ["id", "_version"],
+      rows: [{ rowNumber: 2, cells: ["u1", 2] }],
+    });
+    expectGatewayRequest(fetch, {
+      operation: "readCanonicalSheet",
+      secret: "gateway-secret",
+      sheetName: "Users",
+    });
+  });
+
   it("appends a row through the Apps Script gateway", async () => {
     const fetch = vi.fn().mockResolvedValue(createJsonResponse({ ok: true }));
     const adapter = new AppsScriptGatewayAdapter({

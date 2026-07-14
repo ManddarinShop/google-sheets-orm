@@ -146,7 +146,7 @@ describe("repository inserts", () => {
     expect(adapter.appendedRowBatches).toEqual([]);
   });
 
-  it("writes concurrent inserts independently", async () => {
+  it("batches concurrent inserts into one adapter call", async () => {
     const adapter = new FakeSheetAdapter({
       Users: {
         headers: ["id", "email", "age", "active", "_version"],
@@ -182,16 +182,15 @@ describe("repository inserts", () => {
     expect(adapter.appendedRowBatches).toEqual([
       {
         sheetName: "Users",
-        rows: [["u1", "a@test.com", 20, true, 1]],
-      },
-      {
-        sheetName: "Users",
-        rows: [["u2", "b@test.com", 21, false, 1]],
+        rows: [
+          ["u1", "a@test.com", 20, true, 1],
+          ["u2", "b@test.com", 21, false, 1],
+        ],
       },
     ]);
   });
 
-  it("rejects concurrent inserts for the same key after the first write", async () => {
+  it("rejects duplicate keys within one concurrent insert batch", async () => {
     const adapter = new FakeSheetAdapter({
       Users: [
         {
@@ -231,11 +230,6 @@ describe("repository inserts", () => {
       ]),
     ).rejects.toThrow(SchemaDriftError);
 
-    expect(adapter.appendedRowBatches).toEqual([
-      {
-        sheetName: "Users",
-        rows: [["u1", "a@test.com", 20, true, 1]],
-      },
-    ]);
+    expect(adapter.appendedRowBatches).toEqual([]);
   });
 });

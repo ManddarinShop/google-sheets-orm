@@ -1,4 +1,4 @@
-import type { SheetCell } from "../../adapter/Adapter.js";
+import type { SheetCell } from "../../adapter/shared/SheetAdapter.js";
 import { ConflictError } from "../errors/index.js";
 import type { RepositoryWriteContext } from "./DirectSheetWriteContext.js";
 import {
@@ -6,18 +6,21 @@ import {
   findParsedRowByIdOrNull,
   parseAdapterResultRow,
   parseRepositoryRows,
+  readRepositoryProperty,
   serializeRowInHeaderOrder,
   serializeRowPreservingUnknownCells,
   type ParsedRepositoryRow,
-} from "../repository/RepositoryRowHelpers.js";
+} from "../shared/RepositoryRowHelpers.js";
 import { assertSchema } from "../schema/index.js";
 
-interface RepositoryUpdateRequest<T extends Record<string, unknown>> {
+interface RepositoryUpdateRequest<T extends object> {
   id: string;
   updater(current: T): T;
 }
 
-interface RepositorySyncWriteExecutor<T extends Record<string, unknown>> {
+export interface RepositorySyncWriteExecutor<
+  T extends object,
+> {
   insertRows(rows: Array<T>): Promise<Array<void>>;
   updateRowsById(
     requests: Array<RepositoryUpdateRequest<T>>,
@@ -25,7 +28,7 @@ interface RepositorySyncWriteExecutor<T extends Record<string, unknown>> {
   deleteRowsById(ids: Array<string>): Promise<Array<T | null>>;
 }
 
-interface ResolvedUpdate<T extends Record<string, unknown>> {
+interface ResolvedUpdate<T extends object> {
   id: string;
   currentVersion: number;
   target: ParsedRepositoryRow<T>;
@@ -33,7 +36,7 @@ interface ResolvedUpdate<T extends Record<string, unknown>> {
   serializedRow: Array<SheetCell>;
 }
 
-interface RepositorySnapshot<T extends Record<string, unknown>> {
+interface RepositorySnapshot<T extends object> {
   headers: Array<string>;
   parsedRows: Array<ParsedRepositoryRow<T>>;
 }
@@ -44,7 +47,7 @@ interface RepositorySnapshot<T extends Record<string, unknown>> {
  * for future queue/cache write engines.
  */
 export function createRepositorySyncWriteExecutor<
-  T extends Record<string, unknown>,
+  T extends object,
 >(
   input: RepositoryWriteContext<T>,
 ): RepositorySyncWriteExecutor<T> {
@@ -55,7 +58,7 @@ export function createRepositorySyncWriteExecutor<
   };
 }
 
-async function insertRepositoryRows<T extends Record<string, unknown>>(
+async function insertRepositoryRows<T extends object>(
   input: RepositoryWriteContext<T>,
   rows: Array<T>,
 ): Promise<Array<void>> {
@@ -89,7 +92,7 @@ async function insertRepositoryRows<T extends Record<string, unknown>>(
   return createVoidResults(rows.length);
 }
 
-async function updateRepositoryRowsById<T extends Record<string, unknown>>(
+async function updateRepositoryRowsById<T extends object>(
   input: RepositoryWriteContext<T>,
   requests: Array<RepositoryUpdateRequest<T>>,
 ): Promise<Array<T | null>> {
@@ -119,7 +122,7 @@ async function updateRepositoryRowsById<T extends Record<string, unknown>>(
 
     claimedIds.add(request.id);
 
-    const currentVersion = Number(target.row["_version"]);
+    const currentVersion = Number(readRepositoryProperty(target.row, "_version"));
     const row = {
       ...request.updater(target.row),
       _version: currentVersion + 1,
@@ -163,7 +166,7 @@ async function updateRepositoryRowsById<T extends Record<string, unknown>>(
   });
 }
 
-async function deleteRepositoryRowsById<T extends Record<string, unknown>>(
+async function deleteRepositoryRowsById<T extends object>(
   input: RepositoryWriteContext<T>,
   ids: Array<string>,
 ): Promise<Array<T | null>> {
@@ -218,7 +221,7 @@ async function deleteRepositoryRowsById<T extends Record<string, unknown>>(
   });
 }
 
-async function applyLockedKeyBasedUpdates<T extends Record<string, unknown>>(
+async function applyLockedKeyBasedUpdates<T extends object>(
   params: {
     input: RepositoryWriteContext<T>;
     snapshot: RepositorySnapshot<T>;
@@ -265,7 +268,7 @@ async function applyLockedKeyBasedUpdates<T extends Record<string, unknown>>(
   );
 }
 
-async function applyDirectRowNumberUpdates<T extends Record<string, unknown>>(
+async function applyDirectRowNumberUpdates<T extends object>(
   params: {
     input: RepositoryWriteContext<T>;
     resolvedUpdates: Array<ResolvedUpdate<T> | null>;
@@ -286,7 +289,10 @@ async function applyDirectRowNumberUpdates<T extends Record<string, unknown>>(
       throw new ConflictError(`Row "${update.id}" changed before update`);
     }
 
-    if (Number(latestSheetRow.row["_version"]) !== update.currentVersion) {
+    if (
+      Number(readRepositoryProperty(latestSheetRow.row, "_version"))
+      !== update.currentVersion
+    ) {
       throw new ConflictError(`Stale write for key "${update.id}"`);
     }
   }
@@ -302,7 +308,7 @@ async function applyDirectRowNumberUpdates<T extends Record<string, unknown>>(
   return resolvedUpdates.map((update) => update?.row ?? null);
 }
 
-async function applyLockedKeyBasedDeletes<T extends Record<string, unknown>>(
+async function applyLockedKeyBasedDeletes<T extends object>(
   params: {
     input: RepositoryWriteContext<T>;
     snapshot: RepositorySnapshot<T>;
@@ -325,7 +331,7 @@ async function applyLockedKeyBasedDeletes<T extends Record<string, unknown>>(
     versionsById: Object.fromEntries(
       rowsToDelete.map((target) => [
         String(target.row[key]),
-        Number(target.row["_version"]),
+        Number(readRepositoryProperty(target.row, "_version")),
       ]),
     ),
   });
@@ -355,7 +361,7 @@ async function applyLockedKeyBasedDeletes<T extends Record<string, unknown>>(
   );
 }
 
-async function applyDirectRowNumberDeletes<T extends Record<string, unknown>>(
+async function applyDirectRowNumberDeletes<T extends object>(
   params: {
     input: RepositoryWriteContext<T>;
     targets: Array<ParsedRepositoryRow<T> | null>;
@@ -378,7 +384,8 @@ async function applyDirectRowNumberDeletes<T extends Record<string, unknown>>(
     }
 
     if (
-      Number(latestSheetRow.row["_version"]) !== Number(target.row["_version"])
+      Number(readRepositoryProperty(latestSheetRow.row, "_version"))
+        !== Number(readRepositoryProperty(target.row, "_version"))
     ) {
       throw new ConflictError(`Stale delete for key "${id}"`);
     }
@@ -397,7 +404,7 @@ async function applyDirectRowNumberDeletes<T extends Record<string, unknown>>(
   return targets.map((target) => target?.row ?? null);
 }
 
-async function readRepositorySnapshot<T extends Record<string, unknown>>(
+async function readRepositorySnapshot<T extends object>(
   input: RepositoryWriteContext<T>,
 ): Promise<RepositorySnapshot<T>> {
   const { adapter, sheetName, key, columns } = input;
@@ -430,7 +437,7 @@ function createVoidResults(count: number): Array<void> {
   return Array.from({ length: count }, () => undefined);
 }
 
-function findParsedRowByNumberOrNull<T extends Record<string, unknown>>(
+function findParsedRowByNumberOrNull<T extends object>(
   parsedRows: Array<ParsedRepositoryRow<T>>,
   rowNumber: number,
 ): ParsedRepositoryRow<T> | null {

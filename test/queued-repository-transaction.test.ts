@@ -5,11 +5,16 @@ import type {
   EnqueueTasksInput,
   EnqueueTasksResult,
   InitializeSystemSheetsResult,
+  ProcessTaskQueueInput,
   ProcessTaskQueueResult,
   SheetSnapshot,
 } from "../src/adapter/Adapter.js";
 import { number, text } from "../src/core/schema/index.js";
-import { createQueuedSheetRepository } from "../src/core/repository/index.js";
+import {
+  createQueuedRepositoryQueueProcessor,
+  createQueuedSheetRepository,
+  summarizeProcessTaskQueueResult,
+} from "../src/core/repository/index.js";
 
 interface Order {
   id: string;
@@ -21,12 +26,22 @@ interface Order {
 
 class FakeQueueAdapter implements AppsScriptQueueAdapter {
   readonly enqueuedTasks: EnqueueTasksInput[] = [];
+  readonly readSheets: string[] = [];
   readonly initializedSystemSheets: Array<{
     sheetName: string;
-    headers: Array<string>;
+    headers: string[];
   }> = [];
-  readonly processedTaskQueues: Array<unknown> = [];
+  readonly processedTaskQueues: Array<ProcessTaskQueueInput> = [];
   enqueueError: Error | null = null;
+  enqueueErrorAfterRecord: Error | null = null;
+  processResult: ProcessTaskQueueResult = {
+    processedTransactions: 1,
+    failedTransactions: 0,
+    processedTasks: 1,
+    failedTasks: 0,
+    remainingPendingTasks: 0,
+  };
+  private canonicalSnapshot: SheetSnapshot | null = null;
 
   constructor(private snapshot: SheetSnapshot) {}
 
@@ -34,19 +49,23 @@ class FakeQueueAdapter implements AppsScriptQueueAdapter {
     this.snapshot = snapshot;
   }
 
-  async readSheet(): Promise<SheetSnapshot> {
-    return {
-      headers: [...this.snapshot.headers],
-      rows: this.snapshot.rows.map((row) => ({
-        rowNumber: row.rowNumber,
-        cells: [...row.cells],
-      })),
-    };
+  setCanonicalSnapshot(snapshot: SheetSnapshot): void {
+    this.canonicalSnapshot = snapshot;
+  }
+
+  async readSheet(sheetName: string): Promise<SheetSnapshot> {
+    this.readSheets.push(sheetName);
+    return cloneSnapshot(this.snapshot);
+  }
+
+  async readCanonicalSheet(sheetName: string): Promise<SheetSnapshot> {
+    this.readSheets.push(sheetName);
+    return cloneSnapshot(this.canonicalSnapshot ?? this.snapshot);
   }
 
   async initializeSystemSheets(
     sheetName: string,
-    headers: Array<string>,
+    headers: string[],
   ): Promise<InitializeSystemSheetsResult> {
     this.initializedSystemSheets.push({
       sheetName,
@@ -70,6 +89,12 @@ class FakeQueueAdapter implements AppsScriptQueueAdapter {
       tasks: input.tasks.map((task) => ({ ...task })),
     });
 
+    if (this.enqueueErrorAfterRecord !== null) {
+      const error = this.enqueueErrorAfterRecord;
+      this.enqueueErrorAfterRecord = null;
+      throw error;
+    }
+
     return {
       tasks: input.tasks.map((task, index) => ({
         taskId: task.taskId,
@@ -78,20 +103,15 @@ class FakeQueueAdapter implements AppsScriptQueueAdapter {
     };
   }
 
-  async processTaskQueue(input?: unknown): Promise<ProcessTaskQueueResult> {
+  async processTaskQueue(
+    input?: ProcessTaskQueueInput,
+  ): Promise<ProcessTaskQueueResult> {
     this.processedTaskQueues.push(input ?? {});
-
-    return {
-      processedTransactions: 1,
-      failedTransactions: 0,
-      processedTasks: 1,
-      failedTasks: 0,
-      remainingPendingTasks: 0,
-    };
+    return this.processResult;
   }
 }
 
-describe("queued repository transactions", () => {
+describe("queued repository transaction API", () => {
   const columns = {
     id: text(),
     userId: text(),
@@ -108,52 +128,48 @@ describe("queued repository transactions", () => {
     ],
   };
 
-  it("auto-flushes writes when the transaction callback succeeds", async () => {
+  it("flushes a successful callback as one queue transaction", async () => {
     const adapter = new FakeQueueAdapter(ordersSnapshot);
     const orders = createOrdersRepository(adapter);
 
-    await orders.transaction(async (tx) => {
+    const result = await orders.transaction(async (tx) => {
       const order = await tx.findById("o1");
 
-      if (order === null || order.userId !== "u1") {
-        throw new Error("Order not found");
+      if (order === null) {
+        throw new Error("Expected order");
       }
 
       order.status = "canceled";
       order.canceledAt = "2026-07-09T00:00:00.000Z";
-
       tx.save(order);
+
+      return "saved";
     });
 
-    expect(adapter.enqueuedTasks).toEqual([
-      {
-        tasks: [
-          {
-            taskId: expect.any(String),
-            transactionId: expect.any(String),
-            transactionIndex: 0,
-            sheetName: "Orders",
-            keyHeader: "id",
-            keyValue: "o1",
-            operation: "update",
-            expectedVersion: 3,
-            payloadJson: JSON.stringify({
-              expectedVersion: 3,
-              rowToWrite: {
-                id: "o1",
-                userId: "u1",
-                status: "canceled",
-                canceledAt: "2026-07-09T00:00:00.000Z",
-                _version: 4,
-              },
-            }),
-          },
-        ],
+    expect(result).toBe("saved");
+    expect(adapter.enqueuedTasks).toHaveLength(1);
+    expect(adapter.enqueuedTasks[0]?.tasks).toHaveLength(1);
+
+    const task = adapter.enqueuedTasks[0]?.tasks[0];
+    expect(task).toMatchObject({
+      operation: "update",
+      transactionIndex: 0,
+      keyValue: "o1",
+      expectedVersion: 3,
+    });
+    expect(JSON.parse(task?.payloadJson ?? "{}")).toEqual({
+      expectedVersion: 3,
+      rowToWrite: {
+        id: "o1",
+        userId: "u1",
+        status: "canceled",
+        canceledAt: "2026-07-09T00:00:00.000Z",
+        _version: 4,
       },
-    ]);
+    });
   });
 
-  it("does not flush when the transaction callback throws", async () => {
+  it("does not enqueue when the transaction callback throws", async () => {
     const adapter = new FakeQueueAdapter(ordersSnapshot);
     const orders = createOrdersRepository(adapter);
 
@@ -162,125 +178,97 @@ describe("queued repository transactions", () => {
         const order = await tx.findById("o1");
 
         if (order === null) {
-          throw new Error("Order not found");
+          throw new Error("Expected order");
         }
 
-        order.status = "canceled";
         tx.save(order);
-
-        throw new Error("cancel failed");
+        throw new Error("callback failed");
       }),
-    ).rejects.toThrow(/cancel failed/);
+    ).rejects.toThrow("callback failed");
 
     expect(adapter.enqueuedTasks).toEqual([]);
   });
 
-  it("snapshots saved rows when they are queued", async () => {
+  it("groups multiple entity mutations into one queue transaction", async () => {
     const adapter = new FakeQueueAdapter(ordersSnapshot);
     const orders = createOrdersRepository(adapter);
-    const tx = orders.createTransaction();
-    const order = await tx.findById("o1");
 
-    if (order === null) {
-      throw new Error("Expected order");
-    }
+    await orders.transaction(async (tx) => {
+      const firstOrder = await tx.findById("o1");
+      const secondOrder = await tx.findById("o2");
 
-    order.status = "canceled";
-    tx.save(order);
-    order.status = "mutated-after-save";
+      if (firstOrder === null || secondOrder === null) {
+        throw new Error("Expected orders");
+      }
 
-    await tx.flush();
-
-    expect(JSON.parse(adapter.enqueuedTasks[0]?.tasks[0]?.payloadJson ?? "{}"))
-      .toEqual({
-        expectedVersion: 3,
-        rowToWrite: {
-          id: "o1",
-          userId: "u1",
-          status: "canceled",
-          canceledAt: null,
-          _version: 4,
-        },
-      });
-  });
-
-  it("defers transaction update updaters until flush reads the latest snapshot", async () => {
-    const adapter = new FakeQueueAdapter(ordersSnapshot);
-    const orders = createOrdersRepository(adapter);
-    const tx = orders.createTransaction();
-
-    tx.update("o1", (current) => ({
-      ...current,
-      status: `${current.status}-canceled`,
-    }));
-    adapter.setSnapshot({
-      headers: ["id", "userId", "status", "canceledAt", "_version"],
-      rows: [
-        { rowNumber: 2, cells: ["o1", "u1", "refunded", null, 4] },
-      ],
+      firstOrder.status = "canceled";
+      tx.save(firstOrder);
+      tx.remove(secondOrder);
     });
 
-    await expect(tx.flush()).resolves.toEqual([
-      {
-        id: "o1",
+    const tasks = adapter.enqueuedTasks[0]?.tasks ?? [];
+    expect(tasks.map((task) => task.operation)).toEqual(["update", "delete"]);
+    expect(tasks.map((task) => task.transactionIndex)).toEqual([0, 1]);
+    expect(new Set(tasks.map((task) => task.transactionId))).toHaveLength(1);
+  });
+
+  it("does not expose entity operations outside a transaction", () => {
+    const adapter = new FakeQueueAdapter(ordersSnapshot);
+    const orders = createOrdersRepository(adapter);
+
+    expect(orders).not.toHaveProperty("findAll");
+    expect(orders).not.toHaveProperty("findById");
+    expect(orders).not.toHaveProperty("save");
+    expect(orders).not.toHaveProperty("remove");
+    expect(orders.transaction).toBeTypeOf("function");
+  });
+
+  it("rejects a stale entity within its transaction", async () => {
+    const adapter = new FakeQueueAdapter(ordersSnapshot);
+    const orders = createOrdersRepository(adapter);
+
+    await expect(
+      orders.transaction(async (tx) => {
+        const order = await tx.findById("o1");
+
+        if (order === null) {
+          throw new Error("Expected order");
+        }
+
+        adapter.setSnapshot({
+          headers: ordersSnapshot.headers,
+          rows: [ordersSnapshot.rows[1]!],
+        });
+        tx.save(order);
+      }),
+    ).rejects.toThrow("Stale entity");
+
+    expect(adapter.enqueuedTasks).toEqual([]);
+  });
+
+  it("applies pending transaction mutations to reads inside the transaction", async () => {
+    const adapter = new FakeQueueAdapter(ordersSnapshot);
+    const orders = createOrdersRepository(adapter);
+
+    await orders.transaction(async (tx) => {
+      const newOrder: Order = {
+        id: "o3",
         userId: "u1",
-        status: "refunded-canceled",
+        status: "created",
         canceledAt: undefined,
-        _version: 5,
-      },
-    ]);
+        _version: 1,
+      };
 
-    expect(JSON.parse(adapter.enqueuedTasks[0]?.tasks[0]?.payloadJson ?? "{}"))
-      .toEqual({
-        expectedVersion: 4,
-        rowToWrite: {
-          id: "o1",
-          userId: "u1",
-          status: "refunded-canceled",
-          canceledAt: null,
-          _version: 5,
-        },
-      });
+      tx.save(newOrder);
+
+      await expect(tx.findById("o3")).resolves.toEqual(newOrder);
+    });
   });
 
-  it("coalesces repeated saves for one entity into one queued update", async () => {
+  it("cancels a new entity saved and removed in the same transaction", async () => {
     const adapter = new FakeQueueAdapter(ordersSnapshot);
     const orders = createOrdersRepository(adapter);
-    const tx = orders.createTransaction();
-    const order = await tx.findById("o1");
-
-    if (order === null) {
-      throw new Error("Expected order");
-    }
-
-    order.status = "canceled";
-    tx.save(order);
-    order.status = "archived";
-    tx.save(order);
-
-    await tx.flush();
-
-    expect(adapter.enqueuedTasks).toHaveLength(1);
-    expect(adapter.enqueuedTasks[0]?.tasks).toHaveLength(1);
-    expect(adapter.enqueuedTasks[0]?.tasks[0]?.operation).toBe("update");
-    expect(JSON.parse(adapter.enqueuedTasks[0]?.tasks[0]?.payloadJson ?? "{}"))
-      .toEqual({
-        expectedVersion: 3,
-        rowToWrite: {
-          id: "o1",
-          userId: "u1",
-          status: "archived",
-          canceledAt: null,
-          _version: 4,
-        },
-      });
-  });
-
-  it("coalesces insert followed by remove into no queued task", async () => {
-    const adapter = new FakeQueueAdapter(ordersSnapshot);
-    const orders = createOrdersRepository(adapter);
-    const tx = orders.createTransaction();
-    const order = {
+    const newOrder: Order = {
       id: "o3",
       userId: "u1",
       status: "created",
@@ -288,211 +276,54 @@ describe("queued repository transactions", () => {
       _version: 1,
     };
 
-    tx.insert(order);
-    tx.remove(order);
+    await orders.transaction((tx) => {
+      tx.save(newOrder);
+      tx.remove(newOrder);
+    });
 
-    await expect(tx.flush()).resolves.toEqual([]);
     expect(adapter.enqueuedTasks).toEqual([]);
   });
 
-  it("coalesces remove followed by save into one queued update", async () => {
+  it("rejects changing the key of a loaded entity", async () => {
     const adapter = new FakeQueueAdapter(ordersSnapshot);
     const orders = createOrdersRepository(adapter);
-    const tx = orders.createTransaction();
-    const order = await tx.findById("o1");
-
-    if (order === null) {
-      throw new Error("Expected order");
-    }
-
-    tx.remove(order);
-    order.status = "restored";
-    tx.save(order);
-
-    await tx.flush();
-
-    expect(adapter.enqueuedTasks).toHaveLength(1);
-    expect(adapter.enqueuedTasks[0]?.tasks).toHaveLength(1);
-    expect(adapter.enqueuedTasks[0]?.tasks[0]?.operation).toBe("update");
-    expect(JSON.parse(adapter.enqueuedTasks[0]?.tasks[0]?.payloadJson ?? "{}"))
-      .toEqual({
-        expectedVersion: 3,
-        rowToWrite: {
-          id: "o1",
-          userId: "u1",
-          status: "restored",
-          canceledAt: null,
-          _version: 4,
-        },
-      });
-  });
-
-  it("keeps pending operations when flush fails so callers can retry", async () => {
-    const adapter = new FakeQueueAdapter(ordersSnapshot);
-    const orders = createOrdersRepository(adapter);
-    const tx = orders.createTransaction();
-    const order = await tx.findById("o1");
-
-    if (order === null) {
-      throw new Error("Expected order");
-    }
-
-    order.status = "canceled";
-    tx.save(order);
-    adapter.enqueueError = new Error("enqueue failed");
-
-    await expect(tx.flush()).rejects.toThrow(/enqueue failed/);
-    expect(adapter.enqueuedTasks).toEqual([]);
-
-    adapter.enqueueError = null;
-    await expect(tx.flush()).resolves.toHaveLength(1);
-    expect(adapter.enqueuedTasks).toHaveLength(1);
-  });
-
-  it("can flush and return the queue processor response", async () => {
-    const adapter = new FakeQueueAdapter(ordersSnapshot);
-    const orders = createOrdersRepository(adapter);
-    const tx = orders.createTransaction();
-    const order = await tx.findById("o1");
-
-    if (order === null) {
-      throw new Error("Expected order");
-    }
-
-    order.status = "canceled";
-    tx.save(order);
 
     await expect(
-      tx.flushAndProcessQueue({ maxTransactions: 1 }),
+      orders.transaction(async (tx) => {
+        const order = await tx.findById("o1");
+
+        if (order === null) {
+          throw new Error("Expected order");
+        }
+
+        order.id = "o3";
+        tx.save(order);
+      }),
+    ).rejects.toThrow('Entity key cannot be changed from "o1" to "o3"');
+
+    expect(adapter.enqueuedTasks).toEqual([]);
+  });
+
+  it("reads canonical state rather than the visible projection", async () => {
+    const adapter = new FakeQueueAdapter(ordersSnapshot);
+    adapter.setCanonicalSnapshot({
+      headers: ordersSnapshot.headers,
+      rows: [{ rowNumber: 2, cells: ["o1", "u1", "canceled", null, 4] }],
+    });
+    const orders = createOrdersRepository(adapter);
+
+    await expect(
+      orders.transaction((tx) => tx.findById("o1")),
     ).resolves.toEqual({
-      writeResults: [
-        {
-          id: "o1",
-          userId: "u1",
-          status: "canceled",
-          canceledAt: undefined,
-          _version: 4,
-        },
-      ],
-      processResult: {
-        processedTransactions: 1,
-        failedTransactions: 0,
-        processedTasks: 1,
-        failedTasks: 0,
-        remainingPendingTasks: 0,
-      },
-    });
-    expect(adapter.enqueuedTasks).toHaveLength(1);
-    expect(adapter.processedTaskQueues).toEqual([{ maxTransactions: 1 }]);
-  });
-
-  it("reads pending transaction state before flush", async () => {
-    const adapter = new FakeQueueAdapter(ordersSnapshot);
-    const orders = createOrdersRepository(adapter);
-    const tx = orders.createTransaction();
-    const order = await tx.findById("o1");
-
-    if (order === null) {
-      throw new Error("Expected order");
-    }
-
-    order.status = "canceled";
-    tx.save(order);
-    tx.insert({
-      id: "o3",
-      userId: "u1",
-      status: "created",
-      canceledAt: undefined,
-      _version: 1,
-    });
-    tx.remove({
-      id: "o2",
-      userId: "u1",
-      status: "paid",
-      canceledAt: undefined,
-      _version: 1,
-    });
-
-    await expect(tx.findById("o1")).resolves.toMatchObject({
       id: "o1",
-      status: "canceled",
-    });
-    await expect(tx.findById("o2")).resolves.toBeNull();
-    await expect(tx.findById("o3")).resolves.toMatchObject({
-      id: "o3",
-      status: "created",
-    });
-    await expect(tx.findAll()).resolves.toEqual([
-      {
-        id: "o1",
-        userId: "u1",
-        status: "canceled",
-        canceledAt: undefined,
-        _version: 3,
-      },
-      {
-        id: "o3",
-        userId: "u1",
-        status: "created",
-        canceledAt: undefined,
-        _version: 1,
-      },
-    ]);
-  });
-
-  it("supports explicit createTransaction plus flush", async () => {
-    const adapter = new FakeQueueAdapter(ordersSnapshot);
-    const orders = createOrdersRepository(adapter);
-    const tx = orders.createTransaction();
-    const firstOrder = await tx.findById("o1");
-    const secondOrder = await tx.findById("o2");
-
-    if (firstOrder === null || secondOrder === null) {
-      throw new Error("Expected orders");
-    }
-
-    tx.remove(firstOrder);
-    tx.insert({
-      id: "o3",
       userId: "u1",
-      status: "created",
+      status: "canceled",
       canceledAt: undefined,
-      _version: 1,
+      _version: 4,
     });
-    secondOrder.status = "canceled";
-    secondOrder.canceledAt = "2026-07-09T00:00:00.000Z";
-    tx.save(secondOrder);
-
-    await expect(tx.flush()).resolves.toEqual([
-      {
-        id: "o1",
-        userId: "u1",
-        status: "paid",
-        canceledAt: undefined,
-        _version: 3,
-      },
-      undefined,
-      {
-        id: "o2",
-        userId: "u1",
-        status: "canceled",
-        canceledAt: "2026-07-09T00:00:00.000Z",
-        _version: 2,
-      },
-    ]);
-
-    expect(adapter.enqueuedTasks).toHaveLength(1);
-    expect(adapter.enqueuedTasks[0]?.tasks.map((task) => task.operation)).toEqual([
-      "delete",
-      "insert",
-      "update",
-    ]);
-    expect(
-      new Set(adapter.enqueuedTasks[0]?.tasks.map((task) => task.transactionId)),
-    ).toHaveLength(1);
   });
 
-  it("initializes system sheets for queued repositories", async () => {
+  it("initializes the gateway-owned system sheets", async () => {
     const adapter = new FakeQueueAdapter(ordersSnapshot);
     const orders = createOrdersRepository(adapter);
 
@@ -506,6 +337,61 @@ describe("queued repository transactions", () => {
     ]);
   });
 
+  it("exposes queue processing separately from repository transactions", async () => {
+    const adapter = new FakeQueueAdapter(ordersSnapshot);
+    const processor = createQueuedRepositoryQueueProcessor(adapter);
+
+    await expect(
+      processor.processTaskQueue({ maxTransactions: 1 }),
+    ).resolves.toEqual(adapter.processResult);
+    expect(adapter.processedTaskQueues).toEqual([{ maxTransactions: 1 }]);
+  });
+
+  it.each([
+    [
+      "idle",
+      {
+        processedTransactions: 0,
+        failedTransactions: 0,
+        processedTasks: 0,
+        failedTasks: 0,
+        remainingPendingTasks: 0,
+      },
+    ],
+    [
+      "processed",
+      {
+        processedTransactions: 1,
+        failedTransactions: 0,
+        processedTasks: 1,
+        failedTasks: 0,
+        remainingPendingTasks: 0,
+      },
+    ],
+    [
+      "pending",
+      {
+        processedTransactions: 1,
+        failedTransactions: 0,
+        processedTasks: 1,
+        failedTasks: 0,
+        remainingPendingTasks: 1,
+      },
+    ],
+    [
+      "failed",
+      {
+        processedTransactions: 0,
+        failedTransactions: 1,
+        processedTasks: 0,
+        failedTasks: 1,
+        remainingPendingTasks: 0,
+      },
+    ],
+  ])("summarizes a %s processor result", (status, result) => {
+    expect(summarizeProcessTaskQueueResult(result)).toMatchObject({ status });
+  });
+
   function createOrdersRepository(adapter: AppsScriptQueueAdapter) {
     return createQueuedSheetRepository<Order>({
       adapter,
@@ -515,3 +401,13 @@ describe("queued repository transactions", () => {
     });
   }
 });
+
+function cloneSnapshot(snapshot: SheetSnapshot): SheetSnapshot {
+  return {
+    headers: [...snapshot.headers],
+    rows: snapshot.rows.map((row) => ({
+      rowNumber: row.rowNumber,
+      cells: [...row.cells],
+    })),
+  };
+}

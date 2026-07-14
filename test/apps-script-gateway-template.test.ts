@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 
 import { describe, expect, it } from "vitest";
@@ -48,6 +49,14 @@ interface GatewayTemplate {
     processedTasks: number;
     failedTasks: number;
     remainingPendingTasks: number;
+  };
+  readCanonicalSheet_(
+    spreadsheet: FakeSpreadsheet,
+    request: { sheetName: string },
+  ): {
+    ok: true;
+    headers: string[];
+    rows: Array<{ rowNumber: number; cells: unknown[] }>;
   };
   initializeSystemSheets_(
     spreadsheet: FakeSpreadsheet,
@@ -246,6 +255,7 @@ describe("manual Apps Script gateway template system sheets", () => {
         "  getGatewayUrl_,",
         "  enqueueTasks_,",
         "  processTaskQueue_,",
+        "  readCanonicalSheet_,",
         "  initializeSystemSheets_,",
         "};",
       ].join("\n"),
@@ -260,10 +270,8 @@ describe("manual Apps Script gateway template system sheets", () => {
         SHA_256: "SHA_256",
       },
       computeDigest(_algorithm: string, value: string) {
-        return Array.from({ length: 32 }, (_, index) => {
-          const code = value.charCodeAt(index % value.length) || 0;
-          return ((code + index * 17) % 256) - 128;
-        });
+        return Array.from(createHash("sha256").update(value).digest())
+          .map((byte) => (byte > 127 ? byte - 256 : byte));
       },
     }) as GatewayTemplate;
   }
@@ -365,6 +373,7 @@ describe("manual Apps Script gateway template system sheets", () => {
       "lastErrorMessage",
       "createdAt",
       "updatedAt",
+      "taskFingerprint",
     ]);
     expect(gateway.TYPED_SHEETS_TASK_QUEUE_SHEET_NAME).toBe(
       "_typed_sheets_task_queue",
@@ -389,6 +398,215 @@ describe("manual Apps Script gateway template system sheets", () => {
         projectionSheetName: "Users",
       }),
     ]);
+  });
+
+  it("migrates a legacy 16-column task queue and preserves pending work", async () => {
+    const gateway = await loadGatewayTemplate();
+    const spreadsheet = new FakeSpreadsheet();
+    const task = {
+      taskId: "task-legacy-1",
+      transactionId: "tx-legacy-1",
+      transactionIndex: 0,
+      operation: "insert" as const,
+      sheetName: "Users",
+      keyHeader: "id",
+      keyValue: "u1",
+      expectedVersion: null,
+      payloadJson: JSON.stringify({
+        row: {
+          id: "u1",
+          email: "legacy@test.com",
+          _version: 1,
+        },
+      }),
+    };
+    const legacyQueue = spreadsheet.insertSheet("_typed_sheets_task_queue");
+    legacyQueue.values = [
+      gateway.TYPED_SHEETS_TASK_QUEUE_HEADERS.slice(0, -1),
+      [
+        task.taskId,
+        task.transactionId,
+        task.transactionIndex,
+        1,
+        "pending",
+        task.operation,
+        task.sheetName,
+        task.keyHeader,
+        task.keyValue,
+        "",
+        task.payloadJson,
+        0,
+        "",
+        "",
+        "2026-07-11T00:00:00.000Z",
+        "2026-07-11T00:00:00.000Z",
+      ],
+    ];
+
+    const systemSheets = gateway.initializeSystemSheets_(spreadsheet, {
+      sheetName: "Users",
+      headers: ["id", "email", "_version"],
+    });
+
+    expect(legacyQueue.values[0]).toEqual(
+      gateway.TYPED_SHEETS_TASK_QUEUE_HEADERS,
+    );
+    expect(legacyQueue.values[1]?.slice(0, 16)).toEqual([
+      task.taskId,
+      task.transactionId,
+      task.transactionIndex,
+      1,
+      "pending",
+      task.operation,
+      task.sheetName,
+      task.keyHeader,
+      task.keyValue,
+      "",
+      task.payloadJson,
+      0,
+      "",
+      "",
+      "2026-07-11T00:00:00.000Z",
+      "2026-07-11T00:00:00.000Z",
+    ]);
+    expect(legacyQueue.values[1]?.[16]).toEqual(expect.any(String));
+
+    expect(
+      gateway.enqueueTasks_(spreadsheet, { tasks: [task] }),
+    ).toEqual({
+      ok: true,
+      tasks: [{ taskId: task.taskId, sequence: 1 }],
+    });
+    expect(legacyQueue.values).toHaveLength(2);
+
+    expect(gateway.processTaskQueue_(spreadsheet, {})).toMatchObject({
+      processedTransactions: 1,
+      processedTasks: 1,
+      remainingPendingTasks: 0,
+    });
+    expect(
+      spreadsheet.sheets.get(systemSheets.canonicalSheetName)?.values,
+    ).toEqual([
+      ["id", "email", "_version"],
+      ["u1", "legacy@test.com", 1],
+    ]);
+  });
+
+  it("migrates existing projection rows and reads queued state from canonical", async () => {
+    const gateway = await loadGatewayTemplate();
+    const spreadsheet = new FakeSpreadsheet();
+    const projection = spreadsheet.insertSheet("Users");
+    projection.values = [
+      ["id", "email", "_version"],
+      ["u1", "legacy@test.com", 1],
+    ];
+
+    const systemSheets = gateway.initializeSystemSheets_(spreadsheet, {
+      sheetName: "Users",
+      headers: ["id", "email", "_version"],
+    });
+    const canonical = spreadsheet.sheets.get(systemSheets.canonicalSheetName);
+
+    expect(canonical?.values).toEqual([
+      ["id", "email", "_version"],
+      ["u1", "legacy@test.com", 1],
+    ]);
+
+    gateway.enqueueTasks_(spreadsheet, {
+      tasks: [
+        {
+          taskId: "task-migrated-update",
+          transactionId: "tx-migrated-update",
+          transactionIndex: 0,
+          operation: "update",
+          sheetName: "Users",
+          keyHeader: "id",
+          keyValue: "u1",
+          expectedVersion: 1,
+          payloadJson: JSON.stringify({
+            expectedVersion: 1,
+            rowToWrite: {
+              id: "u1",
+              email: "queued@test.com",
+              _version: 2,
+            },
+          }),
+        },
+      ],
+    });
+
+    expect(gateway.processTaskQueue_(spreadsheet, {})).toMatchObject({
+      processedTransactions: 1,
+      processedTasks: 1,
+      remainingPendingTasks: 0,
+    });
+    expect(
+      gateway.readCanonicalSheet_(spreadsheet, { sheetName: "Users" }),
+    ).toEqual({
+      ok: true,
+      headers: ["id", "email", "_version"],
+      rows: [
+        {
+          rowNumber: 2,
+          cells: ["u1", "queued@test.com", 2],
+        },
+      ],
+    });
+    expect(projection.values[1]).toEqual(["u1", "legacy@test.com", 1]);
+  });
+
+  it("keeps redacted legacy done tasks replayable by task id", async () => {
+    const gateway = await loadGatewayTemplate();
+    const spreadsheet = new FakeSpreadsheet();
+    const task = {
+      taskId: "task-legacy-done",
+      transactionId: "tx-legacy-done",
+      transactionIndex: 0,
+      operation: "insert" as const,
+      sheetName: "Users",
+      keyHeader: "id",
+      keyValue: "u1",
+      expectedVersion: null,
+      payloadJson: JSON.stringify({ row: { id: "u1", _version: 1 } }),
+    };
+    const legacyQueue = spreadsheet.insertSheet("_typed_sheets_task_queue");
+    legacyQueue.values = [
+      gateway.TYPED_SHEETS_TASK_QUEUE_HEADERS.slice(0, -1),
+      [
+        task.taskId,
+        task.transactionId,
+        task.transactionIndex,
+        1,
+        "done",
+        task.operation,
+        task.sheetName,
+        task.keyHeader,
+        task.keyValue,
+        "",
+        JSON.stringify({ redacted: true }),
+        1,
+        "",
+        "",
+        "2026-07-11T00:00:00.000Z",
+        "2026-07-11T00:00:00.000Z",
+      ],
+    ];
+
+    gateway.initializeSystemSheets_(spreadsheet, {
+      sheetName: "Users",
+      headers: ["id", "_version"],
+    });
+
+    expect(
+      gateway.enqueueTasks_(spreadsheet, { tasks: [task] }),
+    ).toEqual({
+      ok: true,
+      tasks: [{ taskId: task.taskId, sequence: 1 }],
+    });
+    expect(legacyQueue.values).toHaveLength(2);
+    expect(legacyQueue.values[1]?.[16]).toBe(
+      "legacy-redacted:" + task.taskId,
+    );
   });
 
   it("does not recreate or overwrite existing system sheets", async () => {
@@ -535,6 +753,7 @@ describe("manual Apps Script gateway template system sheets", () => {
         "",
         expect.any(String),
         expect.any(String),
+        expect.any(String),
       ],
       [
         "task-2",
@@ -560,6 +779,7 @@ describe("manual Apps Script gateway template system sheets", () => {
         "",
         expect.any(String),
         expect.any(String),
+        expect.any(String),
       ],
       [
         "task-3",
@@ -583,6 +803,7 @@ describe("manual Apps Script gateway template system sheets", () => {
         0,
         "",
         "",
+        expect.any(String),
         expect.any(String),
         expect.any(String),
       ],
@@ -613,6 +834,12 @@ describe("manual Apps Script gateway template system sheets", () => {
       tasks: [{ taskId: "task-1", sequence: 1 }],
     });
 
+    const queue = spreadsheet.sheets.get("_typed_sheets_task_queue");
+    if (queue) {
+      queue.values[1]![4] = "done";
+      queue.values[1]![10] = JSON.stringify({ redacted: true });
+    }
+
     expect(
       gateway.enqueueTasks_(spreadsheet, {
         tasks: [task],
@@ -622,9 +849,8 @@ describe("manual Apps Script gateway template system sheets", () => {
       tasks: [{ taskId: "task-1", sequence: 1 }],
     });
 
-    const queue = spreadsheet.sheets.get("_typed_sheets_task_queue");
-
     expect(queue?.values).toHaveLength(2);
+    expect(queue?.values[1]?.[16]).toEqual(expect.any(String));
   });
 
   it("rejects duplicate task ids with a different payload", async () => {
@@ -1359,7 +1585,7 @@ describe("manual Apps Script gateway template system sheets", () => {
 
     const queue = spreadsheet.sheets.get("_typed_sheets_task_queue");
     if (queue) {
-      queue.values[1][4] = "done";
+      queue.values[1]![4] = "done";
     }
 
     expect(gateway.processTaskQueue_(spreadsheet, {})).toEqual({
@@ -1375,6 +1601,58 @@ describe("manual Apps Script gateway template system sheets", () => {
       "done",
       "pending",
     ]);
+  });
+
+  it("recovers stale processing tasks after an interrupted processor run", async () => {
+    const gateway = await loadGatewayTemplate();
+    const spreadsheet = new FakeSpreadsheet();
+    const systemSheets = gateway.initializeSystemSheets_(spreadsheet, {
+      sheetName: "Users",
+      headers: ["id", "_version"],
+    });
+    const queue = spreadsheet.sheets.get("_typed_sheets_task_queue");
+
+    gateway.enqueueTasks_(spreadsheet, {
+      tasks: [
+        {
+          taskId: "task-interrupted",
+          transactionId: "tx-interrupted",
+          transactionIndex: 0,
+          operation: "insert",
+          sheetName: "Users",
+          keyHeader: "id",
+          keyValue: "u1",
+          expectedVersion: null,
+          payloadJson: JSON.stringify({
+            row: { id: "u1", _version: 1 },
+          }),
+        },
+      ],
+    });
+
+    if (queue === undefined) {
+      throw new Error("Expected task queue sheet");
+    }
+
+    queue.values[1]![4] = "processing";
+    queue.values[1]![11] = 1;
+    queue.values[1]![15] = "2020-01-01T00:00:00.000Z";
+
+    expect(gateway.processTaskQueue_(spreadsheet, {})).toMatchObject({
+      processedTransactions: 1,
+      failedTransactions: 0,
+      processedTasks: 1,
+      failedTasks: 0,
+      remainingPendingTasks: 0,
+    });
+    expect(
+      spreadsheet.sheets.get(systemSheets.canonicalSheetName)?.values,
+    ).toEqual([
+      ["id", "_version"],
+      ["u1", 1],
+    ]);
+    expect(queue.values[1]![4]).toBe("done");
+    expect(queue.values[1]![11]).toBe(2);
   });
 
   it("does not adopt a colliding internal sheet without a stored mapping", async () => {

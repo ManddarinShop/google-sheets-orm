@@ -1,6 +1,10 @@
 export { boolean, number, text } from "./core/schema/index.js";
 export { createSheetRepository } from "./core/repository/index.js";
-export { createQueuedSheetRepository } from "./core/repository/index.js";
+export {
+  createQueuedSheetRepository,
+  createQueuedRepositoryQueueProcessor,
+  summarizeProcessTaskQueueResult,
+} from "./core/repository/index.js";
 export { ConflictError, ParseError, SchemaDriftError } from "./core/errors/index.js";
 export { parseTypedSheetsConfig } from "./setup/Config.js";
 export { loadTypedSheetsConfig } from "./setup/ConfigLoader.js";
@@ -32,6 +36,7 @@ export type {
   DirectSheetAdapter,
   ProcessTaskQueueInput,
   ProcessTaskQueueResult,
+  SheetReader,
   SheetAdapter,
   SheetCell,
   SheetSnapshot,
@@ -49,6 +54,9 @@ export type {
 } from "./core/repository/index.js";
 export type {
   CreateQueuedSheetRepositoryInput,
+  QueuedRepositoryQueueProcessor,
+  QueuedRepositoryQueueProcessingStatus,
+  QueuedRepositoryQueueProcessingSummary,
   QueuedRepositoryTransaction,
   QueuedSheetRepository,
 } from "./core/repository/index.js";

@@ -584,7 +584,7 @@ describe("GoogleSheetsAdapter.deleteRows", () => {
         spreadsheets: {
           batchUpdate,
         },
-      } as unknown as sheets_v4.Sheets["spreadsheets"],
+      } as unknown as sheets_v4.Sheets,
     });
 
     await adapter.deleteRows("Users", []);

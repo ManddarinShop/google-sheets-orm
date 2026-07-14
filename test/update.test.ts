@@ -163,7 +163,7 @@ describe("repository updates and optimistic locking", () => {
     expect(adapter.updatedRows).toEqual([]);
   });
 
-  it("runs concurrent key-based updates independently", async () => {
+  it("batches concurrent key-based updates into one adapter call", async () => {
     const sheet = {
       headers: ["id", "email", "age", "active", "_version"],
       rows: [
@@ -180,14 +180,11 @@ describe("repository updates and optimistic locking", () => {
       expect(sheetName).toBe("Users");
       updateRowsByKeyCalls.push(input);
 
-      const update = input.updates[0];
-
-      if (update === undefined) {
-        throw new Error("Expected one update");
-      }
-
       return {
-        updatedRows: [{ id: update.id, cells: update.row }],
+        updatedRows: input.updates.map((update) => ({
+          id: update.id,
+          cells: update.row,
+        })),
       };
     };
 
@@ -225,7 +222,7 @@ describe("repository updates and optimistic locking", () => {
         _version: 2,
       },
     ]);
-    expect(adapter.readSheets).toEqual(["Users", "Users"]);
+    expect(adapter.readSheets).toEqual(["Users"]);
     expect(adapter.updatedRows).toEqual([]);
     expect(updateRowsByKeyCalls).toEqual([
       {
@@ -238,13 +235,6 @@ describe("repository updates and optimistic locking", () => {
             expectedVersion: 1,
             row: ["u1", "a@test.com", 30, true, 2],
           },
-        ],
-      },
-      {
-        expectedHeaders: ["id", "email", "age", "active", "_version"],
-        keyHeader: "id",
-        versionHeader: "_version",
-        updates: [
           {
             id: "u2",
             expectedVersion: 1,

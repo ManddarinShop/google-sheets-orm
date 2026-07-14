@@ -62,7 +62,7 @@ describe("repository deletes and optimistic locking", () => {
     ]);
   });
 
-  it("runs concurrent deletes independently", async () => {
+  it("batches concurrent deletes into one adapter call", async () => {
     const sheet = {
       headers: ["id", "email", "age", "active", "_version"],
       rows: [
@@ -109,20 +109,9 @@ describe("repository deletes and optimistic locking", () => {
           expectedHeaders: ["id", "email", "age", "active", "_version"],
           keyHeader: "id",
           versionHeader: "_version",
-          ids: ["u1"],
+          ids: ["u1", "u3"],
           versionsById: {
             u1: 1,
-          },
-        },
-      },
-      {
-        sheetName: "Users",
-        input: {
-          expectedHeaders: ["id", "email", "age", "active", "_version"],
-          keyHeader: "id",
-          versionHeader: "_version",
-          ids: ["u3"],
-          versionsById: {
             u3: 1,
           },
         },

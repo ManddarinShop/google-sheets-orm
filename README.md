@@ -19,6 +19,7 @@ fail clearly instead of passing silently.
 - `_version` based optimistic locking
 - `SchemaDriftError`, `ParseError`, and `ConflictError`
 - service-account and Apps Script gateway adapters
+- explicit queued repository transactions with stable retry identities
 - config-based repository creation with `typed-sheets setup`
 
 ## Installation
@@ -193,6 +194,68 @@ const users = createSheetRepository<User>({
 });
 ```
 
+### Queued repository
+
+Use the queued repository with the Apps Script gateway when writes should be
+appended as durable tasks and processed explicitly:
+
+```ts
+import {
+  AppsScriptGatewayAdapter,
+  createQueuedRepositoryQueueProcessor,
+  createQueuedSheetRepository,
+  number,
+  text,
+} from "typed-sheets";
+
+const adapter = new AppsScriptGatewayAdapter({
+  gatewayUrl: process.env.TYPED_SHEETS_GATEWAY_URL!,
+  gatewaySecret: process.env.TYPED_SHEETS_GATEWAY_SECRET!,
+});
+
+const orders = createQueuedSheetRepository({
+  adapter,
+  sheetName: "Orders",
+  key: "id",
+  columns: {
+    id: text(),
+    status: text(),
+    _version: number(),
+  },
+});
+
+// Creates the canonical sheet and task queue. Existing projection rows are
+// copied into an empty canonical sheet during this one-time initialization.
+await orders.ensureSheet();
+
+await orders.transaction(async (tx) => {
+  const order = await tx.findById("o1");
+
+  if (order) {
+    order.status = "paid";
+    tx.save(order);
+  }
+});
+
+const processor = createQueuedRepositoryQueueProcessor(adapter);
+const result = await processor.processTaskQueue({ maxTransactions: 1 });
+```
+
+The queued repository requires an explicit transaction boundary for entity
+operations. Use `tx.findAll()`, `tx.findById()`, `tx.save()`, and `tx.remove()`
+inside `repository.transaction()`. The callback is materialized as one queue
+transaction; it does not apply the change to the canonical sheet immediately.
+Queue draining is an independent infrastructure operation exposed by
+`createQueuedRepositoryQueueProcessor()`.
+
+Queued repository reads use the adapter's canonical read operation. The visible
+projection tab is seeded during initialization but is not automatically synced
+by the current gateway processor.
+
+Entity reads and writes are scoped to the transaction callback. Queue
+retry/materialization details are internal implementation concerns; the public
+API does not expose a transaction handle or queue task payload.
+
 ## Documentation
 
 - [Safety model and adapters](docs/safety-and-adapters.md)
@@ -205,8 +268,15 @@ const users = createSheetRepository<User>({
 ## Current Limitations
 
 This project currently does not support joins, relations, SQL execution,
-migrations, transactions, multi-row atomic updates, cache/request collapse,
-retry/backoff, browser support, or automatic Apps Script gateway installation.
+automatic retry/backoff, browser support, or automatic Apps Script gateway
+installation. Queued processing is explicit, queued transactions do not provide
+database-level atomicity across separate canonical sheets, and the visible
+projection is not automatically synchronized after processing.
+
+When adopting queued writes for an existing sheet, run `ensureSheet()` once so
+the gateway can seed an empty canonical sheet from the existing projection.
+Queued repositories should then read and write through the canonical queue
+workflow rather than mixing direct writes against the projection tab.
 
 Apps Script and Google Sheets quotas apply. Keep live Google integration tests
 opt-in and use a test spreadsheet or test sheet tab.

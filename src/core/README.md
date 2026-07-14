@@ -1,33 +1,42 @@
 # Core module map
 
-`src/core` is split into small internal packages. Public exports still flow
-through `src/index.ts`; these folders describe internal ownership boundaries.
+`src/core` is split into mode-specific internal packages. Public exports still
+flow through `src/index.ts`; the legacy `repository/` and `write/` folders keep
+compatibility barrels while the implementation lives under `direct/`,
+`queued/`, and `shared/`.
 
-## `repository/`
+## `direct/`
 
 - `DirectSheetRepository.ts`: direct synchronous sheet repository. This is the
   legacy `createSheetRepository()` path and mutates the target sheet directly.
-- `QueuedSheetRepository.ts`: queued repository facade. This is the task-queue
-  path and exposes transaction-style `save()` / `remove()` workflows while
-  delegating task creation to the queue write engine.
-- `RepositoryRowHelpers.ts`: parsed repository row helpers shared by direct and
-  queued write engines.
-- `index.ts`: package exports for repository facades and repository-facing
-  types.
+- `DirectRepositoryWriteBatcher.ts`: same-tick direct write batching.
+- `DirectSheetWriteContext.ts`: direct adapter/write context.
+- `DirectSheetWriteExecutor.ts`: direct write implementation with optimistic
+  locking and adapter bulk paths.
 
-## `write/`
+## `queued/`
 
-- `DirectSheetWriteExecutor.ts`: direct write implementation for
-  `DirectSheetRepository.ts`. It reads the sheet, checks schema/key/version
-  state, then writes rows through `DirectSheetAdapter`.
-- `QueuedSheetWriteExecutor.ts`: queued write implementation for
-  `QueuedSheetRepository.ts`. It reads the current sheet snapshot, validates
-  requested changes, converts them into queue operations, and appends task rows
-  through `AppsScriptQueueAdapter`. Flushed queued writes are not visible to
-  repository reads until the Apps Script queue processor applies them.
-- `QueuedWriteTaskProducer.ts`: low-level conversion from validated
-  repository operations into durable task-queue payloads.
-- `index.ts`: package exports for write-engine tests and repository facades.
+- `public/`: entity-oriented repository facade and public transaction contracts.
+  Queue task details are hidden from this layer's public types.
+- `transaction/`: collects entity mutations, serializes writes, and retains
+  materialized batches for ambiguous enqueue recovery.
+- `writer/`: validates canonical state, materializes immutable queue batches,
+  and converts validated operations into durable task payloads.
+- `processor/`: separate infrastructure API for draining pending queue
+  transaction groups and summarizing processor results.
+
+## `shared/`
+
+- `RepositoryTypes.ts`: repository schema types shared by both write modes.
+- `RepositoryRowHelpers.ts`: parsed row, duplicate-key, and serialization
+  helpers shared by direct and queued write engines.
+
+## Compatibility barrels
+
+- `repository/index.ts`: re-exports both public repository facades and keeps the
+  existing import path stable.
+- `write/index.ts`: compatibility barrel for direct and queued write internals;
+  these exports are not part of the root public API.
 
 ## `schema/`
 
@@ -46,7 +55,6 @@ through `src/index.ts`; these folders describe internal ownership boundaries.
 Repository facades call write engines. Write engines call shared row/schema
 helpers. Schema and errors must not depend on repositories or write engines.
 
-`ColumnMap` is still declared on the repository side: the direct repository
-exports `ColumnMap`, the queued repository declares `QueuedColumnMap`, and the
-queued write executor currently reuses the direct repository type. Move that
-schema contract into `schema/` only as a separate code change.
+`ColumnMap` now lives in `shared/RepositoryTypes.ts` because both repository
+modes need the same typed column contract. The old repository exports continue
+to re-export it for source compatibility.
