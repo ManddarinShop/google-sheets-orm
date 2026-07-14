@@ -1256,6 +1256,8 @@ function readCanonicalTablesForTransaction_(spreadsheet, tasks, existingTables) 
   tasks.forEach(function(task) {
     if (!tables[task.sheetName]) {
       tables[task.sheetName] = readCanonicalTableForTask_(spreadsheet, task);
+    } else {
+      assertCanonicalTaskSchema_(tables[task.sheetName].headers, task);
     }
   });
 
@@ -1327,6 +1329,14 @@ function inspectTaskChainPostcondition_(table, chain) {
   }
 
   if (initialState.status === "applied") {
+    if (isCanonicalIntermediateChainState_(table, chain)) {
+      return {
+        status: "ambiguous",
+        errorCode: "partial_apply",
+        errorMessage: "An intermediate state of the transaction is visible",
+      };
+    }
+
     return { status: "unapplied" };
   }
 
@@ -1385,6 +1395,10 @@ function inspectTaskFinalState_(table, chain, initialState) {
   const rowIndex = table.rowsByKey[lastTask.keyValue];
 
   if (lastTask.operation === "insert") {
+    if (initialState.status === "applied") {
+      return { status: "not_final" };
+    }
+
     if (rowIndex === undefined) {
       return { status: "not_final" };
     }
@@ -1405,6 +1419,10 @@ function inspectTaskFinalState_(table, chain, initialState) {
   }
 
   if (lastTask.operation === "update") {
+    if (initialState.status === "applied") {
+      return { status: "not_final" };
+    }
+
     if (rowIndex === undefined) {
       return {
         status: "ambiguous",
@@ -1455,16 +1473,28 @@ function inspectTaskFinalState_(table, chain, initialState) {
 
   assertDeletePayloadMatchesTask_(lastTask);
 
+  if (
+    initialState.status === "applied"
+    && chain[0].operation === "insert"
+    && rowIndex === undefined
+  ) {
+    return {
+      status: "ambiguous",
+      errorCode: "partial_apply",
+      errorMessage: "Initial and final delete states are indistinguishable",
+    };
+  }
+
+  if (initialState.status === "applied") {
+    return { status: "not_final" };
+  }
+
   if (rowIndex === undefined) {
     return {
       status: "ambiguous",
       errorCode: "partial_apply",
       errorMessage: "Delete postcondition cannot be proven after the row disappeared",
     };
-  }
-
-  if (initialState.status === "applied") {
-    return { status: "not_final" };
   }
 
   if (Number(table.rows[rowIndex][table.versionIndex])
@@ -1477,6 +1507,51 @@ function inspectTaskFinalState_(table, chain, initialState) {
     errorCode: "partial_apply",
     errorMessage: "Final delete target changed before recovery completed",
   };
+}
+
+function isCanonicalIntermediateChainState_(table, chain) {
+  if (chain.length < 2) {
+    return false;
+  }
+
+  const lastTaskIndex = chain.length - 1;
+  const lastTask = chain[lastTaskIndex];
+  const rowIndex = table.rowsByKey[lastTask.keyValue];
+
+  for (let index = 0; index < lastTaskIndex; index += 1) {
+    const task = chain[index];
+
+    if (task.operation === "delete") {
+      if (rowIndex === undefined) {
+        return true;
+      }
+
+      continue;
+    }
+
+    if (rowIndex === undefined) {
+      continue;
+    }
+
+    const payload = requireTaskPayloadObject_(task);
+    const rowObject = requirePayloadObject_(
+      task.operation === "insert" ? payload.row : payload.rowToWrite,
+      task.operation === "insert" ? "payload.row" : "payload.rowToWrite",
+    );
+    const expectedRow = rowObjectToCanonicalCells_(
+      table,
+      rowObject,
+      task.operation === "update" ? table.rows[rowIndex] : null,
+    );
+
+    assertTaskRowMatchesKey_(table, expectedRow, task);
+
+    if (areCanonicalRowsEqual_(table.rows[rowIndex], expectedRow)) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 function areCanonicalRowsEqual_(left, right) {
@@ -1520,6 +1595,8 @@ function applyQueueTransaction_(spreadsheet, tasks) {
     if (!tables[task.sheetName]) {
       tables[task.sheetName] = readCanonicalTableForTask_(spreadsheet, task);
       affectedSheetNames.push(task.sheetName);
+    } else {
+      assertCanonicalTaskSchema_(tables[task.sheetName].headers, task);
     }
 
     applyTaskToCanonicalTable_(tables[task.sheetName], task);
@@ -1555,16 +1632,9 @@ function readCanonicalTableForTask_(spreadsheet, task) {
   const headers = (values[0] || []).map(function(value) {
     return String(value);
   });
+  assertCanonicalTaskSchema_(headers, task);
   const keyIndex = headers.indexOf(task.keyHeader);
   const versionIndex = headers.indexOf("_version");
-
-  if (keyIndex === -1) {
-    throw gatewayError_("schema_drift", "Missing key header: " + task.keyHeader);
-  }
-
-  if (versionIndex === -1) {
-    throw gatewayError_("schema_drift", "Missing version header: _version");
-  }
 
   const rows = values.slice(1).map(function(row) {
     return row.map(toSheetCell_);
@@ -1589,6 +1659,63 @@ function readCanonicalTableForTask_(spreadsheet, task) {
     rows: rows,
     rowsByKey: rowsByKey,
   };
+}
+
+function assertCanonicalTaskSchema_(headers, task) {
+  const seenHeaders = Object.create(null);
+
+  headers.forEach(function(header) {
+    if (header === "") {
+      return;
+    }
+
+    if (seenHeaders[header]) {
+      throw gatewayError_(
+        "schema_drift",
+        "Duplicate canonical header: " + header,
+      );
+    }
+
+    seenHeaders[header] = true;
+  });
+
+  if (headers.indexOf(task.keyHeader) === -1) {
+    throw gatewayError_("schema_drift", "Missing key header: " + task.keyHeader);
+  }
+
+  if (headers.indexOf("_version") === -1) {
+    throw gatewayError_("schema_drift", "Missing version header: _version");
+  }
+
+  // Completed tasks may have their payload redacted. Their durable status and
+  // task fingerprint are sufficient for recovery, but there is no payload
+  // left from which to infer the modeled field set.
+  if (task.status === "done" && isRedactedTaskPayload_(task.payloadJson)) {
+    return;
+  }
+
+  const payload = requireTaskPayloadObject_(task);
+  const rowObject = requirePayloadObject_(
+    task.operation === "insert"
+      ? payload.row
+      : task.operation === "update"
+        ? payload.rowToWrite
+        : payload.rowToDelete,
+    task.operation === "insert"
+      ? "payload.row"
+      : task.operation === "update"
+        ? "payload.rowToWrite"
+        : "payload.rowToDelete",
+  );
+
+  Object.keys(rowObject).forEach(function(header) {
+    if (headers.indexOf(header) === -1) {
+      throw gatewayError_(
+        "schema_drift",
+        "Missing canonical header for queued field: " + header,
+      );
+    }
+  });
 }
 
 function applyTaskToCanonicalTable_(table, task) {
