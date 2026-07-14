@@ -1,7 +1,10 @@
 import type { AppsScriptQueueAdapter } from "../../../adapter/queued/QueuedSheetAdapter.js";
 import type { SheetSnapshot } from "../../../adapter/shared/SheetAdapter.js";
-import { parseRow, assertSchema } from "../../schema/index.js";
-import { assertUniqueKeys } from "../../shared/RepositoryRowHelpers.js";
+import { assertSchema } from "../../schema/index.js";
+import {
+  assertUniqueKeys,
+  parseRepositoryRows,
+} from "../../shared/RepositoryRowHelpers.js";
 import {
   createQueuedRepositoryTransactionCoordinator,
 } from "../transaction/QueuedRepositoryTransactionCoordinator.js";
@@ -12,6 +15,7 @@ import {
   createQueuedRepositoryTransactionScope,
   type InternalQueuedRepositoryTransactionScope,
 } from "../transaction/QueuedRepositoryTransactionScope.js";
+import type { RepositorySnapshot } from "../writer/QueuedSheetWriteExecutor.js";
 import type {
   CreateQueuedSheetRepositoryInput,
   QueuedRepositoryTransaction,
@@ -48,8 +52,8 @@ export function createQueuedSheetRepository<
     await adapter.initializeSystemSheets(sheetName, headers);
   }
 
-  /** Reads canonical rows for the current transaction scope. */
-  async function findAll(): Promise<Array<T>> {
+  /** Reads and validates one canonical snapshot for a transaction scope. */
+  async function readSnapshot(): Promise<RepositorySnapshot<T>> {
     const snapshot = await readQueuedRepositorySheet(adapter, sheetName);
 
     assertSchema({
@@ -58,23 +62,28 @@ export function createQueuedSheetRepository<
       columns,
     });
 
-    const rows = snapshot.rows.map((row) =>
-      parseRow<T>({
-        headers: snapshot.headers,
-        cells: row.cells,
-        columns,
-      }),
+    const parsedRows = parseRepositoryRows<T>({
+      headers: snapshot.headers,
+      sheetRows: snapshot.rows,
+      columns,
+    });
+
+    assertUniqueKeys(
+      parsedRows.map((parsedRow) => parsedRow.row),
+      key,
     );
 
-    assertUniqueKeys(rows, key);
-    return rows;
+    return {
+      headers: snapshot.headers,
+      parsedRows,
+    };
   }
 
   /** Creates the one unit of work used by a manual or future ambient transaction. */
   function createRepositoryTransactionScope():
     InternalQueuedRepositoryTransactionScope<T> {
     return createQueuedRepositoryTransactionScope({
-      findAll,
+      readSnapshot,
       key,
       writeCoordinator,
     });
