@@ -261,13 +261,19 @@ export class AppsScriptGatewayAdapter
       await this.request(request),
     );
 
-    return {
+    const result: ProcessTaskQueueResult = {
       processedTransactions: response.processedTransactions,
       failedTransactions: response.failedTransactions,
       processedTasks: response.processedTasks,
       failedTasks: response.failedTasks,
       remainingPendingTasks: response.remainingPendingTasks,
     };
+
+    if (response.recoveryPendingTasks !== undefined) {
+      result.recoveryPendingTasks = response.recoveryPendingTasks;
+    }
+
+    return result;
   }
 
   private async request(
@@ -396,6 +402,10 @@ function requireProcessTaskQueueResponse(
     !isNonNegativeInteger(value.processedTasks) ||
     !isNonNegativeInteger(value.failedTasks) ||
     !isNonNegativeInteger(value.remainingPendingTasks)
+    || (
+      value.recoveryPendingTasks !== undefined
+      && !isNonNegativeInteger(value.recoveryPendingTasks)
+    )
   ) {
     throw new Error(
       "Apps Script gateway returned an invalid processTaskQueue response",
@@ -409,6 +419,9 @@ function requireProcessTaskQueueResponse(
     processedTasks: value.processedTasks,
     failedTasks: value.failedTasks,
     remainingPendingTasks: value.remainingPendingTasks,
+    ...(value.recoveryPendingTasks === undefined
+      ? {}
+      : { recoveryPendingTasks: value.recoveryPendingTasks }),
   };
 }
 

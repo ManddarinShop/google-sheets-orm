@@ -13,6 +13,8 @@ export interface InternalQueuedRepositoryTransactionScope<
   /** Re-enqueues an ambiguous batch without reading the current sheet. */
   retry(): Promise<Array<void | T | null>>;
   clear(): void;
+  /** Closes the scope so escaped transaction handles cannot mutate later. */
+  close(): void;
 }
 
 export interface CreateQueuedRepositoryTransactionScopeInput<
@@ -39,8 +41,18 @@ export function createQueuedRepositoryTransactionScope<
   let inFlightOperations: Array<RepositoryWriteTransactionOperation<T>> | null =
     null;
   let inFlightTransactionId: string | null = input.transactionId ?? null;
+  let closed = false;
+
+  function assertScopeOpen(): void {
+    if (closed) {
+      throw new ConflictError(
+        "Queued repository transaction scope is closed",
+      );
+    }
+  }
 
   function save(row: T): void {
+    assertScopeOpen();
     const currentKey = String(row[input.key]);
     const originalKey = loadedEntityKeys.get(row);
 
@@ -73,6 +85,7 @@ export function createQueuedRepositoryTransactionScope<
   }
 
   function remove(row: T): void {
+    assertScopeOpen();
     const currentKey = String(row[input.key]);
     const originalKey = loadedEntityKeys.get(row);
 
@@ -94,6 +107,8 @@ export function createQueuedRepositoryTransactionScope<
    * the durable task queue. Enqueue failures retain the internal retry batch.
    */
   async function flush(): Promise<Array<void | T | null>> {
+    assertScopeOpen();
+
     if (pendingOperations.length === 0) {
       return [];
     }
@@ -117,6 +132,8 @@ export function createQueuedRepositoryTransactionScope<
   }
 
   async function retry(): Promise<Array<void | T | null>> {
+    assertScopeOpen();
+
     const transactionId = inFlightTransactionId ?? input.transactionId;
 
     if (transactionId === undefined || transactionId === null) {
@@ -152,6 +169,10 @@ export function createQueuedRepositoryTransactionScope<
     pendingOperations.splice(0, pendingOperations.length);
     inFlightOperations = null;
     inFlightTransactionId = null;
+  }
+
+  function close(): void {
+    closed = true;
   }
 
   function pushPendingOperation(
@@ -195,6 +216,7 @@ export function createQueuedRepositoryTransactionScope<
   }
 
   async function findAll(): Promise<Array<T>> {
+    assertScopeOpen();
     const rows = await input.findAll();
 
     for (const row of rows) {
@@ -255,6 +277,7 @@ export function createQueuedRepositoryTransactionScope<
     flush,
     retry,
     clear,
+    close,
   };
 }
 

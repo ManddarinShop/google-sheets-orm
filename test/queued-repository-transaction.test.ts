@@ -419,6 +419,30 @@ describe("queued repository transaction API", () => {
     expect(adapter.processedTaskQueues).toEqual([{ maxTransactions: 1 }]);
   });
 
+  it("rejects mutations through a transaction handle after the callback ends", async () => {
+    const adapter = new FakeQueueAdapter(ordersSnapshot);
+    const orders = createOrdersRepository(adapter);
+    let escapedTransaction: {
+      save(row: Order): void;
+    } | null = null;
+
+    await orders.transaction((transaction) => {
+      escapedTransaction = transaction;
+    });
+
+    if (escapedTransaction === null) {
+      throw new Error("Expected transaction handle to be captured");
+    }
+
+    expect(() => escapedTransaction?.save({
+      id: "o2",
+      userId: "u2",
+      status: "new",
+      canceledAt: undefined,
+      _version: 1,
+    })).toThrow("Queued repository transaction scope is closed");
+  });
+
   it.each([
     [
       "idle",
@@ -460,8 +484,26 @@ describe("queued repository transaction API", () => {
         remainingPendingTasks: 0,
       },
     ],
+    [
+      "recovering",
+      {
+        processedTransactions: 0,
+        failedTransactions: 0,
+        processedTasks: 0,
+        failedTasks: 0,
+        remainingPendingTasks: 0,
+        recoveryPendingTasks: 1,
+      },
+    ],
   ])("summarizes a %s processor result", (status, result) => {
     expect(summarizeProcessTaskQueueResult(result)).toMatchObject({ status });
+
+    if (status === "recovering") {
+      expect(summarizeProcessTaskQueueResult(result)).toMatchObject({
+        hasPendingTasks: false,
+        hasRecoveryTasks: true,
+      });
+    }
   });
 
   function createOrdersRepository(adapter: AppsScriptQueueAdapter) {

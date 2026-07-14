@@ -50,6 +50,7 @@ interface GatewayTemplate {
     processedTasks: number;
     failedTasks: number;
     remainingPendingTasks: number;
+    recoveryPendingTasks?: number;
   };
   readCanonicalSheet_(
     spreadsheet: FakeSpreadsheet,
@@ -1180,6 +1181,10 @@ describe("manual Apps Script gateway template system sheets", () => {
     ["negative", -1],
     ["fractional", 1.5],
     ["non-numeric", "not-a-number"],
+    ["false", false],
+    ["true", true],
+    ["numeric string zero", "0"],
+    ["numeric string one", "1"],
   ] as const)("rejects queue rows with %s attempts", async (_label, attempts) => {
     const gateway = await loadGatewayTemplate();
     const spreadsheet = new FakeSpreadsheet();
@@ -1399,6 +1404,7 @@ describe("manual Apps Script gateway template system sheets", () => {
       processedTasks: 0,
       failedTasks: 0,
       remainingPendingTasks: 0,
+      recoveryPendingTasks: 1,
     });
     expect(canonical.values).toEqual([
       ["id", "_version"],
@@ -1470,6 +1476,7 @@ describe("manual Apps Script gateway template system sheets", () => {
       failedTransactions: 0,
       processedTasks: 0,
       failedTasks: 0,
+      recoveryPendingTasks: 1,
     });
     expect(queue.values[1]?.[4]).toBe("done");
     expect(queue.values[1]?.[10]).toBe(
@@ -1486,6 +1493,80 @@ describe("manual Apps Script gateway template system sheets", () => {
     expect(queue.values[1]?.[10]).toBe(
       JSON.stringify({ redacted: true }),
     );
+  });
+
+  it("stops later pending transactions after an unconfirmed canonical write", async () => {
+    let failNextCanonicalWrite = false;
+    let canonicalSheetName = "";
+    const spreadsheet = new FakeSpreadsheet({
+      failSetValues: ({ sheetName }) => {
+        if (failNextCanonicalWrite && sheetName === canonicalSheetName) {
+          failNextCanonicalWrite = false;
+          return new Error("canonical write outcome lost");
+        }
+
+        return null;
+      },
+    });
+    const gateway = await loadGatewayTemplate();
+    const systemSheets = gateway.initializeSystemSheets_(spreadsheet, {
+      sheetName: "Users",
+      headers: ["id", "_version"],
+    });
+    canonicalSheetName = systemSheets.canonicalSheetName;
+    const queue = spreadsheet.sheets.get(
+      gateway.TYPED_SHEETS_TASK_QUEUE_SHEET_NAME,
+    );
+
+    gateway.enqueueTasks_(spreadsheet, {
+      tasks: [
+        {
+          taskId: "task-unconfirmed-first",
+          transactionId: "tx-unconfirmed-first",
+          transactionIndex: 0,
+          operation: "insert",
+          sheetName: "Users",
+          keyHeader: "id",
+          keyValue: "u1",
+          expectedVersion: null,
+          payloadJson: JSON.stringify({ row: { id: "u1", _version: 1 } }),
+        },
+        {
+          taskId: "task-blocked-second",
+          transactionId: "tx-blocked-second",
+          transactionIndex: 0,
+          operation: "insert",
+          sheetName: "Users",
+          keyHeader: "id",
+          keyValue: "u2",
+          expectedVersion: null,
+          payloadJson: JSON.stringify({ row: { id: "u2", _version: 1 } }),
+        },
+      ],
+    });
+
+    if (queue === undefined) {
+      throw new Error("Expected task queue sheet");
+    }
+
+    failNextCanonicalWrite = true;
+
+    expect(gateway.processTaskQueue_(spreadsheet, {})).toEqual({
+      ok: true,
+      processedTransactions: 0,
+      failedTransactions: 0,
+      processedTasks: 0,
+      failedTasks: 0,
+      remainingPendingTasks: 1,
+      recoveryPendingTasks: 1,
+    });
+    expect(
+      spreadsheet.sheets.get(canonicalSheetName)?.values,
+    ).toEqual([["id", "_version"]]);
+    expect(queue.values.slice(1).map((row) => row[4])).toEqual([
+      "processing",
+      "pending",
+    ]);
   });
 
   it("keeps a cross-sheet partial apply recoverable until postconditions are checked", async () => {
@@ -2461,6 +2542,7 @@ describe("manual Apps Script gateway template system sheets", () => {
       processedTasks: 0,
       failedTasks: 0,
       remainingPendingTasks: 1,
+      recoveryPendingTasks: 1,
     });
     expect(canonical?.values).toEqual([
       ["id", "name", "_version"],
