@@ -5,6 +5,7 @@ export { createSheetRepository } from "../direct/index.js";
 export type {
   CreateQueuedSheetRepositoryInput,
   QueuedColumnMap,
+  QueuedRepositoryReadCacheOptions,
   QueuedRepositoryTransaction,
   QueuedSheetRepository,
 } from "../queued/index.js";

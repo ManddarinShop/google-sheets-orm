@@ -128,6 +128,54 @@ describe("queued repository transaction API", () => {
     ],
   };
 
+  it("reuses confirmed canonical reads across read-only transactions", async () => {
+    const adapter = new FakeQueueAdapter(ordersSnapshot);
+    const orders = createOrdersRepository(adapter);
+
+    await orders.transaction((tx) => tx.findAll());
+    await orders.transaction((tx) => tx.findById("o1"));
+
+    expect(adapter.readSheets).toEqual(["Orders"]);
+  });
+
+  it("invalidates the read cache when a queued write is attempted", async () => {
+    const adapter = new FakeQueueAdapter(ordersSnapshot);
+    const orders = createOrdersRepository(adapter);
+
+    await orders.transaction((tx) => tx.findAll());
+
+    await orders.transaction((tx) => {
+      tx.save({
+        id: "o3",
+        userId: "u2",
+        status: "new",
+        canceledAt: undefined,
+        _version: 1,
+      });
+    });
+
+    const rows = await orders.transaction((tx) => tx.findAll());
+
+    expect(adapter.readSheets).toEqual(["Orders", "Orders"]);
+    expect(rows.map((row) => row.id)).toEqual(["o1", "o2"]);
+  });
+
+  it("supports disabling the repository read cache", async () => {
+    const adapter = new FakeQueueAdapter(ordersSnapshot);
+    const orders = createQueuedSheetRepository<Order>({
+      adapter,
+      sheetName: "Orders",
+      key: "id",
+      columns,
+      cache: { enabled: false },
+    });
+
+    await orders.transaction((tx) => tx.findAll());
+    await orders.transaction((tx) => tx.findAll());
+
+    expect(adapter.readSheets).toEqual(["Orders", "Orders"]);
+  });
+
   it("flushes a successful callback as one queue transaction", async () => {
     const adapter = new FakeQueueAdapter(ordersSnapshot);
     const orders = createOrdersRepository(adapter);

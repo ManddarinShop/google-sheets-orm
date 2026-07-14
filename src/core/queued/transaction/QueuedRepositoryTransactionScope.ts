@@ -25,6 +25,7 @@ export interface CreateQueuedRepositoryTransactionScopeInput<
   key: keyof T & string;
   writeCoordinator: RepositoryQueueWriteCoordinator<T>;
   transactionId?: string;
+  onWriteAttempt?(): void;
 }
 
 /**
@@ -121,6 +122,7 @@ export function createQueuedRepositoryTransactionScope<
 
     inFlightOperations = operations;
     inFlightTransactionId = transactionId;
+    input.onWriteAttempt?.();
 
     const result = await input.writeCoordinator.writeTransaction(
       operations,
@@ -153,6 +155,7 @@ export function createQueuedRepositoryTransactionScope<
       );
     }
 
+    input.onWriteAttempt?.();
     const result = await input.writeCoordinator.retryTransaction(transactionId);
     const operationsToClear = inFlightOperations?.length ?? 0;
 
