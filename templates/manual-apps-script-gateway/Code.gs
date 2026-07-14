@@ -678,9 +678,7 @@ function readTaskQueueState_(queueSheet) {
         taskFingerprint: String(row[taskFingerprintIndex] || ""),
       };
 
-      if (task.taskFingerprint === "") {
-        task.taskFingerprint = createTaskFingerprint_(task);
-      }
+      assertStoredTaskFingerprint_(task);
 
       state.tasksById[taskId] = task;
     }
@@ -734,14 +732,19 @@ function processTaskQueue_(spreadsheet, request) {
     queueSheet,
     queuedTasks,
     now,
+    options.maxTransactions,
   );
   result.processedTransactions += recoveryResult.processedTransactions;
   result.failedTransactions += recoveryResult.failedTransactions;
   result.processedTasks += recoveryResult.processedTasks;
   result.failedTasks += recoveryResult.failedTasks;
 
+  const remainingTransactionBudget = Math.max(
+    0,
+    options.maxTransactions - recoveryResult.recoveredTransactions,
+  );
   const pendingGroups = groupPendingTasksByTransaction_(queuedTasks)
-    .slice(0, options.maxTransactions);
+    .slice(0, remainingTransactionBudget);
   const processingStartedAt = now.toISOString();
 
   pendingGroups.forEach(function(group) {
@@ -795,6 +798,7 @@ function reconcileStaleProcessingTransactions_(
   queueSheet,
   queuedTasks,
   now,
+  maxTransactions,
 ) {
   const nowMs = now.getTime();
   const recoveredAt = now.toISOString();
@@ -803,15 +807,31 @@ function reconcileStaleProcessingTransactions_(
     failedTransactions: 0,
     processedTasks: 0,
     failedTasks: 0,
+    recoveredTransactions: 0,
   };
+  const canonicalTables = Object.create(null);
 
-  groupTasksByTransaction_(queuedTasks).forEach(function(group) {
+  const groups = groupTasksByTransaction_(queuedTasks);
+
+  for (let groupIndex = 0; groupIndex < groups.length; groupIndex += 1) {
+    const group = groups[groupIndex];
+
+    if (group.allTerminal) {
+      continue;
+    }
+
+    // A pending group is the earliest non-terminal work and must be allowed
+    // to run before any later stale claim is reconciled.
+    if (group.allPending || result.recoveredTransactions >= maxTransactions) {
+      break;
+    }
+
     const hasStaleTask = group.tasks.some(function(task) {
       return isStaleProcessingTask_(task, nowMs);
     });
 
     if (!hasStaleTask) {
-      return;
+      break;
     }
 
     let reconciliation;
@@ -820,6 +840,7 @@ function reconcileStaleProcessingTransactions_(
       reconciliation = reconcileTransactionPostconditions_(
         spreadsheet,
         group.tasks,
+        canonicalTables,
       );
     } catch (error) {
       reconciliation = {
@@ -847,7 +868,8 @@ function reconcileStaleProcessingTransactions_(
       });
       result.processedTransactions += 1;
       result.processedTasks += group.tasks.length;
-      return;
+      result.recoveredTransactions += 1;
+      continue;
     }
 
     if (reconciliation.status === "pending") {
@@ -862,7 +884,7 @@ function reconcileStaleProcessingTransactions_(
         task.status = "pending";
         task.updatedAt = recoveredAt;
       });
-      return;
+      break;
     }
 
     markQueueTasks_(queueSheet, group.tasks, {
@@ -879,7 +901,8 @@ function reconcileStaleProcessingTransactions_(
     });
     result.failedTransactions += 1;
     result.failedTasks += group.tasks.length;
-  });
+    result.recoveredTransactions += 1;
+  }
 
   return result;
 }
@@ -959,17 +982,68 @@ function parseQueuedTaskRow_(row, rowNumber) {
     );
   }
 
-  if (task.taskFingerprint === "") {
-    task.taskFingerprint = createTaskFingerprint_(task);
-  }
+  assertStoredTaskFingerprint_(task);
 
   return task;
 }
 
+function assertStoredTaskFingerprint_(task) {
+  if (task.taskFingerprint === "") {
+    task.taskFingerprint = createTaskFingerprint_(task);
+    return;
+  }
+
+  // A completed task intentionally redacts payloadJson. Its stored
+  // fingerprint remains the immutable identity, but it cannot be recomputed
+  // after the payload has been removed.
+  if (task.status === "done" && isRedactedTaskPayload_(task.payloadJson)) {
+    return;
+  }
+
+  const legacyMarker =
+    TYPED_SHEETS_LEGACY_REDACTED_FINGERPRINT_PREFIX + task.taskId;
+
+  if (task.taskFingerprint === legacyMarker) {
+    if (task.status !== "done" || !isRedactedTaskPayload_(task.payloadJson)) {
+      throw gatewayError_(
+        "invalid_task",
+        "Legacy redacted fingerprint is only valid for done tasks: "
+          + task.taskId,
+      );
+    }
+
+    return;
+  }
+
+  const expectedFingerprint = createTaskFingerprint_(task);
+
+  if (task.taskFingerprint !== expectedFingerprint) {
+    throw gatewayError_(
+      "invalid_task",
+      "Task fingerprint mismatch: " + task.taskId
+        + " stored=" + task.taskFingerprint
+        + " expected=" + expectedFingerprint,
+    );
+  }
+}
+
 function groupPendingTasksByTransaction_(queuedTasks) {
-  return groupTasksByTransaction_(queuedTasks).filter(function(group) {
-    return group.allPending;
+  const pendingGroups = [];
+
+  groupTasksByTransaction_(queuedTasks).some(function(group) {
+    if (group.allTerminal) {
+      return false;
+    }
+
+    if (!group.allPending) {
+      return true;
+    }
+
+    pendingGroups.push(group);
+    return false;
   });
+
+  return pendingGroups;
 }
 
 function groupTasksByTransaction_(queuedTasks) {
@@ -982,6 +1056,7 @@ function groupTasksByTransaction_(queuedTasks) {
         transactionId: task.transactionId,
         firstSequence: task.sequence,
         allPending: true,
+        allTerminal: true,
         tasks: [],
       };
       groups.push(groupsById[task.transactionId]);
@@ -989,6 +1064,10 @@ function groupTasksByTransaction_(queuedTasks) {
 
     if (task.status !== "pending") {
       groupsById[task.transactionId].allPending = false;
+    }
+
+    if (task.status !== "done" && task.status !== "failed") {
+      groupsById[task.transactionId].allTerminal = false;
     }
 
     groupsById[task.transactionId].firstSequence = Math.min(
@@ -1011,22 +1090,27 @@ function groupTasksByTransaction_(queuedTasks) {
 }
 
 /**
- * Checks whether each task's intended canonical state is already visible.
- * Deletes deliberately remain ambiguous when the target row is absent because
- * the sheet does not retain a durable delete tombstone.
+ * Checks each same-key task chain against the transaction's initial and final
+ * states. Reading one canonical table per sheet avoids an Apps Script read for
+ * every task while preserving transactionIndex ordering during recovery.
  */
-function reconcileTransactionPostconditions_(spreadsheet, tasks) {
-  let appliedTasks = 0;
-  let unappliedTasks = 0;
+function reconcileTransactionPostconditions_(
+  spreadsheet,
+  tasks,
+  canonicalTables,
+) {
+  const tables = readCanonicalTablesForTransaction_(
+    spreadsheet,
+    tasks,
+    canonicalTables,
+  );
+  const chains = groupTasksByTarget_(tasks);
+  let appliedChains = 0;
+  let unappliedChains = 0;
   let ambiguousOutcome = null;
 
-  tasks.forEach(function(task) {
-    if (task.status === "done") {
-      appliedTasks += 1;
-      return;
-    }
-
-    if (task.status === "failed") {
+  chains.forEach(function(chain) {
+    if (chain.some(function(task) { return task.status === "failed"; })) {
       ambiguousOutcome = {
         errorCode: "partial_apply",
         errorMessage: "Transaction contains a previously failed task",
@@ -1034,22 +1118,25 @@ function reconcileTransactionPostconditions_(spreadsheet, tasks) {
       return;
     }
 
-    const outcome = inspectTaskPostcondition_(spreadsheet, task);
+    const outcome = inspectTaskChainPostcondition_(
+      tables[chain[0].sheetName],
+      chain,
+    );
 
     if (outcome.status === "applied") {
-      appliedTasks += 1;
+      appliedChains += 1;
       return;
     }
 
-    if (outcome.status === "ambiguous") {
-      ambiguousOutcome = outcome;
+    if (outcome.status === "unapplied") {
+      unappliedChains += 1;
       return;
     }
 
-    unappliedTasks += 1;
+    ambiguousOutcome = outcome;
   });
 
-  if (ambiguousOutcome !== null || (appliedTasks > 0 && unappliedTasks > 0)) {
+  if (ambiguousOutcome !== null || (appliedChains > 0 && unappliedChains > 0)) {
     return {
       status: "failed",
       errorCode: ambiguousOutcome
@@ -1061,48 +1148,186 @@ function reconcileTransactionPostconditions_(spreadsheet, tasks) {
     };
   }
 
-  if (unappliedTasks === 0) {
+  if (appliedChains === chains.length) {
     return { status: "done" };
   }
 
-  return { status: "pending" };
+  if (unappliedChains === chains.length) {
+    return { status: "pending" };
+  }
+
+  return {
+    status: "failed",
+    errorCode: "partial_apply",
+    errorMessage: "Transaction postconditions are ambiguous",
+  };
 }
 
-function inspectTaskPostcondition_(spreadsheet, task) {
-  const table = readCanonicalTableForTask_(spreadsheet, task);
-  const rowIndex = table.rowsByKey[task.keyValue];
+function readCanonicalTablesForTransaction_(spreadsheet, tasks, existingTables) {
+  const tables = existingTables || Object.create(null);
 
-  if (task.operation === "insert") {
-    if (rowIndex === undefined) {
-      return { status: "unapplied" };
+  tasks.forEach(function(task) {
+    if (!tables[task.sheetName]) {
+      tables[task.sheetName] = readCanonicalTableForTask_(spreadsheet, task);
+    }
+  });
+
+  return tables;
+}
+
+function groupTasksByTarget_(tasks) {
+  const chainsByTarget = Object.create(null);
+  const chains = [];
+
+  tasks.forEach(function(task) {
+    const target = [task.sheetName, task.keyHeader, task.keyValue].join(
+      "\u001f",
+    );
+
+    if (!chainsByTarget[target]) {
+      chainsByTarget[target] = [];
+      chains.push(chainsByTarget[target]);
     }
 
-    const payload = requireTaskPayloadObject_(task);
+    chainsByTarget[target].push(task);
+  });
+
+  chains.forEach(function(chain) {
+    chain.sort(function(left, right) {
+      return left.transactionIndex - right.transactionIndex
+        || left.sequence - right.sequence;
+    });
+  });
+
+  return chains;
+}
+
+function inspectTaskChainPostcondition_(table, chain) {
+  const firstTask = chain[0];
+  const lastTask = chain[chain.length - 1];
+
+  if (table === undefined || firstTask === undefined || lastTask === undefined) {
+    return {
+      status: "ambiguous",
+      errorCode: "partial_apply",
+      errorMessage: "Missing canonical table for transaction recovery",
+    };
+  }
+
+  // A final done status is already a durable outcome. This also handles a
+  // redacted payload whose original immutable intent is no longer readable.
+  if (lastTask.status === "done") {
+    return { status: "applied" };
+  }
+
+  const finalState = inspectTaskFinalState_(table, chain);
+
+  if (finalState.status === "ambiguous") {
+    return finalState;
+  }
+
+  const initialState = inspectTaskInitialState_(table, chain);
+
+  if (finalState.status === "applied" && initialState.status === "applied") {
+    return {
+      status: "ambiguous",
+      errorCode: "partial_apply",
+      errorMessage: "Initial and final states are indistinguishable",
+    };
+  }
+
+  if (finalState.status === "applied") {
+    return { status: "applied" };
+  }
+
+  if (initialState.status === "applied") {
+    return { status: "unapplied" };
+  }
+
+  return {
+    status: "ambiguous",
+    errorCode: "partial_apply",
+    errorMessage: "Transaction target is neither initial nor final state",
+  };
+}
+
+function inspectTaskInitialState_(table, chain) {
+  const firstTask = chain[0];
+  const rowIndex = table.rowsByKey[firstTask.keyValue];
+
+  if (chain.some(function(task) { return task.status === "done"; })) {
+    return { status: "not_initial" };
+  }
+
+  if (firstTask.operation === "insert") {
+    return rowIndex === undefined
+      ? { status: "applied" }
+      : { status: "not_initial" };
+  }
+
+  if (rowIndex === undefined) {
+    return { status: "not_initial" };
+  }
+
+  if (firstTask.operation === "delete") {
+    const payload = requireTaskPayloadObject_(firstTask);
+    const rowToDelete = requirePayloadObject_(
+      payload.rowToDelete,
+      "payload.rowToDelete",
+    );
+    const expectedRow = rowObjectToCanonicalCells_(
+      table,
+      rowToDelete,
+      null,
+    );
+
+    assertTaskRowMatchesKey_(table, expectedRow, firstTask);
+
+    return areCanonicalRowsEqual_(table.rows[rowIndex], expectedRow)
+      ? { status: "applied" }
+      : { status: "not_initial" };
+  }
+
+  return Number(table.rows[rowIndex][table.versionIndex])
+      === firstTask.expectedVersion
+    ? { status: "applied" }
+    : { status: "not_initial" };
+}
+
+function inspectTaskFinalState_(table, chain) {
+  const lastTask = chain[chain.length - 1];
+  const rowIndex = table.rowsByKey[lastTask.keyValue];
+
+  if (lastTask.operation === "insert") {
+    if (rowIndex === undefined) {
+      return { status: "not_final" };
+    }
+
+    const payload = requireTaskPayloadObject_(lastTask);
     const rowObject = requirePayloadObject_(payload.row, "payload.row");
     const expectedRow = rowObjectToCanonicalCells_(table, rowObject, null);
 
-    assertTaskRowMatchesKey_(table, expectedRow, task);
+    assertTaskRowMatchesKey_(table, expectedRow, lastTask);
 
     return areCanonicalRowsEqual_(table.rows[rowIndex], expectedRow)
       ? { status: "applied" }
       : {
           status: "ambiguous",
           errorCode: "partial_apply",
-          errorMessage: "Inserted row does not match the queued payload",
+          errorMessage: "Final inserted row does not match the queued payload",
         };
   }
 
-  if (task.operation === "update") {
+  if (lastTask.operation === "update") {
     if (rowIndex === undefined) {
       return {
         status: "ambiguous",
         errorCode: "partial_apply",
-        errorMessage: "Updated row is missing from the canonical sheet",
+        errorMessage: "Final updated row is missing from the canonical sheet",
       };
     }
 
-    const currentRow = table.rows[rowIndex];
-    const payload = requireTaskPayloadObject_(task);
+    const payload = requireTaskPayloadObject_(lastTask);
     const rowToWrite = requirePayloadObject_(
       payload.rowToWrite,
       "payload.rowToWrite",
@@ -1112,7 +1337,7 @@ function inspectTaskPostcondition_(spreadsheet, task) {
       "payload.rowToWrite._version",
     );
 
-    if (versionToWrite <= task.expectedVersion) {
+    if (versionToWrite <= lastTask.expectedVersion) {
       throw gatewayError_(
         "invalid_task",
         "payload.rowToWrite._version must advance expectedVersion",
@@ -1122,43 +1347,47 @@ function inspectTaskPostcondition_(spreadsheet, task) {
     const expectedRow = rowObjectToCanonicalCells_(
       table,
       rowToWrite,
-      currentRow,
+      table.rows[rowIndex],
     );
-    assertTaskRowMatchesKey_(table, expectedRow, task);
+    assertTaskRowMatchesKey_(table, expectedRow, lastTask);
 
-    if (areCanonicalRowsEqual_(currentRow, expectedRow)) {
+    if (areCanonicalRowsEqual_(table.rows[rowIndex], expectedRow)) {
       return { status: "applied" };
     }
 
-    if (Number(currentRow[table.versionIndex]) === task.expectedVersion) {
-      return { status: "unapplied" };
+    if (Number(table.rows[rowIndex][table.versionIndex])
+        === lastTask.expectedVersion) {
+      return { status: "not_final" };
     }
 
     return {
       status: "ambiguous",
       errorCode: "partial_apply",
-      errorMessage: "Updated row does not match the queued postcondition",
+      errorMessage: "Final updated row does not match the queued payload",
     };
   }
 
-  assertDeletePayloadMatchesTask_(task);
+  assertDeletePayloadMatchesTask_(lastTask);
 
   if (rowIndex === undefined) {
-    return {
-      status: "ambiguous",
-      errorCode: "partial_apply",
-      errorMessage: "Delete postcondition cannot be proven after the row disappeared",
-    };
+    return chain.length > 1
+      ? { status: "applied" }
+      : {
+          status: "ambiguous",
+          errorCode: "partial_apply",
+          errorMessage: "Delete postcondition cannot be proven after the row disappeared",
+        };
   }
 
-  if (Number(table.rows[rowIndex][table.versionIndex]) === task.expectedVersion) {
-    return { status: "unapplied" };
+  if (Number(table.rows[rowIndex][table.versionIndex])
+      === lastTask.expectedVersion) {
+    return { status: "not_final" };
   }
 
   return {
     status: "ambiguous",
     errorCode: "partial_apply",
-    errorMessage: "Delete target changed before recovery completed",
+    errorMessage: "Final delete target changed before recovery completed",
   };
 }
 
