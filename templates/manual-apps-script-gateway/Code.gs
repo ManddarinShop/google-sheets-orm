@@ -1380,6 +1380,8 @@ function inspectTaskInitialState_(table, chain) {
   }
 
   if (firstTask.operation === "insert") {
+    requireInsertTaskRow_(table, firstTask);
+
     return rowIndex === undefined
       ? { status: "applied" }
       : { status: "not_initial" };
@@ -1419,6 +1421,8 @@ function inspectTaskFinalState_(table, chain, initialState) {
   const rowIndex = table.rowsByKey[lastTask.keyValue];
 
   if (lastTask.operation === "insert") {
+    const expectedRow = requireInsertTaskRow_(table, lastTask);
+
     if (initialState.status === "applied") {
       return { status: "not_final" };
     }
@@ -1426,12 +1430,6 @@ function inspectTaskFinalState_(table, chain, initialState) {
     if (rowIndex === undefined) {
       return { status: "not_final" };
     }
-
-    const payload = requireTaskPayloadObject_(lastTask);
-    const rowObject = requirePayloadObject_(payload.row, "payload.row");
-    const expectedRow = rowObjectToCanonicalCells_(table, rowObject, null);
-
-    assertTaskRowMatchesKey_(table, expectedRow, lastTask);
 
     return areCanonicalRowsEqual_(table.rows[rowIndex], expectedRow)
       ? { status: "applied" }
@@ -1557,16 +1555,22 @@ function isCanonicalIntermediateChainState_(table, chain) {
       continue;
     }
 
-    const payload = requireTaskPayloadObject_(task);
-    const rowObject = requirePayloadObject_(
-      task.operation === "insert" ? payload.row : payload.rowToWrite,
-      task.operation === "insert" ? "payload.row" : "payload.rowToWrite",
-    );
-    const expectedRow = rowObjectToCanonicalCells_(
-      table,
-      rowObject,
-      task.operation === "update" ? table.rows[rowIndex] : null,
-    );
+    let expectedRow;
+
+    if (task.operation === "insert") {
+      expectedRow = requireInsertTaskRow_(table, task);
+    } else {
+      const payload = requireTaskPayloadObject_(task);
+      const rowObject = requirePayloadObject_(
+        payload.rowToWrite,
+        "payload.rowToWrite",
+      );
+      expectedRow = rowObjectToCanonicalCells_(
+        table,
+        rowObject,
+        table.rows[rowIndex],
+      );
+    }
 
     assertTaskRowMatchesKey_(table, expectedRow, task);
 
@@ -1771,15 +1775,12 @@ function applyTaskToCanonicalTable_(table, task) {
 }
 
 function applyInsertTask_(table, task) {
+  const row = requireInsertTaskRow_(table, task);
+
   if (table.rowsByKey[task.keyValue] !== undefined) {
     throw gatewayError_("conflict", "Row \"" + task.keyValue + "\" already exists");
   }
 
-  const payload = requireTaskPayloadObject_(task);
-  const rowObject = requirePayloadObject_(payload.row, "payload.row");
-  const row = rowObjectToCanonicalCells_(table, rowObject, null);
-
-  assertTaskRowMatchesKey_(table, row, task);
   table.rowsByKey[task.keyValue] = table.rows.length;
   table.rows.push(row);
 }
@@ -1879,6 +1880,39 @@ function assertTaskRowMatchesKey_(table, row, task) {
       "Task payload key does not match queued key for " + task.taskId,
     );
   }
+}
+
+/**
+ * Validates an insert's immutable identity before materializing its cells.
+ * Invalid key or version data must fail before the canonical table is mutated.
+ */
+function requireInsertTaskRow_(table, task) {
+  const payload = requireTaskPayloadObject_(task);
+  const rowObject = requirePayloadObject_(payload.row, "payload.row");
+
+  if (!Object.prototype.hasOwnProperty.call(rowObject, task.keyHeader)) {
+    throw gatewayError_(
+      "invalid_task",
+      "payload.row must include the queued key header: " + task.keyHeader,
+    );
+  }
+
+  if (
+    rowObject[task.keyHeader] === null
+    || rowObject[task.keyHeader] === undefined
+    || String(rowObject[task.keyHeader]) !== task.keyValue
+  ) {
+    throw gatewayError_(
+      "invalid_task",
+      "payload.row key must match queued key",
+    );
+  }
+
+  requireTaskFiniteNumber_(rowObject._version, "payload.row._version");
+
+  const row = rowObjectToCanonicalCells_(table, rowObject, null);
+  assertTaskRowMatchesKey_(table, row, task);
+  return row;
 }
 
 function requireTaskPayloadObject_(task) {

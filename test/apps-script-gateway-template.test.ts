@@ -1605,6 +1605,58 @@ describe("manual Apps Script gateway template system sheets", () => {
     expect(queue?.values[1]?.[12]).toBe("invalid_task");
   });
 
+  it.each([
+    ["missing", { id: "u1" }],
+    ["null", { id: "u1", _version: null }],
+  ])(
+    "rejects insert payloads with a %s _version before canonical mutation",
+    async (_caseName, row) => {
+      const gateway = await loadGatewayTemplate();
+      const spreadsheet = new FakeSpreadsheet();
+      const systemSheets = gateway.initializeSystemSheets_(spreadsheet, {
+        sheetName: "Users",
+        headers: ["id", "_version"],
+      });
+      const canonical = spreadsheet.sheets.get(systemSheets.canonicalSheetName);
+
+      gateway.enqueueTasks_(spreadsheet, {
+        tasks: [
+          {
+            taskId: "task-invalid-insert-version",
+            transactionId: "tx-invalid-insert-version",
+            transactionIndex: 0,
+            operation: "insert",
+            sheetName: "Users",
+            keyHeader: "id",
+            keyValue: "u1",
+            expectedVersion: null,
+            payloadJson: JSON.stringify({ row }),
+          },
+        ],
+      });
+
+      expect(gateway.processTaskQueue_(spreadsheet, {})).toEqual({
+        ok: true,
+        processedTransactions: 0,
+        failedTransactions: 1,
+        processedTasks: 0,
+        failedTasks: 1,
+        remainingPendingTasks: 0,
+      });
+      expect(canonical?.values).toEqual([["id", "_version"]]);
+
+      const queue = spreadsheet.sheets.get(
+        gateway.TYPED_SHEETS_TASK_QUEUE_SHEET_NAME,
+      );
+
+      expect(queue?.values[1]?.[4]).toBe("failed");
+      expect(queue?.values[1]?.[12]).toBe("invalid_task");
+      expect(queue?.values[1]?.[13]).toMatch(
+        /payload\.row\._version must be a number/,
+      );
+    },
+  );
+
   it("fails update tasks that do not advance the row version", async () => {
     const gateway = await loadGatewayTemplate();
     const spreadsheet = new FakeSpreadsheet();
