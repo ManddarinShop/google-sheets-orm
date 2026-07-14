@@ -304,6 +304,57 @@ describe("queued repository transaction API", () => {
     expect(adapter.enqueuedTasks).toEqual([]);
   });
 
+  it("rejects changing the key of an entity returned from the pending overlay", async () => {
+    const adapter = new FakeQueueAdapter(ordersSnapshot);
+    const orders = createOrdersRepository(adapter);
+
+    await expect(
+      orders.transaction(async (tx) => {
+        const order = await tx.findById("o1");
+
+        if (order === null) {
+          throw new Error("Expected order");
+        }
+
+        order.status = "canceled";
+        tx.save(order);
+
+        const overlayOrder = await tx.findById("o1");
+
+        if (overlayOrder === null) {
+          throw new Error("Expected pending order");
+        }
+
+        overlayOrder.id = "o3";
+        tx.save(overlayOrder);
+      }),
+    ).rejects.toThrow('Entity key cannot be changed from "o1" to "o3"');
+
+    expect(adapter.enqueuedTasks).toEqual([]);
+  });
+
+  it("rejects changing the key of a new entity after its first save", async () => {
+    const adapter = new FakeQueueAdapter(ordersSnapshot);
+    const orders = createOrdersRepository(adapter);
+    const newOrder: Order = {
+      id: "o3",
+      userId: "u1",
+      status: "created",
+      canceledAt: undefined,
+      _version: 1,
+    };
+
+    await expect(
+      orders.transaction((tx) => {
+        tx.save(newOrder);
+        newOrder.id = "o4";
+        tx.save(newOrder);
+      }),
+    ).rejects.toThrow('Entity key cannot be changed from "o3" to "o4"');
+
+    expect(adapter.enqueuedTasks).toEqual([]);
+  });
+
   it("reads canonical state rather than the visible projection", async () => {
     const adapter = new FakeQueueAdapter(ordersSnapshot);
     adapter.setCanonicalSnapshot({
@@ -337,6 +388,27 @@ describe("queued repository transaction API", () => {
     ]);
   });
 
+  it("rejects a queued schema without _version before gateway initialization", async () => {
+    const adapter = new FakeQueueAdapter(ordersSnapshot);
+    const invalidColumns = {
+      id: text(),
+      userId: text(),
+      status: text(),
+      canceledAt: text().optional(),
+    } as unknown as typeof columns;
+    const orders = createQueuedSheetRepository<Order>({
+      adapter,
+      sheetName: "Orders",
+      key: "id",
+      columns: invalidColumns,
+    });
+
+    await expect(orders.ensureSheet()).rejects.toThrow(
+      'Missing version column "_version"',
+    );
+    expect(adapter.initializedSystemSheets).toEqual([]);
+  });
+
   it("exposes queue processing separately from repository transactions", async () => {
     const adapter = new FakeQueueAdapter(ordersSnapshot);
     const processor = createQueuedRepositoryQueueProcessor(adapter);
@@ -345,6 +417,30 @@ describe("queued repository transaction API", () => {
       processor.processTaskQueue({ maxTransactions: 1 }),
     ).resolves.toEqual(adapter.processResult);
     expect(adapter.processedTaskQueues).toEqual([{ maxTransactions: 1 }]);
+  });
+
+  it("rejects mutations through a transaction handle after the callback ends", async () => {
+    const adapter = new FakeQueueAdapter(ordersSnapshot);
+    const orders = createOrdersRepository(adapter);
+    let escapedTransaction: {
+      save(row: Order): void;
+    } | null = null;
+
+    await orders.transaction((transaction) => {
+      escapedTransaction = transaction;
+    });
+
+    if (escapedTransaction === null) {
+      throw new Error("Expected transaction handle to be captured");
+    }
+
+    expect(() => escapedTransaction?.save({
+      id: "o2",
+      userId: "u2",
+      status: "new",
+      canceledAt: undefined,
+      _version: 1,
+    })).toThrow("Queued repository transaction scope is closed");
   });
 
   it.each([
@@ -388,8 +484,26 @@ describe("queued repository transaction API", () => {
         remainingPendingTasks: 0,
       },
     ],
+    [
+      "recovering",
+      {
+        processedTransactions: 0,
+        failedTransactions: 0,
+        processedTasks: 0,
+        failedTasks: 0,
+        remainingPendingTasks: 0,
+        recoveryPendingTasks: 1,
+      },
+    ],
   ])("summarizes a %s processor result", (status, result) => {
     expect(summarizeProcessTaskQueueResult(result)).toMatchObject({ status });
+
+    if (status === "recovering") {
+      expect(summarizeProcessTaskQueueResult(result)).toMatchObject({
+        hasPendingTasks: false,
+        hasRecoveryTasks: true,
+      });
+    }
   });
 
   function createOrdersRepository(adapter: AppsScriptQueueAdapter) {

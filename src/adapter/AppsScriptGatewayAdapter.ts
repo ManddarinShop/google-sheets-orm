@@ -234,6 +234,7 @@ export class AppsScriptGatewayAdapter
         operation: "enqueueTasks",
         tasks: input.tasks,
       }),
+      input.tasks,
     );
 
     return {
@@ -260,13 +261,19 @@ export class AppsScriptGatewayAdapter
       await this.request(request),
     );
 
-    return {
+    const result: ProcessTaskQueueResult = {
       processedTransactions: response.processedTransactions,
       failedTransactions: response.failedTransactions,
       processedTasks: response.processedTasks,
       failedTasks: response.failedTasks,
       remainingPendingTasks: response.remainingPendingTasks,
     };
+
+    if (response.recoveryPendingTasks !== undefined) {
+      result.recoveryPendingTasks = response.recoveryPendingTasks;
+    }
+
+    return result;
   }
 
   private async request(
@@ -359,10 +366,21 @@ function requireInitializeSystemSheetsResponse(
 
 function requireEnqueueTasksResponse(
   value: AppsScriptGatewayResponse,
+  expectedTasks: EnqueueTasksInput["tasks"],
 ): AppsScriptGatewayEnqueueTasksResponse {
+  const actualTaskIds = Array.isArray(value.tasks)
+    ? value.tasks
+      .filter(isEnqueuedTaskResult)
+      .map((task) => task.taskId)
+      .sort()
+    : [];
+  const expectedTaskIds = expectedTasks.map((task) => task.taskId).sort();
+
   if (
     !Array.isArray(value.tasks) ||
-    !value.tasks.every(isEnqueuedTaskResult)
+    !value.tasks.every(isEnqueuedTaskResult) ||
+    actualTaskIds.length !== expectedTaskIds.length ||
+    actualTaskIds.some((taskId, index) => taskId !== expectedTaskIds[index])
   ) {
     throw new Error(
       "Apps Script gateway returned an invalid enqueueTasks response",
@@ -384,6 +402,10 @@ function requireProcessTaskQueueResponse(
     !isNonNegativeInteger(value.processedTasks) ||
     !isNonNegativeInteger(value.failedTasks) ||
     !isNonNegativeInteger(value.remainingPendingTasks)
+    || (
+      value.recoveryPendingTasks !== undefined
+      && !isNonNegativeInteger(value.recoveryPendingTasks)
+    )
   ) {
     throw new Error(
       "Apps Script gateway returned an invalid processTaskQueue response",
@@ -397,6 +419,9 @@ function requireProcessTaskQueueResponse(
     processedTasks: value.processedTasks,
     failedTasks: value.failedTasks,
     remainingPendingTasks: value.remainingPendingTasks,
+    ...(value.recoveryPendingTasks === undefined
+      ? {}
+      : { recoveryPendingTasks: value.recoveryPendingTasks }),
   };
 }
 

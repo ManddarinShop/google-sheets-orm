@@ -34,7 +34,18 @@ export function createQueuedSheetRepository<
   });
 
   async function ensureSheet(): Promise<void> {
-    await adapter.initializeSystemSheets(sheetName, Object.keys(columns));
+    const headers = Object.keys(columns);
+
+    // Validate the queued repository contract before asking the gateway to
+    // create system sheets. This keeps missing key/version columns from
+    // appearing to initialize successfully and failing only on first use.
+    assertSchema({
+      headers,
+      key,
+      columns,
+    });
+
+    await adapter.initializeSystemSheets(sheetName, headers);
   }
 
   /** Reads canonical rows for the current transaction scope. */
@@ -85,10 +96,16 @@ export function createQueuedSheetRepository<
       result = await callback(transactionScope);
     } catch (error) {
       transactionScope.clear();
+      transactionScope.close();
       throw error;
     }
 
-    await transactionScope.flush();
+    try {
+      await transactionScope.flush();
+    } finally {
+      transactionScope.close();
+    }
+
     return result;
   }
 

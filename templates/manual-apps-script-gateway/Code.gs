@@ -9,12 +9,17 @@ const TYPED_SHEETS_GATEWAY_URL = "";
 const TYPED_SHEETS_INTERNAL_PREFIX = "_typed_sheets_";
 const TYPED_SHEETS_DATA_SHEET_PREFIX = "_typed_sheets_data_";
 const TYPED_SHEETS_META_MAPPING_KEY_PREFIX = "sheetMapping:";
+const TYPED_SHEETS_META_MIGRATION_KEY_PREFIX = "projectionMigration:";
 const TYPED_SHEETS_MAX_SHEET_NAME_LENGTH = 100;
 const TYPED_SHEETS_TASK_QUEUE_SHEET_NAME = "_typed_sheets_task_queue";
 // Apps Script executions cannot retain a document lock after they terminate.
 // A processing claim older than this lease is therefore safe to return to the
 // pending state on the next processor invocation.
 const TYPED_SHEETS_PROCESSING_LEASE_MS = 5 * 60 * 1000;
+// The processing lease also acts as the retry backoff. Once a transaction has
+// exhausted this many claims, repeated timeouts must not block the queue
+// forever.
+const TYPED_SHEETS_MAX_QUEUE_ATTEMPTS = 3;
 const TYPED_SHEETS_TASK_QUEUE_HEADERS = [
   "taskId",
   "transactionId",
@@ -328,6 +333,7 @@ function initializeSystemSheets_(spreadsheet, request) {
     "sheetName",
   );
   const headers = requireStringArray_(request.headers, "headers");
+  assertExpectedHeaders_(headers, headers, "projection initialization");
   const canonicalSheetName = getOrCreateCanonicalSheetName_(
     spreadsheet,
     logicalSheetName,
@@ -365,13 +371,31 @@ function migrateProjectionToCanonicalIfNeeded_(
   const projectionSheet = getSheet_(spreadsheet, logicalSheetName);
   const canonicalSheet = getSheet_(spreadsheet, canonicalSheetName);
 
+  if (isProjectionMigrationCompleted_(
+    spreadsheet,
+    logicalSheetName,
+    canonicalSheetName,
+  )) {
+    return;
+  }
+
   if (canonicalSheet.getLastRow() > 1) {
+    markProjectionMigrationCompleted_(
+      spreadsheet,
+      logicalSheetName,
+      canonicalSheetName,
+    );
     return;
   }
 
   const projectionLastRow = projectionSheet.getLastRow();
 
   if (projectionLastRow <= 1) {
+    markProjectionMigrationCompleted_(
+      spreadsheet,
+      logicalSheetName,
+      canonicalSheetName,
+    );
     return;
   }
 
@@ -395,6 +419,12 @@ function migrateProjectionToCanonicalIfNeeded_(
   canonicalSheet
     .getRange(2, 1, rows.length, headers.length)
     .setValues(rows);
+
+  markProjectionMigrationCompleted_(
+    spreadsheet,
+    logicalSheetName,
+    canonicalSheetName,
+  );
 }
 
 /**
@@ -440,6 +470,21 @@ function enqueueTasks_(spreadsheet, request) {
       throw gatewayError_(
         "duplicate_task",
         "Task already exists: " + taskWithFingerprint.taskId,
+      );
+    }
+
+    const existingTransactionTasks =
+      queueState.tasksByTransactionId[taskWithFingerprint.transactionId] || [];
+
+    if (
+      existingTransactionTasks.some(function(existingTransactionTask) {
+        return isTerminalQueueTask_(existingTransactionTask);
+      })
+    ) {
+      throw gatewayError_(
+        "duplicate_transaction",
+        "Transaction already contains terminal tasks: "
+          + taskWithFingerprint.transactionId,
       );
     }
 
@@ -492,6 +537,21 @@ function enqueueTasks_(spreadsheet, request) {
 }
 
 function ensureTaskQueueSheet_(spreadsheet) {
+  const existingQueueSheet = spreadsheet.getSheetByName(
+    TYPED_SHEETS_TASK_QUEUE_SHEET_NAME,
+  );
+
+  // Queue schema migration must happen before ensureInternalSheet_ validates
+  // the current header. Otherwise an existing 16-column queue is rejected as
+  // drift before the fingerprint column can be appended.
+  if (
+    existingQueueSheet
+    && !isHeaderRowEmpty_(existingQueueSheet)
+    && isLegacyTaskQueueHeader_(readHeaderRow_(existingQueueSheet))
+  ) {
+    migrateLegacyTaskQueueSheet_(existingQueueSheet);
+  }
+
   ensureInternalSheet_(
     spreadsheet,
     TYPED_SHEETS_TASK_QUEUE_SHEET_NAME,
@@ -521,6 +581,11 @@ function ensureTaskQueueSheet_(spreadsheet) {
     "enqueueTasks",
   );
 
+  // A previous migration can stop after writing the new header but before
+  // backfilling every row. Resume that work on every queue access so a blank
+  // fingerprint never becomes a permanent redacted-task replay failure.
+  backfillMissingTaskFingerprints_(queueSheet);
+
   return queueSheet;
 }
 
@@ -530,6 +595,7 @@ function isLegacyTaskQueueHeader_(headerValues) {
   }) && (
     headerValues[TYPED_SHEETS_LEGACY_TASK_QUEUE_HEADERS.length] === ""
     || headerValues[TYPED_SHEETS_LEGACY_TASK_QUEUE_HEADERS.length] === null
+    || headerValues[TYPED_SHEETS_LEGACY_TASK_QUEUE_HEADERS.length] === undefined
   );
 }
 
@@ -561,6 +627,51 @@ function migrateLegacyTaskQueueSheet_(queueSheet) {
   queueSheet
     .getRange(2, fingerprintColumn, fingerprints.length, 1)
     .setValues(fingerprints);
+}
+
+function backfillMissingTaskFingerprints_(queueSheet) {
+  const lastRow = queueSheet.getLastRow();
+
+  if (lastRow < 2) {
+    return;
+  }
+
+  const fingerprintColumn = TYPED_SHEETS_TASK_QUEUE_HEADERS.length;
+  const rows = queueSheet
+    .getRange(2, 1, lastRow - 1, fingerprintColumn)
+    .getValues();
+  let hasMissingFingerprint = false;
+  const fingerprints = rows.map(function(row) {
+    const existingFingerprint = String(
+      row[fingerprintColumn - 1] || "",
+    );
+
+    const hasLegacyTaskFields = row
+      .slice(1, TYPED_SHEETS_LEGACY_TASK_QUEUE_HEADERS.length)
+      .some(function(value) {
+        return value !== "" && value !== null && value !== undefined;
+      });
+
+    // Ignore malformed/incomplete rows. Normal queue parsing will report them
+    // as invalid, but migration must not expand an unrelated short row just
+    // because the queue header has 17 columns.
+    if (!hasLegacyTaskFields) {
+      return [existingFingerprint];
+    }
+
+    if (existingFingerprint !== "") {
+      return [existingFingerprint];
+    }
+
+    hasMissingFingerprint = true;
+    return [createLegacyTaskFingerprint_(row)];
+  });
+
+  if (hasMissingFingerprint) {
+    queueSheet
+      .getRange(2, fingerprintColumn, fingerprints.length, 1)
+      .setValues(fingerprints);
+  }
 }
 
 function createLegacyTaskFingerprint_(row) {
@@ -606,6 +717,7 @@ function readTaskQueueState_(queueSheet) {
   const state = {
     maxSequence: 0,
     tasksById: Object.create(null),
+    tasksByTransactionId: Object.create(null),
   };
 
   if (lastRow < 2) {
@@ -661,11 +773,13 @@ function readTaskQueueState_(queueSheet) {
         taskFingerprint: String(row[taskFingerprintIndex] || ""),
       };
 
-      if (task.taskFingerprint === "") {
-        task.taskFingerprint = createTaskFingerprint_(task);
-      }
+      assertStoredTaskFingerprint_(task);
 
       state.tasksById[taskId] = task;
+      if (!state.tasksByTransactionId[task.transactionId]) {
+        state.tasksByTransactionId[task.transactionId] = [];
+      }
+      state.tasksByTransactionId[task.transactionId].push(task);
     }
 
     if (Number.isFinite(sequence) && sequence > state.maxSequence) {
@@ -687,6 +801,10 @@ function isSameQueuedTask_(existingTask, task) {
   return existingTask.taskFingerprint === task.taskFingerprint;
 }
 
+function isTerminalQueueTask_(task) {
+  return task.status === "done" || task.status === "failed";
+}
+
 /**
  * Processes pending queue transaction groups into canonical sheets.
  *
@@ -699,13 +817,8 @@ function processTaskQueue_(spreadsheet, request) {
   const options = requireProcessTaskQueueOptions_(request);
   const queueSheet = ensureTaskQueueSheet_(spreadsheet);
   const queuedTasks = readQueuedTasks_(queueSheet);
+  retryCompletedTaskRedactions_(queueSheet, queuedTasks);
   const now = new Date();
-
-  recoverStaleProcessingTasks_(queueSheet, queuedTasks, now);
-
-  const pendingGroups = groupPendingTasksByTransaction_(queuedTasks)
-    .slice(0, options.maxTransactions);
-  const processingStartedAt = now.toISOString();
   const result = {
     ok: true,
     processedTransactions: 0,
@@ -715,7 +828,45 @@ function processTaskQueue_(spreadsheet, request) {
     remainingPendingTasks: 0,
   };
 
-  pendingGroups.forEach(function(group) {
+  // Reconcile stale claims before selecting new work. Recovery is performed
+  // for the complete transaction so a partial status update cannot leave a
+  // permanently incomplete done/pending group.
+  const recoveryResult = reconcileStaleProcessingTransactions_(
+    spreadsheet,
+    queueSheet,
+    queuedTasks,
+    now,
+    options.maxTransactions,
+  );
+  result.processedTransactions += recoveryResult.processedTransactions;
+  result.failedTransactions += recoveryResult.failedTransactions;
+  result.processedTasks += recoveryResult.processedTasks;
+  result.failedTasks += recoveryResult.failedTasks;
+
+  const remainingTransactionBudget = Math.max(
+    0,
+    options.maxTransactions - recoveryResult.recoveredTransactions,
+  );
+  const pendingGroups = groupPendingTasksByTransaction_(queuedTasks)
+    .slice(0, remainingTransactionBudget);
+  const processingStartedAt = now.toISOString();
+
+  for (let groupIndex = 0; groupIndex < pendingGroups.length; groupIndex += 1) {
+    const group = pendingGroups[groupIndex];
+
+    if (hasReachedQueueAttemptLimit_(group.tasks)) {
+      markQueueTasks_(queueSheet, group.tasks, {
+        status: "failed",
+        lastErrorCode: "retry_limit_exceeded",
+        lastErrorMessage:
+          "Transaction exceeded the maximum queue processing attempts",
+        updatedAt: new Date().toISOString(),
+      });
+      result.failedTransactions += 1;
+      result.failedTasks += group.tasks.length;
+      continue;
+    }
+
     markQueueTasks_(queueSheet, group.tasks, {
       status: "processing",
       updatedAt: processingStartedAt,
@@ -723,19 +874,16 @@ function processTaskQueue_(spreadsheet, request) {
 
     try {
       applyQueueTransaction_(spreadsheet, group.tasks);
-      markQueueTasks_(queueSheet, group.tasks, {
-        status: "done",
-        payloadJson: JSON.stringify({ redacted: true }),
-        lastErrorCode: "",
-        lastErrorMessage: "",
-        updatedAt: new Date().toISOString(),
-      });
-
-      result.processedTransactions += 1;
-      result.processedTasks += group.tasks.length;
     } catch (error) {
       const code = error && error.code ? error.code : "internal_error";
       const message = error && error.message ? error.message : String(error);
+
+      if (error && error.canonicalWriteStarted === true) {
+        recordCanonicalWriteFailure_(queueSheet, group.tasks, error);
+        // The canonical outcome is unknown. Later transactions must remain
+        // pending until this transaction is reconciled in sequence order.
+        break;
+      }
 
       markQueueTasks_(queueSheet, group.tasks, {
         status: "failed",
@@ -746,44 +894,267 @@ function processTaskQueue_(spreadsheet, request) {
 
       result.failedTransactions += 1;
       result.failedTasks += group.tasks.length;
+      continue;
     }
-  });
 
-  result.remainingPendingTasks = readQueuedTasks_(queueSheet).filter(function(task) {
+    try {
+      // Keep the claim in processing if this status write is interrupted.
+      // The canonical write already happened, so the next processor run must
+      // reconcile the postcondition instead of treating it as a normal apply
+      // failure and permanently dead-lettering the transaction.
+      markQueueTasks_(queueSheet, group.tasks, {
+        status: "done",
+        payloadJson: JSON.stringify({ redacted: true }),
+        lastErrorCode: "",
+        lastErrorMessage: "",
+        updatedAt: new Date().toISOString(),
+      });
+    } catch (error) {
+      recordQueueCompletionFailure_(queueSheet, group.tasks, error);
+      // Canonical data is already written but the terminal queue state is
+      // unknown. Do not let a later transaction overtake this claim.
+      break;
+    }
+
+    result.processedTransactions += 1;
+    result.processedTasks += group.tasks.length;
+  }
+
+  const remainingTasks = readQueuedTasks_(queueSheet);
+  result.remainingPendingTasks = remainingTasks.filter(function(task) {
     return task.status === "pending";
   }).length;
+  const recoveryPendingTasks = remainingTasks.filter(function(task) {
+    return task.status === "processing"
+      || (
+        task.status === "done"
+        && !isRedactedTaskPayload_(task.payloadJson)
+      );
+  }).length;
+
+  // Omit the field for an empty recovery state so older callers that consume
+  // this gateway response remain compatible. When present, the field includes
+  // processing claims and completed tasks whose payload redaction needs retry.
+  if (recoveryPendingTasks > 0) {
+    result.recoveryPendingTasks = recoveryPendingTasks;
+  }
 
   return result;
 }
 
-/**
- * Returns interrupted transaction claims to the pending state after their
- * processing lease expires. The in-memory task objects are updated as well so
- * the same invocation can process a recovered group without rereading it.
- */
-function recoverStaleProcessingTasks_(queueSheet, queuedTasks, now) {
-  const nowMs = now.getTime();
-  const staleTasks = queuedTasks.filter(function(task) {
-    return isStaleProcessingTask_(task, nowMs);
-  });
+function recordQueueCompletionFailure_(queueSheet, tasks, error) {
+  const message = error && error.message ? error.message : String(error);
 
-  if (staleTasks.length === 0) {
-    return;
+  try {
+    // Do not change status here. This best-effort diagnostic preserves
+    // processing claims, including partially updated claims, for stale
+    // recovery on a later invocation.
+    markQueueTasks_(queueSheet, tasks, {
+      lastErrorCode: "completion_status_unconfirmed",
+      lastErrorMessage:
+        "Canonical transaction applied, but completion status was not recorded: "
+        + message,
+      updatedAt: new Date().toISOString(),
+    });
+  } catch (diagnosticError) {
+    // The queue write itself may be the failing operation. Leaving the claim
+    // untouched is still safer than marking canonical data as failed.
+  }
+}
+
+function recordCanonicalWriteFailure_(queueSheet, tasks, error) {
+  const message = error && error.message ? error.message : String(error);
+
+  try {
+    // At least one canonical write was attempted. Keep the transaction in
+    // processing so the next lease expiry can inspect every affected sheet
+    // and distinguish unapplied work from a partial canonical apply.
+    markQueueTasks_(queueSheet, tasks, {
+      lastErrorCode: "canonical_write_unconfirmed",
+      lastErrorMessage:
+        "Canonical write outcome is unconfirmed; recovery is required: "
+        + message,
+      updatedAt: new Date().toISOString(),
+    });
+  } catch (diagnosticError) {
+    // If the queue diagnostic also fails, the original processing claim and
+    // timestamp remain available for lease-based recovery.
+  }
+}
+
+function retryCompletedTaskRedactions_(queueSheet, tasks) {
+  const redactedPayload = JSON.stringify({ redacted: true });
+
+  tasks.forEach(function(task) {
+    if (task.status !== "done" || isRedactedTaskPayload_(task.payloadJson)) {
+      return;
+    }
+
+    try {
+      // Status and canonical data may already be durable even when the
+      // original completion call lost its payload redaction write. Retry the
+      // sensitive-data cleanup on every later processor invocation.
+      markQueueTasks_(queueSheet, [task], {
+        payloadJson: redactedPayload,
+        lastErrorCode: "",
+        lastErrorMessage: "",
+        updatedAt: new Date().toISOString(),
+      });
+      task.payloadJson = redactedPayload;
+      task.lastErrorCode = "";
+      task.lastErrorMessage = "";
+    } catch (error) {
+      try {
+        markQueueTasks_(queueSheet, [task], {
+          lastErrorCode: "redaction_unconfirmed",
+          lastErrorMessage:
+            "Completed task payload redaction failed: "
+            + (error && error.message ? error.message : String(error)),
+          updatedAt: new Date().toISOString(),
+        });
+      } catch (diagnosticError) {
+        // Preserve the completed task and retry the cleanup on the next run.
+      }
+    }
+  });
+}
+
+/**
+ * Reconciles expired processing claims at transaction granularity. A complete
+ * postcondition match is marked done, an unapplied group is returned to
+ * pending, and an ambiguous or partial result is failed conservatively.
+ */
+function reconcileStaleProcessingTransactions_(
+  spreadsheet,
+  queueSheet,
+  queuedTasks,
+  now,
+  maxTransactions,
+) {
+  const nowMs = now.getTime();
+  const recoveredAt = now.toISOString();
+  const result = {
+    processedTransactions: 0,
+    failedTransactions: 0,
+    processedTasks: 0,
+    failedTasks: 0,
+    recoveredTransactions: 0,
+  };
+  const canonicalTables = Object.create(null);
+
+  const groups = groupTasksByTransaction_(queuedTasks);
+
+  for (let groupIndex = 0; groupIndex < groups.length; groupIndex += 1) {
+    const group = groups[groupIndex];
+
+    if (group.allTerminal) {
+      continue;
+    }
+
+    // A pending group is the earliest non-terminal work and must be allowed
+    // to run before any later stale claim is reconciled.
+    if (group.allPending || result.recoveredTransactions >= maxTransactions) {
+      break;
+    }
+
+    const hasStaleTask = group.tasks.some(function(task) {
+      return isStaleProcessingTask_(task, nowMs);
+    });
+
+    if (!hasStaleTask) {
+      break;
+    }
+
+    let reconciliation;
+
+    try {
+      reconciliation = reconcileTransactionPostconditions_(
+        spreadsheet,
+        group.tasks,
+        canonicalTables,
+      );
+    } catch (error) {
+      reconciliation = {
+        status: "failed",
+        errorCode: error && error.code ? error.code : "recovery_error",
+        errorMessage: error && error.message
+          ? error.message
+          : String(error),
+      };
+    }
+
+    if (reconciliation.status === "done") {
+      markQueueTasks_(queueSheet, group.tasks, {
+        status: "done",
+        payloadJson: JSON.stringify({ redacted: true }),
+        lastErrorCode: "",
+        lastErrorMessage: "",
+        updatedAt: recoveredAt,
+      });
+
+      group.tasks.forEach(function(task) {
+        task.status = "done";
+        task.payloadJson = JSON.stringify({ redacted: true });
+        task.updatedAt = recoveredAt;
+      });
+      result.processedTransactions += 1;
+      result.processedTasks += group.tasks.length;
+      result.recoveredTransactions += 1;
+      continue;
+    }
+
+    if (reconciliation.status === "pending") {
+      if (hasReachedQueueAttemptLimit_(group.tasks)) {
+        markQueueTasks_(queueSheet, group.tasks, {
+          status: "failed",
+          lastErrorCode: "retry_limit_exceeded",
+          lastErrorMessage:
+            "Transaction exceeded the maximum queue processing attempts",
+          updatedAt: recoveredAt,
+        });
+
+        group.tasks.forEach(function(task) {
+          task.status = "failed";
+          task.updatedAt = recoveredAt;
+        });
+        result.failedTransactions += 1;
+        result.failedTasks += group.tasks.length;
+        result.recoveredTransactions += 1;
+        continue;
+      }
+
+      markQueueTasks_(queueSheet, group.tasks, {
+        status: "pending",
+        lastErrorCode: "stale_processing_recovered",
+        lastErrorMessage: "Recovered an unapplied transaction claim",
+        updatedAt: recoveredAt,
+      });
+
+      group.tasks.forEach(function(task) {
+        task.status = "pending";
+        task.updatedAt = recoveredAt;
+      });
+      break;
+    }
+
+    markQueueTasks_(queueSheet, group.tasks, {
+      status: "failed",
+      lastErrorCode: reconciliation.errorCode || "partial_apply",
+      lastErrorMessage: reconciliation.errorMessage
+        || "Transaction postconditions are ambiguous; manual recovery is required",
+      updatedAt: recoveredAt,
+    });
+
+    group.tasks.forEach(function(task) {
+      task.status = "failed";
+      task.updatedAt = recoveredAt;
+    });
+    result.failedTransactions += 1;
+    result.failedTasks += group.tasks.length;
+    result.recoveredTransactions += 1;
   }
 
-  const recoveredAt = now.toISOString();
-
-  markQueueTasks_(queueSheet, staleTasks, {
-    status: "pending",
-    lastErrorCode: "stale_processing_recovered",
-    lastErrorMessage: "Recovered an interrupted processing claim",
-    updatedAt: recoveredAt,
-  });
-
-  staleTasks.forEach(function(task) {
-    task.status = "pending";
-    task.updatedAt = recoveredAt;
-  });
+  return result;
 }
 
 function isStaleProcessingTask_(task, nowMs) {
@@ -795,6 +1166,12 @@ function isStaleProcessingTask_(task, nowMs) {
 
   return !Number.isFinite(updatedAtMs)
     || nowMs - updatedAtMs >= TYPED_SHEETS_PROCESSING_LEASE_MS;
+}
+
+function hasReachedQueueAttemptLimit_(tasks) {
+  return tasks.some(function(task) {
+    return task.attempts >= TYPED_SHEETS_MAX_QUEUE_ATTEMPTS;
+  });
 }
 
 function readQueuedTasks_(queueSheet) {
@@ -835,7 +1212,9 @@ function parseQueuedTaskRow_(row, rowNumber) {
     keyValue: String(row[8] || ""),
     expectedVersion: row[9] === "" || row[9] === null ? null : Number(row[9]),
     payloadJson: String(row[10] || ""),
-    attempts: Number(row[11] || 0),
+    attempts: parseQueuedTaskAttempts_(row[11], rowNumber),
+    lastErrorCode: String(row[12] || ""),
+    lastErrorMessage: String(row[13] || ""),
     updatedAt: String(row[15] || ""),
     taskFingerprint: String(row[16] || ""),
   };
@@ -861,14 +1240,103 @@ function parseQueuedTaskRow_(row, rowNumber) {
     );
   }
 
-  if (task.taskFingerprint === "") {
-    task.taskFingerprint = createTaskFingerprint_(task);
-  }
+  assertStoredTaskFingerprint_(task);
 
   return task;
 }
 
+/**
+ * Parses the retry counter stored in the queue sheet. Invalid counters must
+ * fail at the queue boundary so they cannot bypass the retry limit or keep a
+ * transaction stuck in recovery indefinitely.
+ */
+function parseQueuedTaskAttempts_(value, rowNumber) {
+  if (value === "" || value === null || value === undefined) {
+    return 0;
+  }
+
+  const attempts = value;
+
+  if (
+    typeof attempts !== "number"
+    || !Number.isInteger(attempts)
+    || attempts < 0
+  ) {
+    throw gatewayError_(
+      "invalid_task",
+      "Invalid attempts at queue row " + rowNumber,
+    );
+  }
+
+  return attempts;
+}
+
+function assertStoredTaskFingerprint_(task) {
+  // A completed task intentionally redacts payloadJson. Its stored
+  // fingerprint remains the immutable identity, but it cannot be recomputed
+  // after the payload has been removed. If a migration stopped after adding
+  // the column, use the durable task-id marker so the migration can resume.
+  if (task.status === "done" && isRedactedTaskPayload_(task.payloadJson)) {
+    if (task.taskFingerprint === "") {
+      task.taskFingerprint =
+        TYPED_SHEETS_LEGACY_REDACTED_FINGERPRINT_PREFIX + task.taskId;
+    }
+
+    return;
+  }
+
+  if (task.taskFingerprint === "") {
+    task.taskFingerprint = createTaskFingerprint_(task);
+    return;
+  }
+
+  const legacyMarker =
+    TYPED_SHEETS_LEGACY_REDACTED_FINGERPRINT_PREFIX + task.taskId;
+
+  if (task.taskFingerprint === legacyMarker) {
+    if (task.status !== "done" || !isRedactedTaskPayload_(task.payloadJson)) {
+      throw gatewayError_(
+        "invalid_task",
+        "Legacy redacted fingerprint is only valid for done tasks: "
+          + task.taskId,
+      );
+    }
+
+    return;
+  }
+
+  const expectedFingerprint = createTaskFingerprint_(task);
+
+  if (task.taskFingerprint !== expectedFingerprint) {
+    throw gatewayError_(
+      "invalid_task",
+      "Task fingerprint mismatch: " + task.taskId
+        + " stored=" + task.taskFingerprint
+        + " expected=" + expectedFingerprint,
+    );
+  }
+}
+
 function groupPendingTasksByTransaction_(queuedTasks) {
+  const pendingGroups = [];
+
+  groupTasksByTransaction_(queuedTasks).some(function(group) {
+    if (group.allTerminal) {
+      return false;
+    }
+
+    if (!group.allPending) {
+      return true;
+    }
+
+    pendingGroups.push(group);
+    return false;
+  });
+
+  return pendingGroups;
+}
+
+function groupTasksByTransaction_(queuedTasks) {
   const groupsById = Object.create(null);
   const groups = [];
 
@@ -878,6 +1346,7 @@ function groupPendingTasksByTransaction_(queuedTasks) {
         transactionId: task.transactionId,
         firstSequence: task.sequence,
         allPending: true,
+        allTerminal: true,
         tasks: [],
       };
       groups.push(groupsById[task.transactionId]);
@@ -885,6 +1354,10 @@ function groupPendingTasksByTransaction_(queuedTasks) {
 
     if (task.status !== "pending") {
       groupsById[task.transactionId].allPending = false;
+    }
+
+    if (task.status !== "done" && task.status !== "failed") {
+      groupsById[task.transactionId].allTerminal = false;
     }
 
     groupsById[task.transactionId].firstSequence = Math.min(
@@ -901,13 +1374,440 @@ function groupPendingTasksByTransaction_(queuedTasks) {
     });
   });
 
-  return groups
-    .filter(function(group) {
-      return group.allPending;
-    })
-    .sort(function(left, right) {
-      return left.firstSequence - right.firstSequence;
+  return groups.sort(function(left, right) {
+    return left.firstSequence - right.firstSequence;
+  });
+}
+
+/**
+ * Checks each same-key task chain against the transaction's initial and final
+ * states. Reading one canonical table per sheet avoids an Apps Script read for
+ * every task while preserving transactionIndex ordering during recovery.
+ */
+function reconcileTransactionPostconditions_(
+  spreadsheet,
+  tasks,
+  canonicalTables,
+) {
+  const tables = readCanonicalTablesForTransaction_(
+    spreadsheet,
+    tasks,
+    canonicalTables,
+  );
+  const chains = groupTasksByTarget_(tasks);
+  let appliedChains = 0;
+  let unappliedChains = 0;
+  let ambiguousOutcome = null;
+
+  chains.forEach(function(chain) {
+    if (chain.some(function(task) { return task.status === "failed"; })) {
+      ambiguousOutcome = {
+        errorCode: "partial_apply",
+        errorMessage: "Transaction contains a previously failed task",
+      };
+      return;
+    }
+
+    const outcome = inspectTaskChainPostcondition_(
+      tables[chain[0].sheetName],
+      chain,
+    );
+
+    if (outcome.status === "applied") {
+      appliedChains += 1;
+      return;
+    }
+
+    if (outcome.status === "unapplied") {
+      unappliedChains += 1;
+      return;
+    }
+
+    ambiguousOutcome = outcome;
+  });
+
+  if (ambiguousOutcome !== null || (appliedChains > 0 && unappliedChains > 0)) {
+    return {
+      status: "failed",
+      errorCode: ambiguousOutcome
+        ? ambiguousOutcome.errorCode
+        : "partial_apply",
+      errorMessage: ambiguousOutcome
+        ? ambiguousOutcome.errorMessage
+        : "Only part of the transaction is visible in the canonical sheet",
+    };
+  }
+
+  if (appliedChains === chains.length) {
+    return { status: "done" };
+  }
+
+  if (unappliedChains === chains.length) {
+    return { status: "pending" };
+  }
+
+  return {
+    status: "failed",
+    errorCode: "partial_apply",
+    errorMessage: "Transaction postconditions are ambiguous",
+  };
+}
+
+function readCanonicalTablesForTransaction_(spreadsheet, tasks, existingTables) {
+  const tables = existingTables || Object.create(null);
+
+  tasks.forEach(function(task) {
+    if (!tables[task.sheetName]) {
+      tables[task.sheetName] = readCanonicalTableForTask_(spreadsheet, task);
+    } else {
+      assertCanonicalTaskMatchesTable_(tables[task.sheetName], task);
+    }
+  });
+
+  return tables;
+}
+
+function groupTasksByTarget_(tasks) {
+  const chainsByTarget = Object.create(null);
+  const chains = [];
+
+  tasks.forEach(function(task) {
+    const target = [task.sheetName, task.keyHeader, task.keyValue].join(
+      "\u001f",
+    );
+
+    if (!chainsByTarget[target]) {
+      chainsByTarget[target] = [];
+      chains.push(chainsByTarget[target]);
+    }
+
+    chainsByTarget[target].push(task);
+  });
+
+  chains.forEach(function(chain) {
+    chain.sort(function(left, right) {
+      return left.transactionIndex - right.transactionIndex
+        || left.sequence - right.sequence;
     });
+  });
+
+  return chains;
+}
+
+function inspectTaskChainPostcondition_(table, chain) {
+  const firstTask = chain[0];
+  const lastTask = chain[chain.length - 1];
+
+  if (table === undefined || firstTask === undefined || lastTask === undefined) {
+    return {
+      status: "ambiguous",
+      errorCode: "partial_apply",
+      errorMessage: "Missing canonical table for transaction recovery",
+    };
+  }
+
+  // A final done status is already a durable outcome. This also handles a
+  // redacted payload whose original immutable intent is no longer readable.
+  if (lastTask.status === "done") {
+    return { status: "applied" };
+  }
+
+  const initialState = inspectTaskInitialState_(table, chain);
+  const finalState = inspectTaskFinalState_(table, chain, initialState);
+
+  if (finalState.status === "ambiguous") {
+    return finalState;
+  }
+
+  if (finalState.status === "applied" && initialState.status === "applied") {
+    return {
+      status: "ambiguous",
+      errorCode: "partial_apply",
+      errorMessage: "Initial and final states are indistinguishable",
+    };
+  }
+
+  if (finalState.status === "applied") {
+    return { status: "applied" };
+  }
+
+  if (initialState.status === "applied") {
+    if (isCanonicalIntermediateChainState_(table, chain)) {
+      return {
+        status: "ambiguous",
+        errorCode: "partial_apply",
+        errorMessage: "An intermediate state of the transaction is visible",
+      };
+    }
+
+    return { status: "unapplied" };
+  }
+
+  return {
+    status: "ambiguous",
+    errorCode: "partial_apply",
+    errorMessage: "Transaction target is neither initial nor final state",
+  };
+}
+
+function inspectTaskInitialState_(table, chain) {
+  const firstTask = chain[0];
+  const rowIndex = table.rowsByKey[firstTask.keyValue];
+
+  if (chain.some(function(task) { return task.status === "done"; })) {
+    return { status: "not_initial" };
+  }
+
+  if (firstTask.operation === "insert") {
+    requireInsertTaskRow_(table, firstTask);
+
+    return rowIndex === undefined
+      ? { status: "applied" }
+      : { status: "not_initial" };
+  }
+
+  if (rowIndex === undefined) {
+    return { status: "not_initial" };
+  }
+
+  if (firstTask.operation === "delete") {
+    const rowToDelete = assertDeletePayloadMatchesTask_(firstTask);
+
+    return areCanonicalPayloadFieldsEqual_(
+      table,
+      table.rows[rowIndex],
+      rowToDelete,
+    )
+      ? { status: "applied" }
+      : { status: "not_initial" };
+  }
+
+  return Number(table.rows[rowIndex][table.versionIndex])
+      === firstTask.expectedVersion
+    ? { status: "applied" }
+    : { status: "not_initial" };
+}
+
+function inspectTaskFinalState_(table, chain, initialState) {
+  const lastTask = chain[chain.length - 1];
+  const rowIndex = table.rowsByKey[lastTask.keyValue];
+
+  if (lastTask.operation === "insert") {
+    const expectedRow = requireInsertTaskRow_(table, lastTask);
+
+    if (initialState.status === "applied") {
+      return { status: "not_final" };
+    }
+
+    if (rowIndex === undefined) {
+      return { status: "not_final" };
+    }
+
+    return areCanonicalRowsEqual_(table.rows[rowIndex], expectedRow)
+      ? { status: "applied" }
+      : {
+          status: "ambiguous",
+          errorCode: "partial_apply",
+          errorMessage: "Final inserted row does not match the queued payload",
+        };
+  }
+
+  if (lastTask.operation === "update") {
+    if (initialState.status === "applied") {
+      return { status: "not_final" };
+    }
+
+    if (rowIndex === undefined) {
+      return {
+        status: "ambiguous",
+        errorCode: "partial_apply",
+        errorMessage: "Final updated row is missing from the canonical sheet",
+      };
+    }
+
+    const payload = requireTaskPayloadObject_(lastTask);
+    const rowToWrite = requirePayloadObject_(
+      payload.rowToWrite,
+      "payload.rowToWrite",
+    );
+    const versionToWrite = requireTaskFiniteNumber_(
+      rowToWrite._version,
+      "payload.rowToWrite._version",
+    );
+
+    if (versionToWrite <= lastTask.expectedVersion) {
+      throw gatewayError_(
+        "invalid_task",
+        "payload.rowToWrite._version must advance expectedVersion",
+      );
+    }
+
+    const expectedRow = rowObjectToCanonicalCells_(
+      table,
+      rowToWrite,
+      table.rows[rowIndex],
+    );
+    assertTaskRowMatchesKey_(table, expectedRow, lastTask);
+
+    if (areCanonicalRowsEqual_(table.rows[rowIndex], expectedRow)) {
+      return { status: "applied" };
+    }
+
+    if (Number(table.rows[rowIndex][table.versionIndex])
+        === lastTask.expectedVersion) {
+      return { status: "not_final" };
+    }
+
+    return {
+      status: "ambiguous",
+      errorCode: "partial_apply",
+      errorMessage: "Final updated row does not match the queued payload",
+    };
+  }
+
+  assertDeletePayloadMatchesTask_(lastTask);
+
+  if (
+    initialState.status === "applied"
+    && chain[0].operation === "insert"
+    && rowIndex === undefined
+  ) {
+    return {
+      status: "ambiguous",
+      errorCode: "partial_apply",
+      errorMessage: "Initial and final delete states are indistinguishable",
+    };
+  }
+
+  if (initialState.status === "applied") {
+    return { status: "not_final" };
+  }
+
+  if (rowIndex === undefined) {
+    return {
+      status: "ambiguous",
+      errorCode: "partial_apply",
+      errorMessage: "Delete postcondition cannot be proven after the row disappeared",
+    };
+  }
+
+  if (Number(table.rows[rowIndex][table.versionIndex])
+      === lastTask.expectedVersion) {
+    return { status: "not_final" };
+  }
+
+  return {
+    status: "ambiguous",
+    errorCode: "partial_apply",
+    errorMessage: "Final delete target changed before recovery completed",
+  };
+}
+
+function isCanonicalIntermediateChainState_(table, chain) {
+  if (chain.length < 2) {
+    return false;
+  }
+
+  const lastTaskIndex = chain.length - 1;
+  const lastTask = chain[lastTaskIndex];
+  const rowIndex = table.rowsByKey[lastTask.keyValue];
+
+  for (let index = 0; index < lastTaskIndex; index += 1) {
+    const task = chain[index];
+
+    if (task.operation === "delete") {
+      if (rowIndex === undefined) {
+        return true;
+      }
+
+      continue;
+    }
+
+    if (rowIndex === undefined) {
+      continue;
+    }
+
+    let expectedRow;
+
+    if (task.operation === "insert") {
+      expectedRow = requireInsertTaskRow_(table, task);
+    } else {
+      const payload = requireTaskPayloadObject_(task);
+      const rowObject = requirePayloadObject_(
+        payload.rowToWrite,
+        "payload.rowToWrite",
+      );
+      expectedRow = rowObjectToCanonicalCells_(
+        table,
+        rowObject,
+        table.rows[rowIndex],
+      );
+    }
+
+    assertTaskRowMatchesKey_(table, expectedRow, task);
+
+    if (areCanonicalRowsEqual_(table.rows[rowIndex], expectedRow)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function areCanonicalRowsEqual_(left, right) {
+  if (left.length !== right.length) {
+    return false;
+  }
+
+  for (let index = 0; index < left.length; index += 1) {
+    if (!areCanonicalCellsEqual_(left[index], right[index])) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+/**
+ * Compares only the fields carried by a queued row payload. Canonical sheets
+ * may contain additional unmodeled columns, which must not change recovery's
+ * decision about a delete task.
+ */
+function areCanonicalPayloadFieldsEqual_(table, canonicalRow, rowObject) {
+  return Object.keys(rowObject).every(function(header) {
+    const index = table.headers.indexOf(header);
+
+    if (index === -1) {
+      throw gatewayError_(
+        "schema_drift",
+        "Missing canonical header for queued field: " + header,
+      );
+    }
+
+    return areCanonicalCellsEqual_(
+      canonicalRow[index],
+      toSheetCell_(rowObject[header]),
+    );
+  });
+}
+
+function areCanonicalCellsEqual_(left, right) {
+  if (left === right) {
+    return true;
+  }
+
+  if (
+    (left === null || left === "")
+    && (right === null || right === "")
+  ) {
+    return true;
+  }
+
+  if (left instanceof Date && right instanceof Date) {
+    return left.getTime() === right.getTime();
+  }
+
+  return String(left) === String(right);
 }
 
 function applyQueueTransaction_(spreadsheet, tasks) {
@@ -918,14 +1818,29 @@ function applyQueueTransaction_(spreadsheet, tasks) {
     if (!tables[task.sheetName]) {
       tables[task.sheetName] = readCanonicalTableForTask_(spreadsheet, task);
       affectedSheetNames.push(task.sheetName);
+    } else {
+      assertCanonicalTaskMatchesTable_(tables[task.sheetName], task);
     }
 
     applyTaskToCanonicalTable_(tables[task.sheetName], task);
   });
 
   affectedSheetNames.sort().forEach(function(sheetName) {
-    writeCanonicalTable_(tables[sheetName]);
+    try {
+      writeCanonicalTable_(tables[sheetName]);
+    } catch (error) {
+      throw markCanonicalWriteStarted_(error);
+    }
   });
+}
+
+function markCanonicalWriteStarted_(error) {
+  const markedError = error && typeof error === "object"
+    ? error
+    : gatewayError_("internal_error", String(error));
+
+  markedError.canonicalWriteStarted = true;
+  return markedError;
 }
 
 function readCanonicalTableForTask_(spreadsheet, task) {
@@ -953,16 +1868,9 @@ function readCanonicalTableForTask_(spreadsheet, task) {
   const headers = (values[0] || []).map(function(value) {
     return String(value);
   });
+  assertCanonicalTaskSchema_(headers, task);
   const keyIndex = headers.indexOf(task.keyHeader);
   const versionIndex = headers.indexOf("_version");
-
-  if (keyIndex === -1) {
-    throw gatewayError_("schema_drift", "Missing key header: " + task.keyHeader);
-  }
-
-  if (versionIndex === -1) {
-    throw gatewayError_("schema_drift", "Missing version header: _version");
-  }
 
   const rows = values.slice(1).map(function(row) {
     return row.map(toSheetCell_);
@@ -982,11 +1890,82 @@ function readCanonicalTableForTask_(spreadsheet, task) {
   return {
     sheet: sheet,
     headers: headers,
+    keyHeader: task.keyHeader,
     keyIndex: keyIndex,
     versionIndex: versionIndex,
     rows: rows,
     rowsByKey: rowsByKey,
   };
+}
+
+function assertCanonicalTaskMatchesTable_(table, task) {
+  if (table.keyHeader !== task.keyHeader) {
+    throw gatewayError_(
+      "schema_drift",
+      "Queued tasks for " + task.sheetName
+        + " must use one key header; expected " + table.keyHeader
+        + " but received " + task.keyHeader,
+    );
+  }
+
+  assertCanonicalTaskSchema_(table.headers, task);
+}
+
+function assertCanonicalTaskSchema_(headers, task) {
+  const seenHeaders = Object.create(null);
+
+  headers.forEach(function(header) {
+    if (header === "") {
+      return;
+    }
+
+    if (seenHeaders[header]) {
+      throw gatewayError_(
+        "schema_drift",
+        "Duplicate canonical header: " + header,
+      );
+    }
+
+    seenHeaders[header] = true;
+  });
+
+  if (headers.indexOf(task.keyHeader) === -1) {
+    throw gatewayError_("schema_drift", "Missing key header: " + task.keyHeader);
+  }
+
+  if (headers.indexOf("_version") === -1) {
+    throw gatewayError_("schema_drift", "Missing version header: _version");
+  }
+
+  // Completed tasks may have their payload redacted. Their durable status and
+  // task fingerprint are sufficient for recovery, but there is no payload
+  // left from which to infer the modeled field set.
+  if (task.status === "done" && isRedactedTaskPayload_(task.payloadJson)) {
+    return;
+  }
+
+  const payload = requireTaskPayloadObject_(task);
+  const rowObject = requirePayloadObject_(
+    task.operation === "insert"
+      ? payload.row
+      : task.operation === "update"
+        ? payload.rowToWrite
+        : payload.rowToDelete,
+    task.operation === "insert"
+      ? "payload.row"
+      : task.operation === "update"
+        ? "payload.rowToWrite"
+        : "payload.rowToDelete",
+  );
+
+  Object.keys(rowObject).forEach(function(header) {
+    if (headers.indexOf(header) === -1) {
+      throw gatewayError_(
+        "schema_drift",
+        "Missing canonical header for queued field: " + header,
+      );
+    }
+  });
 }
 
 function applyTaskToCanonicalTable_(table, task) {
@@ -1004,15 +1983,12 @@ function applyTaskToCanonicalTable_(table, task) {
 }
 
 function applyInsertTask_(table, task) {
+  const row = requireInsertTaskRow_(table, task);
+
   if (table.rowsByKey[task.keyValue] !== undefined) {
     throw gatewayError_("conflict", "Row \"" + task.keyValue + "\" already exists");
   }
 
-  const payload = requireTaskPayloadObject_(task);
-  const rowObject = requirePayloadObject_(payload.row, "payload.row");
-  const row = rowObjectToCanonicalCells_(table, rowObject, null);
-
-  assertTaskRowMatchesKey_(table, row, task);
   table.rowsByKey[task.keyValue] = table.rows.length;
   table.rows.push(row);
 }
@@ -1092,6 +2068,8 @@ function assertDeletePayloadMatchesTask_(task) {
       "payload.rowToDelete._version must match expectedVersion",
     );
   }
+
+  return rowToDelete;
 }
 
 function assertCurrentVersion_(table, rowIndex, task) {
@@ -1112,6 +2090,39 @@ function assertTaskRowMatchesKey_(table, row, task) {
       "Task payload key does not match queued key for " + task.taskId,
     );
   }
+}
+
+/**
+ * Validates an insert's immutable identity before materializing its cells.
+ * Invalid key or version data must fail before the canonical table is mutated.
+ */
+function requireInsertTaskRow_(table, task) {
+  const payload = requireTaskPayloadObject_(task);
+  const rowObject = requirePayloadObject_(payload.row, "payload.row");
+
+  if (!Object.prototype.hasOwnProperty.call(rowObject, task.keyHeader)) {
+    throw gatewayError_(
+      "invalid_task",
+      "payload.row must include the queued key header: " + task.keyHeader,
+    );
+  }
+
+  if (
+    rowObject[task.keyHeader] === null
+    || rowObject[task.keyHeader] === undefined
+    || String(rowObject[task.keyHeader]) !== task.keyValue
+  ) {
+    throw gatewayError_(
+      "invalid_task",
+      "payload.row key must match queued key",
+    );
+  }
+
+  requireTaskFiniteNumber_(rowObject._version, "payload.row._version");
+
+  const row = rowObjectToCanonicalCells_(table, rowObject, null);
+  assertTaskRowMatchesKey_(table, row, task);
+  return row;
 }
 
 function requireTaskPayloadObject_(task) {
@@ -1404,6 +2415,66 @@ function persistCanonicalSheetMapping_(spreadsheet, mapping) {
   sheet.getRange(sheet.getLastRow() + 1, 1, 1, 2).setValues([[key, value]]);
 }
 
+function isProjectionMigrationCompleted_(
+  spreadsheet,
+  logicalSheetName,
+  canonicalSheetName,
+) {
+  const sheet = spreadsheet.getSheetByName(TYPED_SHEETS_META_SHEET_NAME);
+
+  if (!sheet) {
+    return false;
+  }
+
+  const key = TYPED_SHEETS_META_MIGRATION_KEY_PREFIX + logicalSheetName;
+  const rows = readMetaRows_(sheet);
+
+  for (let index = 0; index < rows.length; index += 1) {
+    if (rows[index][0] !== key) {
+      continue;
+    }
+
+    try {
+      const migration = JSON.parse(String(rows[index][1]));
+
+      return migration
+        && migration.status === "completed"
+        && migration.canonicalSheetName === canonicalSheetName;
+    } catch (error) {
+      throw gatewayError_(
+        "invalid_meta",
+        "Invalid projection migration metadata for " + logicalSheetName,
+      );
+    }
+  }
+
+  return false;
+}
+
+function markProjectionMigrationCompleted_(
+  spreadsheet,
+  logicalSheetName,
+  canonicalSheetName,
+) {
+  const sheet = ensureMetaSheetStructure_(spreadsheet);
+  const rows = readMetaRows_(sheet);
+  const key = TYPED_SHEETS_META_MIGRATION_KEY_PREFIX + logicalSheetName;
+  const value = JSON.stringify({
+    logicalSheetName: logicalSheetName,
+    canonicalSheetName: canonicalSheetName,
+    status: "completed",
+  });
+
+  for (let index = 0; index < rows.length; index += 1) {
+    if (rows[index][0] === key) {
+      sheet.getRange(index + 2, 2, 1, 1).setValues([[value]]);
+      return;
+    }
+  }
+
+  sheet.getRange(sheet.getLastRow() + 1, 1, 1, 2).setValues([[key, value]]);
+}
+
 function readMetaRows_(sheet) {
   const lastRow = sheet.getLastRow();
 
@@ -1430,6 +2501,10 @@ function requireProjectionSheetName_(value, name) {
 }
 
 function ensureProjectionSheet_(spreadsheet, sheetName, headers) {
+  // Validate the requested schema even when the sheet is being created. This
+  // catches duplicate headers before they become a new, invalid system sheet.
+  assertExpectedHeaders_(headers, headers, "projection initialization");
+
   let sheet = spreadsheet.getSheetByName(sheetName);
 
   if (!sheet) {
@@ -1438,6 +2513,12 @@ function ensureProjectionSheet_(spreadsheet, sheetName, headers) {
 
   if (isHeaderRowEmpty_(sheet)) {
     sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+  } else {
+    assertExpectedHeaders_(
+      readHeaderRow_(sheet),
+      headers,
+      "projection initialization",
+    );
   }
 }
 
@@ -1450,6 +2531,12 @@ function ensureInternalSheet_(spreadsheet, sheetName, headers) {
 
   if (isHeaderRowEmpty_(sheet)) {
     sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+  } else {
+    assertExpectedHeaders_(
+      readHeaderRow_(sheet),
+      headers,
+      "canonical initialization",
+    );
   }
 
   hideInternalSheet_(sheet);
@@ -2136,6 +3223,23 @@ function assertExpectedHeaders_(actualHeaders, expectedHeaders, operation) {
     );
   }
 
+  const seenHeaders = Object.create(null);
+
+  actualHeaders.forEach(function(header) {
+    if (header === "") {
+      return;
+    }
+
+    if (seenHeaders[header]) {
+      throw gatewayError_(
+        "schema_drift",
+        "Duplicate header before " + operation + ": " + header,
+      );
+    }
+
+    seenHeaders[header] = true;
+  });
+
   expectedHeaders.forEach(function(expectedHeader, index) {
     if (actualHeaders[index] !== expectedHeader) {
       throw gatewayError_(
@@ -2144,6 +3248,21 @@ function assertExpectedHeaders_(actualHeaders, expectedHeaders, operation) {
       );
     }
   });
+}
+
+function readHeaderRow_(sheet) {
+  const lastColumn = sheet.getLastColumn();
+
+  if (lastColumn === 0) {
+    return [];
+  }
+
+  return sheet
+    .getRange(1, 1, 1, lastColumn)
+    .getValues()[0]
+    .map(function(value) {
+      return String(value);
+    });
 }
 
 function isHeaderRowEmpty_(sheet) {
@@ -2235,7 +3354,8 @@ function getTypedSheetsConfig_() {
 function ensureMetaSheet_(spreadsheet, config) {
   const sheet = ensureMetaSheetStructure_(spreadsheet);
   const preservedRows = readMetaRows_(sheet).filter(function(row) {
-    return row[0].indexOf(TYPED_SHEETS_META_MAPPING_KEY_PREFIX) === 0;
+    return row[0].indexOf(TYPED_SHEETS_META_MAPPING_KEY_PREFIX) === 0
+      || row[0].indexOf(TYPED_SHEETS_META_MIGRATION_KEY_PREFIX) === 0;
   });
   const rows = [
     ["spreadsheetUrl", config.spreadsheetUrl],

@@ -53,6 +53,8 @@ export interface ProcessTaskQueueResult {
   processedTasks: number;
   failedTasks: number;
   remainingPendingTasks: number;
+  /** Claims or redactions awaiting recovery before the queue is idle. */
+  recoveryPendingTasks?: number;
 }
 
 export interface AppsScriptQueueAdapter extends SheetReader {

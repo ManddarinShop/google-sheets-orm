@@ -15,6 +15,7 @@ export type QueuedRepositoryQueueProcessingStatus =
   | "idle"
   | "processed"
   | "pending"
+  | "recovering"
   | "failed";
 
 export interface QueuedRepositoryQueueProcessingSummary {
@@ -22,6 +23,7 @@ export interface QueuedRepositoryQueueProcessingSummary {
   processedAny: boolean;
   hasFailures: boolean;
   hasPendingTasks: boolean;
+  hasRecoveryTasks: boolean;
 }
 
 /**
@@ -44,6 +46,7 @@ export function summarizeProcessTaskQueueResult(
   const hasFailures =
     result.failedTransactions > 0 || result.failedTasks > 0;
   const hasPendingTasks = result.remainingPendingTasks > 0;
+  const hasRecoveryTasks = (result.recoveryPendingTasks ?? 0) > 0;
   const processedAny =
     result.processedTransactions > 0 || result.processedTasks > 0;
 
@@ -53,6 +56,17 @@ export function summarizeProcessTaskQueueResult(
       processedAny,
       hasFailures,
       hasPendingTasks,
+      hasRecoveryTasks,
+    };
+  }
+
+  if (hasRecoveryTasks) {
+    return {
+      status: "recovering",
+      processedAny,
+      hasFailures,
+      hasPendingTasks,
+      hasRecoveryTasks,
     };
   }
 
@@ -62,6 +76,7 @@ export function summarizeProcessTaskQueueResult(
       processedAny,
       hasFailures,
       hasPendingTasks,
+      hasRecoveryTasks,
     };
   }
 
@@ -71,6 +86,7 @@ export function summarizeProcessTaskQueueResult(
       processedAny,
       hasFailures,
       hasPendingTasks,
+      hasRecoveryTasks,
     };
   }
 
@@ -79,5 +95,6 @@ export function summarizeProcessTaskQueueResult(
     processedAny,
     hasFailures,
     hasPendingTasks,
+    hasRecoveryTasks,
   };
 }
