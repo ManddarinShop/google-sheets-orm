@@ -388,6 +388,27 @@ describe("queued repository transaction API", () => {
     ]);
   });
 
+  it("rejects a queued schema without _version before gateway initialization", async () => {
+    const adapter = new FakeQueueAdapter(ordersSnapshot);
+    const invalidColumns = {
+      id: text(),
+      userId: text(),
+      status: text(),
+      canceledAt: text().optional(),
+    } as unknown as typeof columns;
+    const orders = createQueuedSheetRepository<Order>({
+      adapter,
+      sheetName: "Orders",
+      key: "id",
+      columns: invalidColumns,
+    });
+
+    await expect(orders.ensureSheet()).rejects.toThrow(
+      'Missing version column "_version"',
+    );
+    expect(adapter.initializedSystemSheets).toEqual([]);
+  });
+
   it("exposes queue processing separately from repository transactions", async () => {
     const adapter = new FakeQueueAdapter(ordersSnapshot);
     const processor = createQueuedRepositoryQueueProcessor(adapter);

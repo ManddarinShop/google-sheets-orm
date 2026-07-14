@@ -152,7 +152,11 @@ task was applied, the whole group returns to `pending`; and if only part of the
 group was applied, or a delete cannot be proven from the remaining row state,
 the whole group is marked `failed` with `partial_apply` for manual recovery.
 Recovered pending work increments its attempt count when processing starts
-again.
+again. A fresh or incomplete lower-sequence transaction blocks later pending
+groups, and `maxTransactions` bounds both stale recovery and new claims. Queue
+reads reject immutable-field or payload changes that do not match the stored
+task fingerprint; completed redacted tasks retain their stored fingerprint for
+idempotent replay.
 `writeHeader` refuses to overwrite a non-empty header row. `appendRows` writes a
 burst of rows through one gateway request so repository inserts can avoid
 per-row Apps Script calls. `deleteRows` deletes data rows from bottom to top in

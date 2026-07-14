@@ -952,6 +952,40 @@ describe("manual Apps Script gateway template system sheets", () => {
     ).toThrow(/Task already exists: task-1/);
   });
 
+  it("rejects queue payload tampering when the stored fingerprint is unchanged", async () => {
+    const gateway = await loadGatewayTemplate();
+    const spreadsheet = new FakeSpreadsheet();
+    const task = {
+      taskId: "task-tampered",
+      transactionId: "tx-tampered",
+      transactionIndex: 0,
+      operation: "insert" as const,
+      sheetName: "Users",
+      keyHeader: "id",
+      keyValue: "u1",
+      expectedVersion: null,
+      payloadJson: JSON.stringify({ row: { id: "u1", _version: 1 } }),
+    };
+
+    gateway.enqueueTasks_(spreadsheet, { tasks: [task] });
+    const queue = spreadsheet.sheets.get(
+      gateway.TYPED_SHEETS_TASK_QUEUE_SHEET_NAME,
+    );
+
+    if (queue === undefined) {
+      throw new Error("Expected task queue sheet");
+    }
+
+    queue.values[1]![10] = JSON.stringify({ row: { id: "u1", _version: 2 } });
+
+    expect(() =>
+      gateway.enqueueTasks_(spreadsheet, { tasks: [task] }),
+    ).toThrow(/Task fingerprint mismatch: task-tampered/);
+    expect(() =>
+      gateway.processTaskQueue_(spreadsheet, {}),
+    ).toThrow(/Task fingerprint mismatch: task-tampered/);
+  });
+
   it("rejects queued insert tasks with a numeric expected version", async () => {
     const gateway = await loadGatewayTemplate();
     const spreadsheet = new FakeSpreadsheet();
@@ -1721,6 +1755,287 @@ describe("manual Apps Script gateway template system sheets", () => {
     ]);
     expect(queue.values[1]![4]).toBe("done");
     expect(queue.values[1]![11]).toBe(2);
+  });
+
+  it("blocks a later pending transaction behind a fresh processing transaction", async () => {
+    const gateway = await loadGatewayTemplate();
+    const spreadsheet = new FakeSpreadsheet();
+    const systemSheets = gateway.initializeSystemSheets_(spreadsheet, {
+      sheetName: "Users",
+      headers: ["id", "name", "_version"],
+    });
+    const canonical = spreadsheet.sheets.get(systemSheets.canonicalSheetName);
+    const queue = spreadsheet.sheets.get(
+      gateway.TYPED_SHEETS_TASK_QUEUE_SHEET_NAME,
+    );
+
+    gateway.enqueueTasks_(spreadsheet, {
+      tasks: [
+        {
+          taskId: "task-order-insert",
+          transactionId: "tx-order-insert",
+          transactionIndex: 0,
+          operation: "insert",
+          sheetName: "Users",
+          keyHeader: "id",
+          keyValue: "u1",
+          expectedVersion: null,
+          payloadJson: JSON.stringify({
+            row: { id: "u1", name: "old", _version: 1 },
+          }),
+        },
+        {
+          taskId: "task-order-update",
+          transactionId: "tx-order-update",
+          transactionIndex: 0,
+          operation: "update",
+          sheetName: "Users",
+          keyHeader: "id",
+          keyValue: "u1",
+          expectedVersion: 1,
+          payloadJson: JSON.stringify({
+            expectedVersion: 1,
+            rowToWrite: { id: "u1", name: "new", _version: 2 },
+          }),
+        },
+      ],
+    });
+
+    if (queue === undefined) {
+      throw new Error("Expected task queue sheet");
+    }
+
+    queue.values[1]![4] = "processing";
+    queue.values[1]![15] = new Date().toISOString();
+
+    expect(gateway.processTaskQueue_(spreadsheet, {})).toEqual({
+      ok: true,
+      processedTransactions: 0,
+      failedTransactions: 0,
+      processedTasks: 0,
+      failedTasks: 0,
+      remainingPendingTasks: 1,
+    });
+    expect(canonical?.values).toEqual([
+      ["id", "name", "_version"],
+    ]);
+    expect(queue.values.slice(1).map((row) => row[4])).toEqual([
+      "processing",
+      "pending",
+    ]);
+  });
+
+  it("reconciles a stale insert followed by an update as one final state", async () => {
+    const gateway = await loadGatewayTemplate();
+    const spreadsheet = new FakeSpreadsheet();
+    const systemSheets = gateway.initializeSystemSheets_(spreadsheet, {
+      sheetName: "Users",
+      headers: ["id", "name", "_version"],
+    });
+    const canonical = spreadsheet.sheets.get(systemSheets.canonicalSheetName);
+    const queue = spreadsheet.sheets.get(
+      gateway.TYPED_SHEETS_TASK_QUEUE_SHEET_NAME,
+    );
+
+    gateway.enqueueTasks_(spreadsheet, {
+      tasks: [
+        {
+          taskId: "task-chain-insert",
+          transactionId: "tx-chain-insert-update",
+          transactionIndex: 0,
+          operation: "insert",
+          sheetName: "Users",
+          keyHeader: "id",
+          keyValue: "u1",
+          expectedVersion: null,
+          payloadJson: JSON.stringify({
+            row: { id: "u1", name: "old", _version: 1 },
+          }),
+        },
+        {
+          taskId: "task-chain-update",
+          transactionId: "tx-chain-insert-update",
+          transactionIndex: 1,
+          operation: "update",
+          sheetName: "Users",
+          keyHeader: "id",
+          keyValue: "u1",
+          expectedVersion: 1,
+          payloadJson: JSON.stringify({
+            expectedVersion: 1,
+            rowToWrite: { id: "u1", name: "new", _version: 2 },
+          }),
+        },
+      ],
+    });
+
+    canonical?.values.push(["u1", "new", 2]);
+
+    if (queue === undefined) {
+      throw new Error("Expected task queue sheet");
+    }
+
+    queue.values.slice(1).forEach((row) => {
+      row[4] = "processing";
+      row[15] = "2020-01-01T00:00:00.000Z";
+    });
+
+    expect(gateway.processTaskQueue_(spreadsheet, {})).toEqual({
+      ok: true,
+      processedTransactions: 1,
+      failedTransactions: 0,
+      processedTasks: 2,
+      failedTasks: 0,
+      remainingPendingTasks: 0,
+    });
+    expect(queue.values.slice(1).map((row) => row[4])).toEqual([
+      "done",
+      "done",
+    ]);
+  });
+
+  it("reconciles a stale update followed by a delete as one final state", async () => {
+    const gateway = await loadGatewayTemplate();
+    const spreadsheet = new FakeSpreadsheet();
+    const systemSheets = gateway.initializeSystemSheets_(spreadsheet, {
+      sheetName: "Users",
+      headers: ["id", "name", "_version"],
+    });
+    const canonical = spreadsheet.sheets.get(systemSheets.canonicalSheetName);
+    const queue = spreadsheet.sheets.get(
+      gateway.TYPED_SHEETS_TASK_QUEUE_SHEET_NAME,
+    );
+
+    gateway.enqueueTasks_(spreadsheet, {
+      tasks: [
+        {
+          taskId: "task-chain-update",
+          transactionId: "tx-chain-update-delete",
+          transactionIndex: 0,
+          operation: "update",
+          sheetName: "Users",
+          keyHeader: "id",
+          keyValue: "u1",
+          expectedVersion: 1,
+          payloadJson: JSON.stringify({
+            expectedVersion: 1,
+            rowToWrite: { id: "u1", name: "new", _version: 2 },
+          }),
+        },
+        {
+          taskId: "task-chain-delete",
+          transactionId: "tx-chain-update-delete",
+          transactionIndex: 1,
+          operation: "delete",
+          sheetName: "Users",
+          keyHeader: "id",
+          keyValue: "u1",
+          expectedVersion: 2,
+          payloadJson: JSON.stringify({
+            expectedVersion: 2,
+            rowToDelete: { id: "u1", name: "new", _version: 2 },
+          }),
+        },
+      ],
+    });
+
+    if (queue === undefined) {
+      throw new Error("Expected task queue sheet");
+    }
+
+    queue.values.slice(1).forEach((row) => {
+      row[4] = "processing";
+      row[15] = "2020-01-01T00:00:00.000Z";
+    });
+
+    expect(gateway.processTaskQueue_(spreadsheet, {})).toEqual({
+      ok: true,
+      processedTransactions: 1,
+      failedTransactions: 0,
+      processedTasks: 2,
+      failedTasks: 0,
+      remainingPendingTasks: 0,
+    });
+    expect(canonical?.values).toEqual([
+      ["id", "name", "_version"],
+    ]);
+    expect(queue.values.slice(1).map((row) => row[4])).toEqual([
+      "done",
+      "done",
+    ]);
+  });
+
+  it("reconciles a stale delete followed by an insert as one final state", async () => {
+    const gateway = await loadGatewayTemplate();
+    const spreadsheet = new FakeSpreadsheet();
+    const systemSheets = gateway.initializeSystemSheets_(spreadsheet, {
+      sheetName: "Users",
+      headers: ["id", "name", "_version"],
+    });
+    const canonical = spreadsheet.sheets.get(systemSheets.canonicalSheetName);
+    const queue = spreadsheet.sheets.get(
+      gateway.TYPED_SHEETS_TASK_QUEUE_SHEET_NAME,
+    );
+
+    gateway.enqueueTasks_(spreadsheet, {
+      tasks: [
+        {
+          taskId: "task-chain-delete",
+          transactionId: "tx-chain-delete-insert",
+          transactionIndex: 0,
+          operation: "delete",
+          sheetName: "Users",
+          keyHeader: "id",
+          keyValue: "u1",
+          expectedVersion: 1,
+          payloadJson: JSON.stringify({
+            expectedVersion: 1,
+            rowToDelete: { id: "u1", name: "old", _version: 1 },
+          }),
+        },
+        {
+          taskId: "task-chain-insert",
+          transactionId: "tx-chain-delete-insert",
+          transactionIndex: 1,
+          operation: "insert",
+          sheetName: "Users",
+          keyHeader: "id",
+          keyValue: "u1",
+          expectedVersion: null,
+          payloadJson: JSON.stringify({
+            row: { id: "u1", name: "new", _version: 1 },
+          }),
+        },
+      ],
+    });
+
+    canonical?.values.push(["u1", "new", 1]);
+
+    if (queue === undefined) {
+      throw new Error("Expected task queue sheet");
+    }
+
+    queue.values.slice(1).forEach((row) => {
+      row[4] = "processing";
+      row[15] = "2020-01-01T00:00:00.000Z";
+    });
+
+    expect(gateway.processTaskQueue_(spreadsheet, {})).toEqual({
+      ok: true,
+      processedTransactions: 1,
+      failedTransactions: 0,
+      processedTasks: 2,
+      failedTasks: 0,
+      remainingPendingTasks: 0,
+    });
+    expect(canonical?.values).toEqual([
+      ["id", "name", "_version"],
+      ["u1", "new", 1],
+    ]);
+    expect(queue.values.slice(1).map((row) => row[4])).toEqual([
+      "done",
+      "done",
+    ]);
   });
 
   it("reconciles a stale transaction after all canonical rows were applied", async () => {
