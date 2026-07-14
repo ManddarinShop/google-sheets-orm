@@ -234,6 +234,7 @@ export class AppsScriptGatewayAdapter
         operation: "enqueueTasks",
         tasks: input.tasks,
       }),
+      input.tasks,
     );
 
     return {
@@ -359,10 +360,21 @@ function requireInitializeSystemSheetsResponse(
 
 function requireEnqueueTasksResponse(
   value: AppsScriptGatewayResponse,
+  expectedTasks: EnqueueTasksInput["tasks"],
 ): AppsScriptGatewayEnqueueTasksResponse {
+  const actualTaskIds = Array.isArray(value.tasks)
+    ? value.tasks
+      .filter(isEnqueuedTaskResult)
+      .map((task) => task.taskId)
+      .sort()
+    : [];
+  const expectedTaskIds = expectedTasks.map((task) => task.taskId).sort();
+
   if (
     !Array.isArray(value.tasks) ||
-    !value.tasks.every(isEnqueuedTaskResult)
+    !value.tasks.every(isEnqueuedTaskResult) ||
+    actualTaskIds.length !== expectedTaskIds.length ||
+    actualTaskIds.some((taskId, index) => taskId !== expectedTaskIds[index])
   ) {
     throw new Error(
       "Apps Script gateway returned an invalid enqueueTasks response",

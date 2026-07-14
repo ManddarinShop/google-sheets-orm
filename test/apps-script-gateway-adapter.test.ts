@@ -544,7 +544,41 @@ describe("AppsScriptGatewayAdapter", () => {
     const fetch = vi.fn().mockResolvedValue(
       createJsonResponse({
         ok: true,
-        tasks: [{ taskId: "task-1", sequence: "1" }],
+        tasks: [],
+      }),
+    );
+    const adapter = new AppsScriptGatewayAdapter({
+      gatewayUrl: "https://script.google.com/macros/s/deployment-id/exec",
+      gatewaySecret: "gateway-secret",
+      fetch,
+    });
+
+    await expect(
+      adapter.enqueueTasks({
+        tasks: [
+          {
+            taskId: "task-1",
+            transactionId: "tx-1",
+            transactionIndex: 0,
+            operation: "insert",
+            sheetName: "Users",
+            keyHeader: "id",
+            keyValue: "u1",
+            expectedVersion: null,
+            payloadJson: JSON.stringify({ row: { id: "u1", _version: 1 } }),
+          },
+        ],
+      }),
+    ).rejects.toThrow(
+      /Apps Script gateway returned an invalid enqueueTasks response/,
+    );
+  });
+
+  it("rejects an enqueue response with a different task id", async () => {
+    const fetch = vi.fn().mockResolvedValue(
+      createJsonResponse({
+        ok: true,
+        tasks: [{ taskId: "task-other", sequence: 1 }],
       }),
     );
     const adapter = new AppsScriptGatewayAdapter({
