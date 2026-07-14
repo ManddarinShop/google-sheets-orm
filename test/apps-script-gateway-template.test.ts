@@ -1176,6 +1176,48 @@ describe("manual Apps Script gateway template system sheets", () => {
     ).toThrow(/expectedVersion must be a number/);
   });
 
+  it.each([
+    ["negative", -1],
+    ["fractional", 1.5],
+    ["non-numeric", "not-a-number"],
+  ] as const)("rejects queue rows with %s attempts", async (_label, attempts) => {
+    const gateway = await loadGatewayTemplate();
+    const spreadsheet = new FakeSpreadsheet();
+
+    gateway.enqueueTasks_(spreadsheet, {
+      tasks: [
+        {
+          taskId: "task-invalid-attempts",
+          transactionId: "tx-invalid-attempts",
+          transactionIndex: 0,
+          operation: "insert",
+          sheetName: "Users",
+          keyHeader: "id",
+          keyValue: "u1",
+          expectedVersion: null,
+          payloadJson: JSON.stringify({
+            row: { id: "u1", _version: 1 },
+          }),
+        },
+      ],
+    });
+
+    const queue = spreadsheet.sheets.get(
+      gateway.TYPED_SHEETS_TASK_QUEUE_SHEET_NAME,
+    );
+
+    if (queue === undefined) {
+      throw new Error("Expected task queue sheet");
+    }
+
+    queue.values[1]![11] = attempts;
+
+    expect(() => gateway.processTaskQueue_(spreadsheet, {})).toThrow(
+      /Invalid attempts at queue row 2/,
+    );
+    expect(queue.values[1]![4]).toBe("pending");
+  });
+
   it("rejects queued tasks with string transaction indexes", async () => {
     const gateway = await loadGatewayTemplate();
     const spreadsheet = new FakeSpreadsheet();
@@ -3050,6 +3092,60 @@ describe("manual Apps Script gateway template system sheets", () => {
     });
     expect(queue.values[1]![4]).toBe("failed");
     expect(queue.values[1]![12]).toBe("partial_apply");
+  });
+
+  it("retries a stale delete with unmodeled canonical columns", async () => {
+    const gateway = await loadGatewayTemplate();
+    const spreadsheet = new FakeSpreadsheet();
+    const systemSheets = gateway.initializeSystemSheets_(spreadsheet, {
+      sheetName: "Users",
+      headers: ["id", "name", "_version"],
+    });
+    const canonical = spreadsheet.sheets.get(systemSheets.canonicalSheetName);
+    const queue = spreadsheet.sheets.get(
+      gateway.TYPED_SHEETS_TASK_QUEUE_SHEET_NAME,
+    );
+
+    if (canonical === undefined || queue === undefined) {
+      throw new Error("Expected canonical and task queue sheets");
+    }
+
+    canonical.values[0] = ["id", "name", "_version", "legacy_note"];
+    canonical.values.push(["u1", "old", 1, "keep-me"]);
+
+    gateway.enqueueTasks_(spreadsheet, {
+      tasks: [
+        {
+          taskId: "task-delete-extra-column",
+          transactionId: "tx-delete-extra-column",
+          transactionIndex: 0,
+          operation: "delete",
+          sheetName: "Users",
+          keyHeader: "id",
+          keyValue: "u1",
+          expectedVersion: 1,
+          payloadJson: JSON.stringify({
+            rowToDelete: { id: "u1", name: "old", _version: 1 },
+          }),
+        },
+      ],
+    });
+
+    queue.values[1]![4] = "processing";
+    queue.values[1]![15] = "2020-01-01T00:00:00.000Z";
+
+    expect(gateway.processTaskQueue_(spreadsheet, {})).toMatchObject({
+      processedTransactions: 1,
+      failedTransactions: 0,
+      processedTasks: 1,
+      failedTasks: 0,
+      remainingPendingTasks: 0,
+    });
+    expect(queue.values[1]![4]).toBe("done");
+    expect(canonical.values).toEqual([
+      ["id", "name", "_version", "legacy_note"],
+      ["", "", "", ""],
+    ]);
   });
 
   it("does not adopt a colliding internal sheet without a stored mapping", async () => {
