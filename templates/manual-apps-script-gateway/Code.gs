@@ -1166,7 +1166,7 @@ function parseQueuedTaskRow_(row, rowNumber) {
     keyValue: String(row[8] || ""),
     expectedVersion: row[9] === "" || row[9] === null ? null : Number(row[9]),
     payloadJson: String(row[10] || ""),
-    attempts: Number(row[11] || 0),
+    attempts: parseQueuedTaskAttempts_(row[11], rowNumber),
     lastErrorCode: String(row[12] || ""),
     lastErrorMessage: String(row[13] || ""),
     updatedAt: String(row[15] || ""),
@@ -1197,6 +1197,26 @@ function parseQueuedTaskRow_(row, rowNumber) {
   assertStoredTaskFingerprint_(task);
 
   return task;
+}
+
+/**
+ * Parses the retry counter stored in the queue sheet. Invalid counters must
+ * fail at the queue boundary so they cannot bypass the retry limit or keep a
+ * transaction stuck in recovery indefinitely.
+ */
+function parseQueuedTaskAttempts_(value, rowNumber) {
+  const attempts = value === "" || value === null || value === undefined
+    ? 0
+    : Number(value);
+
+  if (!Number.isInteger(attempts) || attempts < 0) {
+    throw gatewayError_(
+      "invalid_task",
+      "Invalid attempts at queue row " + rowNumber,
+    );
+  }
+
+  return attempts;
 }
 
 function assertStoredTaskFingerprint_(task) {
@@ -1499,20 +1519,13 @@ function inspectTaskInitialState_(table, chain) {
   }
 
   if (firstTask.operation === "delete") {
-    const payload = requireTaskPayloadObject_(firstTask);
-    const rowToDelete = requirePayloadObject_(
-      payload.rowToDelete,
-      "payload.rowToDelete",
-    );
-    const expectedRow = rowObjectToCanonicalCells_(
+    const rowToDelete = assertDeletePayloadMatchesTask_(firstTask);
+
+    return areCanonicalPayloadFieldsEqual_(
       table,
+      table.rows[rowIndex],
       rowToDelete,
-      null,
-    );
-
-    assertTaskRowMatchesKey_(table, expectedRow, firstTask);
-
-    return areCanonicalRowsEqual_(table.rows[rowIndex], expectedRow)
+    )
       ? { status: "applied" }
       : { status: "not_initial" };
   }
@@ -1701,6 +1714,29 @@ function areCanonicalRowsEqual_(left, right) {
   }
 
   return true;
+}
+
+/**
+ * Compares only the fields carried by a queued row payload. Canonical sheets
+ * may contain additional unmodeled columns, which must not change recovery's
+ * decision about a delete task.
+ */
+function areCanonicalPayloadFieldsEqual_(table, canonicalRow, rowObject) {
+  return Object.keys(rowObject).every(function(header) {
+    const index = table.headers.indexOf(header);
+
+    if (index === -1) {
+      throw gatewayError_(
+        "schema_drift",
+        "Missing canonical header for queued field: " + header,
+      );
+    }
+
+    return areCanonicalCellsEqual_(
+      canonicalRow[index],
+      toSheetCell_(rowObject[header]),
+    );
+  });
 }
 
 function areCanonicalCellsEqual_(left, right) {
@@ -1980,6 +2016,8 @@ function assertDeletePayloadMatchesTask_(task) {
       "payload.rowToDelete._version must match expectedVersion",
     );
   }
+
+  return rowToDelete;
 }
 
 function assertCurrentVersion_(table, rowIndex, task) {
