@@ -69,11 +69,25 @@ interface GatewayTemplate {
   };
 }
 
+interface FakeSetValuesInput {
+  sheetName: string;
+  row: number;
+  column: number;
+  rowCount: number;
+  columnCount: number;
+  values: unknown[][];
+}
+
+interface FakeSpreadsheetOptions {
+  protectThrows?: boolean;
+  failSetValues?(input: FakeSetValuesInput): Error | null;
+}
+
 class FakeSpreadsheet {
   readonly insertedSheetNames: string[] = [];
   readonly sheets = new Map<string, FakeSheet>();
 
-  constructor(private readonly options: { protectThrows?: boolean } = {}) {}
+  constructor(private readonly options: FakeSpreadsheetOptions = {}) {}
 
   getSheetByName(name: string): FakeSheet | null {
     return this.sheets.get(name) ?? null;
@@ -108,9 +122,16 @@ class FakeSheet {
 
   constructor(
     name: string,
-    private readonly options: { protectThrows?: boolean } = {},
+    private readonly options: FakeSpreadsheetOptions = {},
   ) {
     this.name = name;
+  }
+
+  getSetValuesFailure(input: Omit<FakeSetValuesInput, "sheetName">): Error | null {
+    return this.options.failSetValues?.({
+      ...input,
+      sheetName: this.name,
+    }) ?? null;
   }
 
   getRange(
@@ -170,6 +191,18 @@ class FakeRange {
   }
 
   setValues(values: unknown[][]): void {
+    const failure = this.sheet.getSetValuesFailure({
+      row: this.row,
+      column: this.column,
+      rowCount: this.rowCount,
+      columnCount: this.columnCount,
+      values,
+    });
+
+    if (failure !== null) {
+      throw failure;
+    }
+
     values.forEach((sourceRow, rowOffset) => {
       const targetRowIndex = this.row - 1 + rowOffset;
       const targetRow = this.sheet.values[targetRowIndex] ?? [];
@@ -677,6 +710,49 @@ describe("manual Apps Script gateway template system sheets", () => {
     );
   });
 
+  it("resumes fingerprint migration for a 17-column redacted queue row", async () => {
+    const gateway = await loadGatewayTemplate();
+    const spreadsheet = new FakeSpreadsheet();
+    const task = {
+      taskId: "task-partial-migration",
+      transactionId: "tx-partial-migration",
+      transactionIndex: 0,
+      operation: "insert" as const,
+      sheetName: "Users",
+      keyHeader: "id",
+      keyValue: "u1",
+      expectedVersion: null,
+      payloadJson: JSON.stringify({ row: { id: "u1", _version: 1 } }),
+    };
+    const systemSheets = gateway.initializeSystemSheets_(spreadsheet, {
+      sheetName: "Users",
+      headers: ["id", "_version"],
+    });
+    const queue = spreadsheet.sheets.get(
+      gateway.TYPED_SHEETS_TASK_QUEUE_SHEET_NAME,
+    );
+
+    if (queue === undefined) {
+      throw new Error("Expected task queue sheet");
+    }
+
+    gateway.enqueueTasks_(spreadsheet, { tasks: [task] });
+    queue.values[1]![4] = "done";
+    queue.values[1]![10] = JSON.stringify({ redacted: true });
+    queue.values[1]![16] = "";
+
+    expect(gateway.enqueueTasks_(spreadsheet, { tasks: [task] })).toEqual({
+      ok: true,
+      tasks: [{ taskId: task.taskId, sequence: 1 }],
+    });
+    expect(queue.values[1]?.[16]).toBe(
+      "legacy-redacted:" + task.taskId,
+    );
+    expect(spreadsheet.sheets.get(systemSheets.canonicalSheetName)?.values).toEqual([
+      ["id", "_version"],
+    ]);
+  });
+
   it("does not recreate or overwrite existing system sheets", async () => {
     const gateway = await loadGatewayTemplate();
     const spreadsheet = new FakeSpreadsheet();
@@ -1179,6 +1255,80 @@ describe("manual Apps Script gateway template system sheets", () => {
       JSON.stringify({ redacted: true }),
       JSON.stringify({ redacted: true }),
     ]);
+  });
+
+  it("keeps a transaction recoverable when completion status recording fails", async () => {
+    const queueSheetName = "_typed_sheets_task_queue";
+    let statusFailureInjected = false;
+    const spreadsheet = new FakeSpreadsheet({
+      failSetValues: ({ sheetName, column, values }) => {
+        if (
+          !statusFailureInjected
+          && sheetName === queueSheetName
+          && column === 5
+          && values[0]?.[0] === "done"
+        ) {
+          statusFailureInjected = true;
+          return new Error("queue status write lost");
+        }
+
+        return null;
+      },
+    });
+    const gateway = await loadGatewayTemplate();
+    const systemSheets = gateway.initializeSystemSheets_(spreadsheet, {
+      sheetName: "Users",
+      headers: ["id", "_version"],
+    });
+    const queue = spreadsheet.sheets.get(queueSheetName);
+    const canonical = spreadsheet.sheets.get(systemSheets.canonicalSheetName);
+
+    gateway.enqueueTasks_(spreadsheet, {
+      tasks: [
+        {
+          taskId: "task-status-recovery",
+          transactionId: "tx-status-recovery",
+          transactionIndex: 0,
+          operation: "insert",
+          sheetName: "Users",
+          keyHeader: "id",
+          keyValue: "u1",
+          expectedVersion: null,
+          payloadJson: JSON.stringify({ row: { id: "u1", _version: 1 } }),
+        },
+      ],
+    });
+
+    if (queue === undefined || canonical === undefined) {
+      throw new Error("Expected queue and canonical sheets");
+    }
+
+    expect(gateway.processTaskQueue_(spreadsheet, {})).toEqual({
+      ok: true,
+      processedTransactions: 0,
+      failedTransactions: 0,
+      processedTasks: 0,
+      failedTasks: 0,
+      remainingPendingTasks: 0,
+    });
+    expect(canonical.values).toEqual([
+      ["id", "_version"],
+      ["u1", 1],
+    ]);
+    expect(queue.values[1]?.[4]).toBe("processing");
+    expect(queue.values[1]?.[12]).toBe("completion_status_unconfirmed");
+
+    queue.values[1]![15] = "2020-01-01T00:00:00.000Z";
+
+    expect(gateway.processTaskQueue_(spreadsheet, {})).toEqual({
+      ok: true,
+      processedTransactions: 1,
+      failedTransactions: 0,
+      processedTasks: 1,
+      failedTasks: 0,
+      remainingPendingTasks: 0,
+    });
+    expect(queue.values[1]?.[4]).toBe("done");
   });
 
   it("marks a failed transaction without mutating the canonical sheet", async () => {
@@ -1894,7 +2044,7 @@ describe("manual Apps Script gateway template system sheets", () => {
     ]);
   });
 
-  it("reconciles a stale update followed by a delete as one final state", async () => {
+  it("retries a stale update followed by a delete when canonical state is initial", async () => {
     const gateway = await loadGatewayTemplate();
     const spreadsheet = new FakeSpreadsheet();
     const systemSheets = gateway.initializeSystemSheets_(spreadsheet, {
@@ -1939,6 +2089,8 @@ describe("manual Apps Script gateway template system sheets", () => {
       ],
     });
 
+    canonical?.values.push(["u1", "old", 1]);
+
     if (queue === undefined) {
       throw new Error("Expected task queue sheet");
     }
@@ -1958,10 +2110,82 @@ describe("manual Apps Script gateway template system sheets", () => {
     });
     expect(canonical?.values).toEqual([
       ["id", "name", "_version"],
+      ["", "", ""],
     ]);
     expect(queue.values.slice(1).map((row) => row[4])).toEqual([
       "done",
       "done",
+    ]);
+  });
+
+  it("fails a stale update followed by a delete when canonical state is empty", async () => {
+    const gateway = await loadGatewayTemplate();
+    const spreadsheet = new FakeSpreadsheet();
+    const systemSheets = gateway.initializeSystemSheets_(spreadsheet, {
+      sheetName: "Users",
+      headers: ["id", "name", "_version"],
+    });
+    const queue = spreadsheet.sheets.get(
+      gateway.TYPED_SHEETS_TASK_QUEUE_SHEET_NAME,
+    );
+
+    gateway.enqueueTasks_(spreadsheet, {
+      tasks: [
+        {
+          taskId: "task-empty-chain-update",
+          transactionId: "tx-empty-chain-update-delete",
+          transactionIndex: 0,
+          operation: "update",
+          sheetName: "Users",
+          keyHeader: "id",
+          keyValue: "u1",
+          expectedVersion: 1,
+          payloadJson: JSON.stringify({
+            expectedVersion: 1,
+            rowToWrite: { id: "u1", name: "new", _version: 2 },
+          }),
+        },
+        {
+          taskId: "task-empty-chain-delete",
+          transactionId: "tx-empty-chain-update-delete",
+          transactionIndex: 1,
+          operation: "delete",
+          sheetName: "Users",
+          keyHeader: "id",
+          keyValue: "u1",
+          expectedVersion: 2,
+          payloadJson: JSON.stringify({
+            expectedVersion: 2,
+            rowToDelete: { id: "u1", name: "new", _version: 2 },
+          }),
+        },
+      ],
+    });
+
+    if (queue === undefined) {
+      throw new Error("Expected task queue sheet");
+    }
+
+    queue.values.slice(1).forEach((row) => {
+      row[4] = "processing";
+      row[15] = "2020-01-01T00:00:00.000Z";
+    });
+
+    expect(gateway.processTaskQueue_(spreadsheet, {})).toEqual({
+      ok: true,
+      processedTransactions: 0,
+      failedTransactions: 1,
+      processedTasks: 0,
+      failedTasks: 2,
+      remainingPendingTasks: 0,
+    });
+    expect(queue.values.slice(1).map((row) => row[4])).toEqual([
+      "failed",
+      "failed",
+    ]);
+    expect(queue.values.slice(1).map((row) => row[12])).toEqual([
+      "partial_apply",
+      "partial_apply",
     ]);
   });
 

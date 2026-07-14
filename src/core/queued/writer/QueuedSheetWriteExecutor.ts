@@ -1,6 +1,7 @@
 import type {
   AppsScriptQueueAdapter,
   EnqueueTasksInput,
+  EnqueueTasksResult,
 } from "../../../adapter/queued/QueuedSheetAdapter.js";
 import type {
   SheetCell,
@@ -127,9 +128,28 @@ export function createRepositoryQueueWriteExecutor<
             : createTaskBatchFingerprint(materialized.tasks),
       })),
     enqueueTasks: async (tasks) => {
-      await input.adapter.enqueueTasks(tasks);
+      const result = await input.adapter.enqueueTasks(tasks);
+
+      assertEnqueueTasksResultMatchesInput(tasks, result);
     },
   };
+}
+
+function assertEnqueueTasksResultMatchesInput(
+  input: EnqueueTasksInput,
+  result: EnqueueTasksResult,
+): void {
+  const expectedTaskIds = input.tasks.map((task) => task.taskId).sort();
+  const actualTaskIds = result.tasks.map((task) => task.taskId).sort();
+
+  if (
+    actualTaskIds.length !== expectedTaskIds.length ||
+    actualTaskIds.some((taskId, index) => taskId !== expectedTaskIds[index])
+  ) {
+    throw new Error(
+      "Queue adapter returned an enqueue result that does not match the requested task batch",
+    );
+  }
 }
 
 async function materializeRepositoryTransaction<

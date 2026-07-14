@@ -537,6 +537,11 @@ function ensureTaskQueueSheet_(spreadsheet) {
     "enqueueTasks",
   );
 
+  // A previous migration can stop after writing the new header but before
+  // backfilling every row. Resume that work on every queue access so a blank
+  // fingerprint never becomes a permanent redacted-task replay failure.
+  backfillMissingTaskFingerprints_(queueSheet);
+
   return queueSheet;
 }
 
@@ -578,6 +583,51 @@ function migrateLegacyTaskQueueSheet_(queueSheet) {
   queueSheet
     .getRange(2, fingerprintColumn, fingerprints.length, 1)
     .setValues(fingerprints);
+}
+
+function backfillMissingTaskFingerprints_(queueSheet) {
+  const lastRow = queueSheet.getLastRow();
+
+  if (lastRow < 2) {
+    return;
+  }
+
+  const fingerprintColumn = TYPED_SHEETS_TASK_QUEUE_HEADERS.length;
+  const rows = queueSheet
+    .getRange(2, 1, lastRow - 1, fingerprintColumn)
+    .getValues();
+  let hasMissingFingerprint = false;
+  const fingerprints = rows.map(function(row) {
+    const existingFingerprint = String(
+      row[fingerprintColumn - 1] || "",
+    );
+
+    const hasLegacyTaskFields = row
+      .slice(1, TYPED_SHEETS_LEGACY_TASK_QUEUE_HEADERS.length)
+      .some(function(value) {
+        return value !== "" && value !== null && value !== undefined;
+      });
+
+    // Ignore malformed/incomplete rows. Normal queue parsing will report them
+    // as invalid, but migration must not expand an unrelated short row just
+    // because the queue header has 17 columns.
+    if (!hasLegacyTaskFields) {
+      return [existingFingerprint];
+    }
+
+    if (existingFingerprint !== "") {
+      return [existingFingerprint];
+    }
+
+    hasMissingFingerprint = true;
+    return [createLegacyTaskFingerprint_(row)];
+  });
+
+  if (hasMissingFingerprint) {
+    queueSheet
+      .getRange(2, fingerprintColumn, fingerprints.length, 1)
+      .setValues(fingerprints);
+  }
 }
 
 function createLegacyTaskFingerprint_(row) {
@@ -755,16 +805,6 @@ function processTaskQueue_(spreadsheet, request) {
 
     try {
       applyQueueTransaction_(spreadsheet, group.tasks);
-      markQueueTasks_(queueSheet, group.tasks, {
-        status: "done",
-        payloadJson: JSON.stringify({ redacted: true }),
-        lastErrorCode: "",
-        lastErrorMessage: "",
-        updatedAt: new Date().toISOString(),
-      });
-
-      result.processedTransactions += 1;
-      result.processedTasks += group.tasks.length;
     } catch (error) {
       const code = error && error.code ? error.code : "internal_error";
       const message = error && error.message ? error.message : String(error);
@@ -778,7 +818,28 @@ function processTaskQueue_(spreadsheet, request) {
 
       result.failedTransactions += 1;
       result.failedTasks += group.tasks.length;
+      return;
     }
+
+    try {
+      // Keep the claim in processing if this status write is interrupted.
+      // The canonical write already happened, so the next processor run must
+      // reconcile the postcondition instead of treating it as a normal apply
+      // failure and permanently dead-lettering the transaction.
+      markQueueTasks_(queueSheet, group.tasks, {
+        status: "done",
+        payloadJson: JSON.stringify({ redacted: true }),
+        lastErrorCode: "",
+        lastErrorMessage: "",
+        updatedAt: new Date().toISOString(),
+      });
+    } catch (error) {
+      recordQueueCompletionFailure_(queueSheet, group.tasks, error);
+      return;
+    }
+
+    result.processedTransactions += 1;
+    result.processedTasks += group.tasks.length;
   });
 
   result.remainingPendingTasks = readQueuedTasks_(queueSheet).filter(function(task) {
@@ -786,6 +847,26 @@ function processTaskQueue_(spreadsheet, request) {
   }).length;
 
   return result;
+}
+
+function recordQueueCompletionFailure_(queueSheet, tasks, error) {
+  const message = error && error.message ? error.message : String(error);
+
+  try {
+    // Do not change status here. This best-effort diagnostic preserves
+    // processing claims, including partially updated claims, for stale
+    // recovery on a later invocation.
+    markQueueTasks_(queueSheet, tasks, {
+      lastErrorCode: "completion_status_unconfirmed",
+      lastErrorMessage:
+        "Canonical transaction applied, but completion status was not recorded: "
+        + message,
+      updatedAt: new Date().toISOString(),
+    });
+  } catch (diagnosticError) {
+    // The queue write itself may be the failing operation. Leaving the claim
+    // untouched is still safer than marking canonical data as failed.
+  }
 }
 
 /**
@@ -988,15 +1069,21 @@ function parseQueuedTaskRow_(row, rowNumber) {
 }
 
 function assertStoredTaskFingerprint_(task) {
-  if (task.taskFingerprint === "") {
-    task.taskFingerprint = createTaskFingerprint_(task);
+  // A completed task intentionally redacts payloadJson. Its stored
+  // fingerprint remains the immutable identity, but it cannot be recomputed
+  // after the payload has been removed. If a migration stopped after adding
+  // the column, use the durable task-id marker so the migration can resume.
+  if (task.status === "done" && isRedactedTaskPayload_(task.payloadJson)) {
+    if (task.taskFingerprint === "") {
+      task.taskFingerprint =
+        TYPED_SHEETS_LEGACY_REDACTED_FINGERPRINT_PREFIX + task.taskId;
+    }
+
     return;
   }
 
-  // A completed task intentionally redacts payloadJson. Its stored
-  // fingerprint remains the immutable identity, but it cannot be recomputed
-  // after the payload has been removed.
-  if (task.status === "done" && isRedactedTaskPayload_(task.payloadJson)) {
+  if (task.taskFingerprint === "") {
+    task.taskFingerprint = createTaskFingerprint_(task);
     return;
   }
 
@@ -1220,13 +1307,12 @@ function inspectTaskChainPostcondition_(table, chain) {
     return { status: "applied" };
   }
 
-  const finalState = inspectTaskFinalState_(table, chain);
+  const initialState = inspectTaskInitialState_(table, chain);
+  const finalState = inspectTaskFinalState_(table, chain, initialState);
 
   if (finalState.status === "ambiguous") {
     return finalState;
   }
-
-  const initialState = inspectTaskInitialState_(table, chain);
 
   if (finalState.status === "applied" && initialState.status === "applied") {
     return {
@@ -1294,7 +1380,7 @@ function inspectTaskInitialState_(table, chain) {
     : { status: "not_initial" };
 }
 
-function inspectTaskFinalState_(table, chain) {
+function inspectTaskFinalState_(table, chain, initialState) {
   const lastTask = chain[chain.length - 1];
   const rowIndex = table.rowsByKey[lastTask.keyValue];
 
@@ -1370,13 +1456,15 @@ function inspectTaskFinalState_(table, chain) {
   assertDeletePayloadMatchesTask_(lastTask);
 
   if (rowIndex === undefined) {
-    return chain.length > 1
-      ? { status: "applied" }
-      : {
-          status: "ambiguous",
-          errorCode: "partial_apply",
-          errorMessage: "Delete postcondition cannot be proven after the row disappeared",
-        };
+    return {
+      status: "ambiguous",
+      errorCode: "partial_apply",
+      errorMessage: "Delete postcondition cannot be proven after the row disappeared",
+    };
+  }
+
+  if (initialState.status === "applied") {
+    return { status: "not_final" };
   }
 
   if (Number(table.rows[rowIndex][table.versionIndex])
