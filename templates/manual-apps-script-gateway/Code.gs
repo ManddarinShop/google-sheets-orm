@@ -444,6 +444,21 @@ function enqueueTasks_(spreadsheet, request) {
       );
     }
 
+    const existingTransactionTasks =
+      queueState.tasksByTransactionId[taskWithFingerprint.transactionId] || [];
+
+    if (
+      existingTransactionTasks.some(function(existingTransactionTask) {
+        return isTerminalQueueTask_(existingTransactionTask);
+      })
+    ) {
+      throw gatewayError_(
+        "duplicate_transaction",
+        "Transaction already contains terminal tasks: "
+          + taskWithFingerprint.transactionId,
+      );
+    }
+
     seenTaskIds[taskWithFingerprint.taskId] = true;
 
     const sequence = queueState.maxSequence + rows.length + 1;
@@ -673,6 +688,7 @@ function readTaskQueueState_(queueSheet) {
   const state = {
     maxSequence: 0,
     tasksById: Object.create(null),
+    tasksByTransactionId: Object.create(null),
   };
 
   if (lastRow < 2) {
@@ -731,6 +747,10 @@ function readTaskQueueState_(queueSheet) {
       assertStoredTaskFingerprint_(task);
 
       state.tasksById[taskId] = task;
+      if (!state.tasksByTransactionId[task.transactionId]) {
+        state.tasksByTransactionId[task.transactionId] = [];
+      }
+      state.tasksByTransactionId[task.transactionId].push(task);
     }
 
     if (Number.isFinite(sequence) && sequence > state.maxSequence) {
@@ -750,6 +770,10 @@ function isSameQueuedTask_(existingTask, task) {
   }
 
   return existingTask.taskFingerprint === task.taskFingerprint;
+}
+
+function isTerminalQueueTask_(task) {
+  return task.status === "done" || task.status === "failed";
 }
 
 /**
@@ -1257,7 +1281,7 @@ function readCanonicalTablesForTransaction_(spreadsheet, tasks, existingTables) 
     if (!tables[task.sheetName]) {
       tables[task.sheetName] = readCanonicalTableForTask_(spreadsheet, task);
     } else {
-      assertCanonicalTaskSchema_(tables[task.sheetName].headers, task);
+      assertCanonicalTaskMatchesTable_(tables[task.sheetName], task);
     }
   });
 
@@ -1596,7 +1620,7 @@ function applyQueueTransaction_(spreadsheet, tasks) {
       tables[task.sheetName] = readCanonicalTableForTask_(spreadsheet, task);
       affectedSheetNames.push(task.sheetName);
     } else {
-      assertCanonicalTaskSchema_(tables[task.sheetName].headers, task);
+      assertCanonicalTaskMatchesTable_(tables[task.sheetName], task);
     }
 
     applyTaskToCanonicalTable_(tables[task.sheetName], task);
@@ -1654,11 +1678,25 @@ function readCanonicalTableForTask_(spreadsheet, task) {
   return {
     sheet: sheet,
     headers: headers,
+    keyHeader: task.keyHeader,
     keyIndex: keyIndex,
     versionIndex: versionIndex,
     rows: rows,
     rowsByKey: rowsByKey,
   };
+}
+
+function assertCanonicalTaskMatchesTable_(table, task) {
+  if (table.keyHeader !== task.keyHeader) {
+    throw gatewayError_(
+      "schema_drift",
+      "Queued tasks for " + task.sheetName
+        + " must use one key header; expected " + table.keyHeader
+        + " but received " + task.keyHeader,
+    );
+  }
+
+  assertCanonicalTaskSchema_(table.headers, task);
 }
 
 function assertCanonicalTaskSchema_(headers, task) {

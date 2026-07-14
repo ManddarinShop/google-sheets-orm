@@ -997,6 +997,51 @@ describe("manual Apps Script gateway template system sheets", () => {
     expect(queue?.values[1]?.[16]).toEqual(expect.any(String));
   });
 
+  it("rejects new tasks appended to a terminal transaction", async () => {
+    const gateway = await loadGatewayTemplate();
+    const spreadsheet = new FakeSpreadsheet();
+    const firstTask = {
+      taskId: "task-terminal-1",
+      transactionId: "tx-terminal",
+      transactionIndex: 0,
+      operation: "insert" as const,
+      sheetName: "Users",
+      keyHeader: "id",
+      keyValue: "u1",
+      expectedVersion: null,
+      payloadJson: JSON.stringify({ row: { id: "u1", _version: 1 } }),
+    };
+
+    gateway.enqueueTasks_(spreadsheet, { tasks: [firstTask] });
+    const queue = spreadsheet.sheets.get("_typed_sheets_task_queue");
+
+    if (queue === undefined) {
+      throw new Error("Expected task queue sheet");
+    }
+
+    queue.values[1]![4] = "done";
+    queue.values[1]![10] = JSON.stringify({ redacted: true });
+
+    expect(() =>
+      gateway.enqueueTasks_(spreadsheet, {
+        tasks: [
+          {
+            taskId: "task-terminal-2",
+            transactionId: "tx-terminal",
+            transactionIndex: 1,
+            operation: "insert",
+            sheetName: "Users",
+            keyHeader: "id",
+            keyValue: "u2",
+            expectedVersion: null,
+            payloadJson: JSON.stringify({ row: { id: "u2", _version: 1 } }),
+          },
+        ],
+      }),
+    ).toThrow(/Transaction already contains terminal tasks: tx-terminal/);
+    expect(queue.values).toHaveLength(2);
+  });
+
   it("rejects duplicate task ids with a different payload", async () => {
     const gateway = await loadGatewayTemplate();
     const spreadsheet = new FakeSpreadsheet();
@@ -1387,6 +1432,79 @@ describe("manual Apps Script gateway template system sheets", () => {
     ]);
     expect(queue.values.slice(1).map((row) => row[4])).toEqual(["failed"]);
     expect(queue.values.slice(1).map((row) => row[12])).toEqual([
+      "schema_drift",
+    ]);
+  });
+
+  it("rejects mixed key headers within one sheet transaction", async () => {
+    const gateway = await loadGatewayTemplate();
+    const spreadsheet = new FakeSpreadsheet();
+    const systemSheets = gateway.initializeSystemSheets_(spreadsheet, {
+      sheetName: "Users",
+      headers: ["id", "email", "_version"],
+    });
+    const canonical = spreadsheet.sheets.get(systemSheets.canonicalSheetName);
+    const queue = spreadsheet.sheets.get(
+      gateway.TYPED_SHEETS_TASK_QUEUE_SHEET_NAME,
+    );
+
+    canonical?.values.push(
+      ["u1", "a@test.com", 1],
+      ["u2", "b@test.com", 1],
+    );
+
+    gateway.enqueueTasks_(spreadsheet, {
+      tasks: [
+        {
+          taskId: "task-consistent-key",
+          transactionId: "tx-mixed-key",
+          transactionIndex: 0,
+          operation: "update",
+          sheetName: "Users",
+          keyHeader: "id",
+          keyValue: "u1",
+          expectedVersion: 1,
+          payloadJson: JSON.stringify({
+            expectedVersion: 1,
+            rowToWrite: { id: "u1", email: "new@test.com", _version: 2 },
+          }),
+        },
+        {
+          taskId: "task-mixed-key",
+          transactionId: "tx-mixed-key",
+          transactionIndex: 1,
+          operation: "update",
+          sheetName: "Users",
+          keyHeader: "email",
+          keyValue: "u2",
+          expectedVersion: 1,
+          payloadJson: JSON.stringify({
+            expectedVersion: 1,
+            rowToWrite: { id: "u2", email: "wrong@test.com", _version: 2 },
+          }),
+        },
+      ],
+    });
+
+    expect(gateway.processTaskQueue_(spreadsheet, {})).toEqual({
+      ok: true,
+      processedTransactions: 0,
+      failedTransactions: 1,
+      processedTasks: 0,
+      failedTasks: 2,
+      remainingPendingTasks: 0,
+    });
+    expect(canonical?.values).toEqual([
+      ["id", "email", "_version"],
+      ["u1", "a@test.com", 1],
+      ["u2", "b@test.com", 1],
+    ]);
+    expect(queue?.values.slice(1).map((row) => row[4])).toEqual([
+      "failed",
+      "failed",
+    ]);
+    expect(queue?.values.slice(1).map((row) => row[12])).toEqual([
+      "schema_drift",
       "schema_drift",
     ]);
   });
