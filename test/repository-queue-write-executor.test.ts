@@ -31,6 +31,7 @@ class FakeQueueAdapter implements AppsScriptQueueAdapter {
   readonly readSheets: string[] = [];
   enqueueError: Error | null = null;
   enqueueErrorAfterRecord: Error | null = null;
+  enqueueResult: EnqueueTasksResult | null = null;
 
   constructor(private readonly snapshot: SheetSnapshot) {}
 
@@ -65,7 +66,7 @@ class FakeQueueAdapter implements AppsScriptQueueAdapter {
       throw error;
     }
 
-    return {
+    return this.enqueueResult ?? {
       tasks: input.tasks.map((task, index) => ({
         taskId: task.taskId,
         sequence: index + 1,
@@ -307,6 +308,35 @@ describe("queued write executor and coordinator", () => {
 
     expect(adapter.enqueuedTasks).toHaveLength(2);
     expect(adapter.enqueuedTasks[1]).toEqual(adapter.enqueuedTasks[0]);
+  });
+
+  it("retains a batch when the enqueue response omits a requested task", async () => {
+    const adapter = new FakeQueueAdapter(emptyUsers);
+    adapter.enqueueResult = { tasks: [] };
+    const coordinator = createCoordinator(adapter);
+    const operation: RepositoryWriteTransactionOperation<User> = {
+      kind: "insert",
+      row: {
+        id: "u1",
+        email: "a@test.com",
+        age: undefined,
+        active: true,
+        _version: 1,
+      },
+    };
+
+    await expect(
+      coordinator.writeTransaction([operation], {
+        transactionId: "tx-invalid-enqueue-response",
+      }),
+    ).rejects.toThrow(/does not match the requested task batch/);
+
+    adapter.enqueueResult = null;
+
+    await expect(
+      coordinator.retryTransaction("tx-invalid-enqueue-response"),
+    ).resolves.toEqual([undefined]);
+    expect(adapter.enqueuedTasks).toHaveLength(2);
   });
 
   it("expires retained batches so ambiguous failures do not accumulate", async () => {
