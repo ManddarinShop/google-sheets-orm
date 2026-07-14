@@ -1789,46 +1789,98 @@ function markQueueTasks_(queueSheet, tasks, patch) {
   const updatedAtIndex =
     TYPED_SHEETS_TASK_QUEUE_HEADERS.indexOf("updatedAt") + 1;
 
-  tasks.forEach(function(task) {
-    if (patch.status !== undefined) {
-      queueSheet.getRange(task.rowNumber, statusIndex, 1, 1).setValues([
-        [patch.status],
-      ]);
-    }
+  if (patch.status !== undefined) {
+    writeQueueColumnValues_(queueSheet, tasks, statusIndex, patch.status);
+  }
 
-    if (patch.payloadJson !== undefined) {
-      queueSheet.getRange(task.rowNumber, payloadJsonIndex, 1, 1).setValues([
-        [patch.payloadJson],
-      ]);
-    }
+  if (patch.payloadJson !== undefined) {
+    writeQueueColumnValues_(
+      queueSheet,
+      tasks,
+      payloadJsonIndex,
+      patch.payloadJson,
+    );
+  }
 
-    if (patch.status === "processing") {
-      const nextAttempts = Number(task.attempts || 0) + 1;
+  if (patch.status === "processing") {
+    const nextAttempts = tasks.map(function(task) {
+      return Number(task.attempts || 0) + 1;
+    });
 
-      queueSheet.getRange(task.rowNumber, attemptsIndex, 1, 1).setValues([
-        [nextAttempts],
-      ]);
-      task.attempts = nextAttempts;
-    }
+    writeQueueColumnValues_(queueSheet, tasks, attemptsIndex, nextAttempts);
+    tasks.forEach(function(task, index) {
+      task.attempts = nextAttempts[index];
+    });
+  }
 
-    if (patch.lastErrorCode !== undefined) {
-      queueSheet.getRange(task.rowNumber, lastErrorCodeIndex, 1, 1).setValues([
-        [patch.lastErrorCode],
-      ]);
-    }
+  if (patch.lastErrorCode !== undefined) {
+    writeQueueColumnValues_(
+      queueSheet,
+      tasks,
+      lastErrorCodeIndex,
+      patch.lastErrorCode,
+    );
+  }
 
-    if (patch.lastErrorMessage !== undefined) {
-      queueSheet
-        .getRange(task.rowNumber, lastErrorMessageIndex, 1, 1)
-        .setValues([[patch.lastErrorMessage]]);
-    }
+  if (patch.lastErrorMessage !== undefined) {
+    writeQueueColumnValues_(
+      queueSheet,
+      tasks,
+      lastErrorMessageIndex,
+      patch.lastErrorMessage,
+    );
+  }
 
-    if (patch.updatedAt !== undefined) {
-      queueSheet.getRange(task.rowNumber, updatedAtIndex, 1, 1).setValues([
-        [patch.updatedAt],
-      ]);
-    }
+  if (patch.updatedAt !== undefined) {
+    writeQueueColumnValues_(
+      queueSheet,
+      tasks,
+      updatedAtIndex,
+      patch.updatedAt,
+    );
+  }
+}
+
+/** Writes one queue column in contiguous row ranges to minimize Sheets calls. */
+function writeQueueColumnValues_(queueSheet, tasks, columnIndex, values) {
+  if (tasks.length === 0) {
+    return;
+  }
+
+  const entries = tasks.map(function(task, index) {
+    return {
+      rowNumber: task.rowNumber,
+      value: Array.isArray(values) ? values[index] : values,
+    };
+  }).sort(function(left, right) {
+    return left.rowNumber - right.rowNumber;
   });
+
+  let rangeStart = 0;
+
+  while (rangeStart < entries.length) {
+    let rangeEnd = rangeStart + 1;
+
+    while (
+      rangeEnd < entries.length
+      && entries[rangeEnd].rowNumber === entries[rangeEnd - 1].rowNumber + 1
+    ) {
+      rangeEnd += 1;
+    }
+
+    queueSheet
+      .getRange(
+        entries[rangeStart].rowNumber,
+        columnIndex,
+        rangeEnd - rangeStart,
+        1,
+      )
+      .setValues(entries.slice(rangeStart, rangeEnd).map(function(entry) {
+        return [entry.value];
+      }));
+
+    rangeStart = rangeEnd;
+  }
 }
 
 
@@ -2678,25 +2730,62 @@ function areCanonicalCellsEqual_(left, right) {
 function applyQueueTransaction_(spreadsheet, tasks) {
   const tables = Object.create(null);
   const affectedSheetNames = [];
+  const tasksBySheet = Object.create(null);
+  const initialRowCounts = Object.create(null);
 
   tasks.forEach(function(task) {
     if (!tables[task.sheetName]) {
       tables[task.sheetName] = readCanonicalTableForTask_(spreadsheet, task);
       affectedSheetNames.push(task.sheetName);
+      tasksBySheet[task.sheetName] = [];
+      initialRowCounts[task.sheetName] = tables[task.sheetName].rows.length;
     } else {
       assertCanonicalTaskMatchesTable_(tables[task.sheetName], task);
     }
 
+    tasksBySheet[task.sheetName].push(task);
     applyTaskToCanonicalTable_(tables[task.sheetName], task);
   });
 
   affectedSheetNames.sort().forEach(function(sheetName) {
     try {
-      writeCanonicalTable_(tables[sheetName]);
+      const table = tables[sheetName];
+      const sheetTasks = tasksBySheet[sheetName];
+
+      if (isInsertOnlyCanonicalWrite_(sheetTasks)) {
+        appendCanonicalRows_(
+          table,
+          table.rows.slice(initialRowCounts[sheetName]),
+        );
+      } else {
+        writeCanonicalTable_(table);
+      }
     } catch (error) {
       throw markCanonicalWriteStarted_(error);
     }
   });
+}
+
+function isInsertOnlyCanonicalWrite_(tasks) {
+  return tasks.length > 0 && tasks.every(function(task) {
+    return task.operation === "insert";
+  });
+}
+
+/** Appends newly materialized rows without rewriting the existing table. */
+function appendCanonicalRows_(table, rows) {
+  if (rows.length === 0) {
+    return;
+  }
+
+  table.sheet
+    .getRange(
+      table.sheet.getLastRow() + 1,
+      1,
+      rows.length,
+      table.headers.length,
+    )
+    .setValues(rows);
 }
 
 function markCanonicalWriteStarted_(error) {
