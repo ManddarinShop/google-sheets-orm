@@ -591,6 +591,70 @@ describe("manual Apps Script gateway template system sheets", () => {
     expect(projection.values[1]).toEqual(["u1", "legacy@test.com", 1]);
   });
 
+  it("does not re-import stale projection rows after a queued delete", async () => {
+    const gateway = await loadGatewayTemplate();
+    const spreadsheet = new FakeSpreadsheet();
+    const projection = spreadsheet.insertSheet("Users");
+    projection.values = [
+      ["id", "email", "_version"],
+      ["u1", "legacy@test.com", 1],
+    ];
+
+    const systemSheets = gateway.initializeSystemSheets_(spreadsheet, {
+      sheetName: "Users",
+      headers: ["id", "email", "_version"],
+    });
+    const canonical = spreadsheet.sheets.get(systemSheets.canonicalSheetName);
+    const queue = spreadsheet.sheets.get(
+      gateway.TYPED_SHEETS_TASK_QUEUE_SHEET_NAME,
+    );
+
+    if (canonical === undefined || queue === undefined) {
+      throw new Error("Expected canonical and task queue sheets");
+    }
+
+    gateway.enqueueTasks_(spreadsheet, {
+      tasks: [
+        {
+          taskId: "task-delete-migrated-row",
+          transactionId: "tx-delete-migrated-row",
+          transactionIndex: 0,
+          operation: "delete",
+          sheetName: "Users",
+          keyHeader: "id",
+          keyValue: "u1",
+          expectedVersion: 1,
+          payloadJson: JSON.stringify({
+            rowToDelete: {
+              id: "u1",
+              email: "legacy@test.com",
+              _version: 1,
+            },
+          }),
+        },
+      ],
+    });
+
+    expect(gateway.processTaskQueue_(spreadsheet, {})).toMatchObject({
+      processedTransactions: 1,
+      processedTasks: 1,
+      remainingPendingTasks: 0,
+    });
+    const canonicalAfterDelete = canonical.values.map((row) => [...row]);
+
+    gateway.initializeSystemSheets_(spreadsheet, {
+      sheetName: "Users",
+      headers: ["id", "email", "_version"],
+    });
+
+    expect(canonical.values).toEqual(canonicalAfterDelete);
+    expect(canonical.values).not.toContainEqual([
+      "u1",
+      "legacy@test.com",
+      1,
+    ]);
+  });
+
   it("rejects projection schema drift during queued initialization", async () => {
     const gateway = await loadGatewayTemplate();
     const spreadsheet = new FakeSpreadsheet();

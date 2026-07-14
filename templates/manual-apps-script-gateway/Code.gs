@@ -9,6 +9,7 @@ const TYPED_SHEETS_GATEWAY_URL = "";
 const TYPED_SHEETS_INTERNAL_PREFIX = "_typed_sheets_";
 const TYPED_SHEETS_DATA_SHEET_PREFIX = "_typed_sheets_data_";
 const TYPED_SHEETS_META_MAPPING_KEY_PREFIX = "sheetMapping:";
+const TYPED_SHEETS_META_MIGRATION_KEY_PREFIX = "projectionMigration:";
 const TYPED_SHEETS_MAX_SHEET_NAME_LENGTH = 100;
 const TYPED_SHEETS_TASK_QUEUE_SHEET_NAME = "_typed_sheets_task_queue";
 // Apps Script executions cannot retain a document lock after they terminate.
@@ -370,13 +371,31 @@ function migrateProjectionToCanonicalIfNeeded_(
   const projectionSheet = getSheet_(spreadsheet, logicalSheetName);
   const canonicalSheet = getSheet_(spreadsheet, canonicalSheetName);
 
+  if (isProjectionMigrationCompleted_(
+    spreadsheet,
+    logicalSheetName,
+    canonicalSheetName,
+  )) {
+    return;
+  }
+
   if (canonicalSheet.getLastRow() > 1) {
+    markProjectionMigrationCompleted_(
+      spreadsheet,
+      logicalSheetName,
+      canonicalSheetName,
+    );
     return;
   }
 
   const projectionLastRow = projectionSheet.getLastRow();
 
   if (projectionLastRow <= 1) {
+    markProjectionMigrationCompleted_(
+      spreadsheet,
+      logicalSheetName,
+      canonicalSheetName,
+    );
     return;
   }
 
@@ -400,6 +419,12 @@ function migrateProjectionToCanonicalIfNeeded_(
   canonicalSheet
     .getRange(2, 1, rows.length, headers.length)
     .setValues(rows);
+
+  markProjectionMigrationCompleted_(
+    spreadsheet,
+    logicalSheetName,
+    canonicalSheetName,
+  );
 }
 
 /**
@@ -2379,6 +2404,66 @@ function persistCanonicalSheetMapping_(spreadsheet, mapping) {
   const rows = readMetaRows_(sheet);
   const key = TYPED_SHEETS_META_MAPPING_KEY_PREFIX + mapping.logicalSheetName;
   const value = JSON.stringify(mapping);
+
+  for (let index = 0; index < rows.length; index += 1) {
+    if (rows[index][0] === key) {
+      sheet.getRange(index + 2, 2, 1, 1).setValues([[value]]);
+      return;
+    }
+  }
+
+  sheet.getRange(sheet.getLastRow() + 1, 1, 1, 2).setValues([[key, value]]);
+}
+
+function isProjectionMigrationCompleted_(
+  spreadsheet,
+  logicalSheetName,
+  canonicalSheetName,
+) {
+  const sheet = spreadsheet.getSheetByName(TYPED_SHEETS_META_SHEET_NAME);
+
+  if (!sheet) {
+    return false;
+  }
+
+  const key = TYPED_SHEETS_META_MIGRATION_KEY_PREFIX + logicalSheetName;
+  const rows = readMetaRows_(sheet);
+
+  for (let index = 0; index < rows.length; index += 1) {
+    if (rows[index][0] !== key) {
+      continue;
+    }
+
+    try {
+      const migration = JSON.parse(String(rows[index][1]));
+
+      return migration
+        && migration.status === "completed"
+        && migration.canonicalSheetName === canonicalSheetName;
+    } catch (error) {
+      throw gatewayError_(
+        "invalid_meta",
+        "Invalid projection migration metadata for " + logicalSheetName,
+      );
+    }
+  }
+
+  return false;
+}
+
+function markProjectionMigrationCompleted_(
+  spreadsheet,
+  logicalSheetName,
+  canonicalSheetName,
+) {
+  const sheet = ensureMetaSheetStructure_(spreadsheet);
+  const rows = readMetaRows_(sheet);
+  const key = TYPED_SHEETS_META_MIGRATION_KEY_PREFIX + logicalSheetName;
+  const value = JSON.stringify({
+    logicalSheetName: logicalSheetName,
+    canonicalSheetName: canonicalSheetName,
+    status: "completed",
+  });
 
   for (let index = 0; index < rows.length; index += 1) {
     if (rows[index][0] === key) {
