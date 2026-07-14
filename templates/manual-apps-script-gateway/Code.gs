@@ -3354,7 +3354,8 @@ function getTypedSheetsConfig_() {
 function ensureMetaSheet_(spreadsheet, config) {
   const sheet = ensureMetaSheetStructure_(spreadsheet);
   const preservedRows = readMetaRows_(sheet).filter(function(row) {
-    return row[0].indexOf(TYPED_SHEETS_META_MAPPING_KEY_PREFIX) === 0;
+    return row[0].indexOf(TYPED_SHEETS_META_MAPPING_KEY_PREFIX) === 0
+      || row[0].indexOf(TYPED_SHEETS_META_MIGRATION_KEY_PREFIX) === 0;
   });
   const rows = [
     ["spreadsheetUrl", config.spreadsheetUrl],
