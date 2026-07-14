@@ -519,46 +519,98 @@ function markQueueTasks_(queueSheet, tasks, patch) {
   const updatedAtIndex =
     TYPED_SHEETS_TASK_QUEUE_HEADERS.indexOf("updatedAt") + 1;
 
-  tasks.forEach(function(task) {
-    if (patch.status !== undefined) {
-      queueSheet.getRange(task.rowNumber, statusIndex, 1, 1).setValues([
-        [patch.status],
-      ]);
-    }
+  if (patch.status !== undefined) {
+    writeQueueColumnValues_(queueSheet, tasks, statusIndex, patch.status);
+  }
 
-    if (patch.payloadJson !== undefined) {
-      queueSheet.getRange(task.rowNumber, payloadJsonIndex, 1, 1).setValues([
-        [patch.payloadJson],
-      ]);
-    }
+  if (patch.payloadJson !== undefined) {
+    writeQueueColumnValues_(
+      queueSheet,
+      tasks,
+      payloadJsonIndex,
+      patch.payloadJson,
+    );
+  }
 
-    if (patch.status === "processing") {
-      const nextAttempts = Number(task.attempts || 0) + 1;
+  if (patch.status === "processing") {
+    const nextAttempts = tasks.map(function(task) {
+      return Number(task.attempts || 0) + 1;
+    });
 
-      queueSheet.getRange(task.rowNumber, attemptsIndex, 1, 1).setValues([
-        [nextAttempts],
-      ]);
-      task.attempts = nextAttempts;
-    }
+    writeQueueColumnValues_(queueSheet, tasks, attemptsIndex, nextAttempts);
+    tasks.forEach(function(task, index) {
+      task.attempts = nextAttempts[index];
+    });
+  }
 
-    if (patch.lastErrorCode !== undefined) {
-      queueSheet.getRange(task.rowNumber, lastErrorCodeIndex, 1, 1).setValues([
-        [patch.lastErrorCode],
-      ]);
-    }
+  if (patch.lastErrorCode !== undefined) {
+    writeQueueColumnValues_(
+      queueSheet,
+      tasks,
+      lastErrorCodeIndex,
+      patch.lastErrorCode,
+    );
+  }
 
-    if (patch.lastErrorMessage !== undefined) {
-      queueSheet
-        .getRange(task.rowNumber, lastErrorMessageIndex, 1, 1)
-        .setValues([[patch.lastErrorMessage]]);
-    }
+  if (patch.lastErrorMessage !== undefined) {
+    writeQueueColumnValues_(
+      queueSheet,
+      tasks,
+      lastErrorMessageIndex,
+      patch.lastErrorMessage,
+    );
+  }
 
-    if (patch.updatedAt !== undefined) {
-      queueSheet.getRange(task.rowNumber, updatedAtIndex, 1, 1).setValues([
-        [patch.updatedAt],
-      ]);
-    }
+  if (patch.updatedAt !== undefined) {
+    writeQueueColumnValues_(
+      queueSheet,
+      tasks,
+      updatedAtIndex,
+      patch.updatedAt,
+    );
+  }
+}
+
+/** Writes one queue column in contiguous row ranges to minimize Sheets calls. */
+function writeQueueColumnValues_(queueSheet, tasks, columnIndex, values) {
+  if (tasks.length === 0) {
+    return;
+  }
+
+  const entries = tasks.map(function(task, index) {
+    return {
+      rowNumber: task.rowNumber,
+      value: Array.isArray(values) ? values[index] : values,
+    };
+  }).sort(function(left, right) {
+    return left.rowNumber - right.rowNumber;
   });
+
+  let rangeStart = 0;
+
+  while (rangeStart < entries.length) {
+    let rangeEnd = rangeStart + 1;
+
+    while (
+      rangeEnd < entries.length
+      && entries[rangeEnd].rowNumber === entries[rangeEnd - 1].rowNumber + 1
+    ) {
+      rangeEnd += 1;
+    }
+
+    queueSheet
+      .getRange(
+        entries[rangeStart].rowNumber,
+        columnIndex,
+        rangeEnd - rangeStart,
+        1,
+      )
+      .setValues(entries.slice(rangeStart, rangeEnd).map(function(entry) {
+        return [entry.value];
+      }));
+
+    rangeStart = rangeEnd;
+  }
 }
 
 

@@ -3,25 +3,62 @@
 function applyQueueTransaction_(spreadsheet, tasks) {
   const tables = Object.create(null);
   const affectedSheetNames = [];
+  const tasksBySheet = Object.create(null);
+  const initialRowCounts = Object.create(null);
 
   tasks.forEach(function(task) {
     if (!tables[task.sheetName]) {
       tables[task.sheetName] = readCanonicalTableForTask_(spreadsheet, task);
       affectedSheetNames.push(task.sheetName);
+      tasksBySheet[task.sheetName] = [];
+      initialRowCounts[task.sheetName] = tables[task.sheetName].rows.length;
     } else {
       assertCanonicalTaskMatchesTable_(tables[task.sheetName], task);
     }
 
+    tasksBySheet[task.sheetName].push(task);
     applyTaskToCanonicalTable_(tables[task.sheetName], task);
   });
 
   affectedSheetNames.sort().forEach(function(sheetName) {
     try {
-      writeCanonicalTable_(tables[sheetName]);
+      const table = tables[sheetName];
+      const sheetTasks = tasksBySheet[sheetName];
+
+      if (isInsertOnlyCanonicalWrite_(sheetTasks)) {
+        appendCanonicalRows_(
+          table,
+          table.rows.slice(initialRowCounts[sheetName]),
+        );
+      } else {
+        writeCanonicalTable_(table);
+      }
     } catch (error) {
       throw markCanonicalWriteStarted_(error);
     }
   });
+}
+
+function isInsertOnlyCanonicalWrite_(tasks) {
+  return tasks.length > 0 && tasks.every(function(task) {
+    return task.operation === "insert";
+  });
+}
+
+/** Appends newly materialized rows without rewriting the existing table. */
+function appendCanonicalRows_(table, rows) {
+  if (rows.length === 0) {
+    return;
+  }
+
+  table.sheet
+    .getRange(
+      table.sheet.getLastRow() + 1,
+      1,
+      rows.length,
+      table.headers.length,
+    )
+    .setValues(rows);
 }
 
 function markCanonicalWriteStarted_(error) {
