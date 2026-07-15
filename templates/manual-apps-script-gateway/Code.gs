@@ -1166,8 +1166,9 @@ function requireGatewayUrl_(gatewayUrl) {
 
 function enqueueTasks_(spreadsheet, request) {
   const tasks = requireQueueTasks_(request.tasks, "tasks");
-  const queueSheet = ensureTaskQueueSheet_(spreadsheet);
+  const queueSheet = getTaskQueueSheetForEnqueue_(spreadsheet);
   const queueState = readTaskQueueState_(queueSheet);
+  persistMissingTaskFingerprints_(queueSheet, queueState);
   const now = new Date().toISOString();
   const seenTaskIds = Object.create(null);
   const rows = [];
@@ -1252,7 +1253,7 @@ function enqueueTasks_(spreadsheet, request) {
   if (rows.length > 0) {
     queueSheet
       .getRange(
-        queueSheet.getLastRow() + 1,
+        queueState.lastRow + 1,
         1,
         rows.length,
         TYPED_SHEETS_TASK_QUEUE_HEADERS.length,
@@ -1319,6 +1320,39 @@ function ensureTaskQueueSheet_(spreadsheet) {
   // backfilling every row. Resume that work on every queue access so a blank
   // fingerprint never becomes a permanent redacted-task replay failure.
   backfillMissingTaskFingerprints_(queueSheet);
+
+  return queueSheet;
+}
+
+/**
+ * Returns the queue sheet for the hot enqueue path.
+ *
+ * Enqueue still reads the queue state to preserve idempotency and sequence
+ * allocation, but a current queue schema does not need to be hidden,
+ * protected, or fingerprint-backfilled on every request. Missing, empty, and
+ * legacy sheets use the full initializer so creation and migration keep their
+ * existing safety checks.
+ */
+function getTaskQueueSheetForEnqueue_(spreadsheet) {
+  const queueSheet = spreadsheet.getSheetByName(
+    TYPED_SHEETS_TASK_QUEUE_SHEET_NAME,
+  );
+
+  if (queueSheet === null || isHeaderRowEmpty_(queueSheet)) {
+    return ensureTaskQueueSheet_(spreadsheet);
+  }
+
+  const headerValues = readHeaderRow_(queueSheet);
+
+  if (isLegacyTaskQueueHeader_(headerValues)) {
+    return ensureTaskQueueSheet_(spreadsheet);
+  }
+
+  assertExpectedHeaders_(
+    headerValues,
+    TYPED_SHEETS_TASK_QUEUE_HEADERS,
+    "enqueueTasks",
+  );
 
   return queueSheet;
 }
@@ -1449,7 +1483,9 @@ function isRedactedTaskPayload_(payloadJson) {
 function readTaskQueueState_(queueSheet) {
   const lastRow = queueSheet.getLastRow();
   const state = {
+    lastRow: lastRow,
     maxSequence: 0,
+    missingFingerprintTasks: [],
     tasksById: Object.create(null),
     tasksByTransactionId: Object.create(null),
   };
@@ -1484,12 +1520,13 @@ function readTaskQueueState_(queueSheet) {
     )
     .getValues();
 
-  rows.forEach(function(row) {
+  rows.forEach(function(row, rowIndex) {
     const taskId = String(row[taskIdIndex] || "");
     const sequence = Number(row[sequenceIndex]);
 
     if (taskId !== "") {
       const task = {
+        rowNumber: rowIndex + 2,
         taskId: taskId,
         transactionId: String(row[transactionIdIndex] || ""),
         transactionIndex: Number(row[transactionIndexIndex]),
@@ -1507,7 +1544,12 @@ function readTaskQueueState_(queueSheet) {
         taskFingerprint: String(row[taskFingerprintIndex] || ""),
       };
 
+      const hadMissingFingerprint = task.taskFingerprint === "";
       assertStoredTaskFingerprint_(task);
+
+      if (hadMissingFingerprint && task.taskFingerprint !== "") {
+        state.missingFingerprintTasks.push(task);
+      }
 
       state.tasksById[taskId] = task;
       if (!state.tasksByTransactionId[task.transactionId]) {
@@ -1522,6 +1564,28 @@ function readTaskQueueState_(queueSheet) {
   });
 
   return state;
+}
+
+/**
+ * Persists only fingerprints discovered as missing during the state read.
+ * This keeps interrupted migrations recoverable without rescanning the queue
+ * a second time or rewriting the entire fingerprint column on every enqueue.
+ */
+function persistMissingTaskFingerprints_(queueSheet, queueState) {
+  if (queueState.missingFingerprintTasks.length === 0) {
+    return;
+  }
+
+  const fingerprintColumn =
+    TYPED_SHEETS_TASK_QUEUE_HEADERS.indexOf("taskFingerprint") + 1;
+  writeQueueColumnValues_(
+    queueSheet,
+    queueState.missingFingerprintTasks,
+    fingerprintColumn,
+    queueState.missingFingerprintTasks.map(function(task) {
+      return task.taskFingerprint;
+    }),
+  );
 }
 
 function isSameQueuedTask_(existingTask, task) {

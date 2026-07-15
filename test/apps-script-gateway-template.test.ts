@@ -992,6 +992,19 @@ describe("manual Apps Script gateway template system sheets", () => {
         },
       ],
     });
+    const queue = spreadsheet.sheets.get("_typed_sheets_task_queue");
+
+    if (queue === undefined) {
+      throw new Error("Expected task queue sheet");
+    }
+
+    // A queue migration can leave a blank fingerprint until the next enqueue.
+    // The hot path repairs only that cell instead of rewriting the full
+    // fingerprint column or re-protecting the sheet.
+    const firstTaskFingerprint = queue.values[1]![16];
+    queue.values[1]![16] = "";
+    queue.setValuesCalls.length = 0;
+
     const secondResult = gateway.enqueueTasks_(spreadsheet, {
       tasks: [
         {
@@ -1027,11 +1040,24 @@ describe("manual Apps Script gateway template system sheets", () => {
       tasks: [{ taskId: "task-3", sequence: 3 }],
     });
 
-    const queue = spreadsheet.sheets.get("_typed_sheets_task_queue");
-
     expect(queue?.values[0]).toEqual(gateway.TYPED_SHEETS_TASK_QUEUE_HEADERS);
-    expect(queue?.hideCalls).toBe(2);
-    expect(queue?.protectCalls).toBe(2);
+    expect(queue?.hideCalls).toBe(1);
+    expect(queue?.protectCalls).toBe(1);
+    expect(queue.values[1]?.[16]).toBe(firstTaskFingerprint);
+    expect(queue.setValuesCalls).toEqual([
+      {
+        row: 2,
+        column: 17,
+        rowCount: 1,
+        columnCount: 1,
+      },
+      {
+        row: 4,
+        column: 1,
+        rowCount: 1,
+        columnCount: gateway.TYPED_SHEETS_TASK_QUEUE_HEADERS.length,
+      },
+    ]);
     expect(queue?.values.slice(1)).toEqual([
       [
         "task-1",

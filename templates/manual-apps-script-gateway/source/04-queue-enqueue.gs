@@ -2,8 +2,9 @@
 
 function enqueueTasks_(spreadsheet, request) {
   const tasks = requireQueueTasks_(request.tasks, "tasks");
-  const queueSheet = ensureTaskQueueSheet_(spreadsheet);
+  const queueSheet = getTaskQueueSheetForEnqueue_(spreadsheet);
   const queueState = readTaskQueueState_(queueSheet);
+  persistMissingTaskFingerprints_(queueSheet, queueState);
   const now = new Date().toISOString();
   const seenTaskIds = Object.create(null);
   const rows = [];
@@ -88,7 +89,7 @@ function enqueueTasks_(spreadsheet, request) {
   if (rows.length > 0) {
     queueSheet
       .getRange(
-        queueSheet.getLastRow() + 1,
+        queueState.lastRow + 1,
         1,
         rows.length,
         TYPED_SHEETS_TASK_QUEUE_HEADERS.length,
