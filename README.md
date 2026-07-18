@@ -256,6 +256,13 @@ Entity reads and writes are scoped to the transaction callback. Queue
 retry/materialization details are internal implementation concerns; the public
 API does not expose a transaction handle or queue task payload.
 
+Queued repositories use a repository-local cache of confirmed canonical reads
+for 5 seconds by default. Configure it with `cache: { ttlMs: 1000 }`, disable it
+with `cache: { enabled: false }`, or use `ttlMs: 0` to disable reuse. Queued
+payloads are never inserted into the cache; any queued write invalidates the
+cache and a later read refreshes from the canonical sheet. This cache is local
+to one Node.js process and is not a cross-server consistency mechanism.
+
 ## Documentation
 
 - [Safety model and adapters](docs/safety-and-adapters.md)
@@ -269,7 +276,8 @@ API does not expose a transaction handle or queue task payload.
 
 This project currently does not support joins, relations, SQL execution,
 automatic retry/backoff, browser support, or automatic Apps Script gateway
-installation. Queued processing is explicit, queued transactions do not provide
+installation. Direct repositories do not provide read caching. Queued
+processing is explicit, queued transactions do not provide
 database-level atomicity across separate canonical sheets, and the visible
 projection is not automatically synchronized after processing.
 

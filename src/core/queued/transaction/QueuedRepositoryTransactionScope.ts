@@ -5,6 +5,7 @@ import type { RepositoryQueueWriteCoordinator } from "./QueuedRepositoryTransact
 import type {
   RepositoryWriteTransactionOperation,
 } from "../writer/QueuedSheetWriteExecutor.js";
+import type { RepositorySnapshot } from "../writer/QueuedSheetWriteExecutor.js";
 
 export interface InternalQueuedRepositoryTransactionScope<
   T extends object,
@@ -20,10 +21,11 @@ export interface InternalQueuedRepositoryTransactionScope<
 export interface CreateQueuedRepositoryTransactionScopeInput<
   T extends object,
 > {
-  findAll(): Promise<Array<T>>;
+  readSnapshot(): Promise<RepositorySnapshot<T>>;
   key: keyof T & string;
   writeCoordinator: RepositoryQueueWriteCoordinator<T>;
   transactionId?: string;
+  onWriteAttempt?(): void;
 }
 
 /**
@@ -41,6 +43,7 @@ export function createQueuedRepositoryTransactionScope<
   let inFlightOperations: Array<RepositoryWriteTransactionOperation<T>> | null =
     null;
   let inFlightTransactionId: string | null = input.transactionId ?? null;
+  let canonicalSnapshot: RepositorySnapshot<T> | null = null;
   let closed = false;
 
   function assertScopeOpen(): void {
@@ -119,10 +122,14 @@ export function createQueuedRepositoryTransactionScope<
 
     inFlightOperations = operations;
     inFlightTransactionId = transactionId;
+    input.onWriteAttempt?.();
 
-    const result = await input.writeCoordinator.writeTransaction(operations, {
-      transactionId,
-    });
+    const result = await input.writeCoordinator.writeTransaction(
+      operations,
+      canonicalSnapshot === null
+        ? { transactionId }
+        : { transactionId, intentSnapshot: canonicalSnapshot },
+    );
 
     pendingOperations.splice(0, operations.length);
     inFlightOperations = null;
@@ -148,6 +155,7 @@ export function createQueuedRepositoryTransactionScope<
       );
     }
 
+    input.onWriteAttempt?.();
     const result = await input.writeCoordinator.retryTransaction(transactionId);
     const operationsToClear = inFlightOperations?.length ?? 0;
 
@@ -217,7 +225,10 @@ export function createQueuedRepositoryTransactionScope<
 
   async function findAll(): Promise<Array<T>> {
     assertScopeOpen();
-    const rows = await input.findAll();
+    canonicalSnapshot ??= await input.readSnapshot();
+    const rows = canonicalSnapshot.parsedRows.map((parsedRow) =>
+      cloneRow(parsedRow.row),
+    );
 
     for (const row of rows) {
       const entityKey = String(row[input.key]);

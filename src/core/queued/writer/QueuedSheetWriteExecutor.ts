@@ -163,9 +163,10 @@ async function materializeRepositoryTransaction<
   const { key } = input;
   const isRetryMaterialization = intentSnapshot !== undefined;
   const snapshot =
-    intentSnapshot === undefined
-      ? await readRepositorySnapshot(input)
-      : intentSnapshot;
+    intentSnapshot
+      ?? (isInsertOnlyOperations(operations)
+        ? createEmptyRepositorySnapshot(input)
+        : await readRepositorySnapshot(input));
   const rowsById = new Map(
     snapshot.parsedRows.map((parsedRow) => [
       String(parsedRow.row[key]),
@@ -305,6 +306,26 @@ async function materializeRepositoryTransaction<
         : null,
     intentSnapshot: snapshot,
   };
+}
+
+/**
+ * Creates the optimistic base used by insert-only batches. Duplicate keys are
+ * intentionally validated by the canonical processor, so a first insert does
+ * not need a full canonical read before its task can be enqueued.
+ */
+function createEmptyRepositorySnapshot<T extends object>(input: {
+  columns: ColumnMap<T>;
+}): RepositorySnapshot<T> {
+  return {
+    headers: Object.keys(input.columns),
+    parsedRows: [],
+  };
+}
+
+function isInsertOnlyOperations<T extends object>(
+  operations: Array<RepositoryWriteTransactionOperation<T>>,
+): boolean {
+  return operations.every((operation) => operation.kind === "insert");
 }
 
 function createTaskBatchFingerprint(tasks: EnqueueTasksInput): string {
