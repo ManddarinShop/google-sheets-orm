@@ -54,6 +54,7 @@ export type {
 } from "./core/repository/index.js";
 export type {
   CreateQueuedSheetRepositoryInput,
+  QueuedRepositoryReadCacheOptions,
   QueuedRepositoryQueueProcessor,
   QueuedRepositoryQueueProcessingStatus,
   QueuedRepositoryQueueProcessingSummary,

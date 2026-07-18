@@ -15,4 +15,7 @@ export type {
   QueuedRepositoryQueueProcessingStatus,
   QueuedRepositoryQueueProcessingSummary,
 } from "./processor/QueuedRepositoryQueueProcessor.js";
-export type { QueuedColumnMap } from "./public/QueuedRepositoryApi.js";
+export type {
+  QueuedColumnMap,
+  QueuedRepositoryReadCacheOptions,
+} from "./public/QueuedRepositoryApi.js";

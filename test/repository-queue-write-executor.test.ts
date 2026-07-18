@@ -232,28 +232,28 @@ describe("queued write executor and coordinator", () => {
     });
   });
 
-  it("rejects duplicate inserts before enqueueing", async () => {
+  it("does not read canonical state for an insert-only batch", async () => {
     const adapter = new FakeQueueAdapter(usersWithRows);
     const executor = createExecutor(adapter);
 
-    await expect(
-      executor.materializeQueueBatch(
-        [
-          {
-            kind: "insert",
-            row: {
-              id: "u1",
-              email: "duplicate@test.com",
-              age: 21,
-              active: false,
-              _version: 1,
-            },
+    const materialized = await executor.materializeQueueBatch(
+      [
+        {
+          kind: "insert",
+          row: {
+            id: "u1",
+            email: "duplicate@test.com",
+            age: 21,
+            active: false,
+            _version: 1,
           },
-        ],
-        { transactionId: "tx-duplicate" },
-      ),
-    ).rejects.toBeInstanceOf(SchemaDriftError);
+        },
+      ],
+      { transactionId: "tx-duplicate" },
+    );
 
+    expect(materialized.tasks?.tasks[0]?.operation).toBe("insert");
+    expect(adapter.readSheets).toEqual([]);
     expect(adapter.enqueuedTasks).toEqual([]);
   });
 

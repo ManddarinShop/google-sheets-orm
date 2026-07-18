@@ -1,7 +1,13 @@
 import type { AppsScriptQueueAdapter } from "../../../adapter/queued/QueuedSheetAdapter.js";
 import type { SheetSnapshot } from "../../../adapter/shared/SheetAdapter.js";
-import { parseRow, assertSchema } from "../../schema/index.js";
-import { assertUniqueKeys } from "../../shared/RepositoryRowHelpers.js";
+import {
+  createQueuedRepositoryReadCache,
+} from "../cache/QueuedRepositoryReadCache.js";
+import { assertSchema } from "../../schema/index.js";
+import {
+  assertUniqueKeys,
+  parseRepositoryRows,
+} from "../../shared/RepositoryRowHelpers.js";
 import {
   createQueuedRepositoryTransactionCoordinator,
 } from "../transaction/QueuedRepositoryTransactionCoordinator.js";
@@ -12,6 +18,7 @@ import {
   createQueuedRepositoryTransactionScope,
   type InternalQueuedRepositoryTransactionScope,
 } from "../transaction/QueuedRepositoryTransactionScope.js";
+import type { RepositorySnapshot } from "../writer/QueuedSheetWriteExecutor.js";
 import type {
   CreateQueuedSheetRepositoryInput,
   QueuedRepositoryTransaction,
@@ -29,12 +36,14 @@ export function createQueuedSheetRepository<
   input: CreateQueuedSheetRepositoryInput<T>,
 ): QueuedSheetRepository<T> {
   const { adapter, sheetName, key, columns } = input;
+  const readCache = createQueuedRepositoryReadCache<T>(input.cache);
   const writeCoordinator = createQueuedRepositoryTransactionCoordinator({
     executor: createRepositoryQueueWriteExecutor(input),
   });
 
   async function ensureSheet(): Promise<void> {
     const headers = Object.keys(columns);
+    readCache.invalidate();
 
     // Validate the queued repository contract before asking the gateway to
     // create system sheets. This keeps missing key/version columns from
@@ -46,10 +55,17 @@ export function createQueuedSheetRepository<
     });
 
     await adapter.initializeSystemSheets(sheetName, headers);
+    readCache.invalidate();
   }
 
-  /** Reads canonical rows for the current transaction scope. */
-  async function findAll(): Promise<Array<T>> {
+  /** Reads and validates one canonical snapshot for a transaction scope. */
+  async function readSnapshot(): Promise<RepositorySnapshot<T>> {
+    const cachedSnapshot = readCache.get();
+
+    if (cachedSnapshot !== null) {
+      return cachedSnapshot;
+    }
+
     const snapshot = await readQueuedRepositorySheet(adapter, sheetName);
 
     assertSchema({
@@ -58,25 +74,34 @@ export function createQueuedSheetRepository<
       columns,
     });
 
-    const rows = snapshot.rows.map((row) =>
-      parseRow<T>({
-        headers: snapshot.headers,
-        cells: row.cells,
-        columns,
-      }),
+    const parsedRows = parseRepositoryRows<T>({
+      headers: snapshot.headers,
+      sheetRows: snapshot.rows,
+      columns,
+    });
+
+    assertUniqueKeys(
+      parsedRows.map((parsedRow) => parsedRow.row),
+      key,
     );
 
-    assertUniqueKeys(rows, key);
-    return rows;
+    const repositorySnapshot = {
+      headers: snapshot.headers,
+      parsedRows,
+    };
+
+    readCache.set(repositorySnapshot);
+    return repositorySnapshot;
   }
 
   /** Creates the one unit of work used by a manual or future ambient transaction. */
   function createRepositoryTransactionScope():
     InternalQueuedRepositoryTransactionScope<T> {
     return createQueuedRepositoryTransactionScope({
-      findAll,
+      readSnapshot,
       key,
       writeCoordinator,
+      onWriteAttempt: () => readCache.invalidate(),
     });
   }
 
