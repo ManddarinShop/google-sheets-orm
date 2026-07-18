@@ -3,6 +3,9 @@ AGENTS.md
 typed-sheets-plan*.md
 typed-sheets-mvp-scope*.md
 .local/
+review/
+design/
+templates/manual-apps-script-gateway/
 
 # Dependencies and build output
 node_modules/
