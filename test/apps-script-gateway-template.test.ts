@@ -122,6 +122,12 @@ class FakeSheet {
   removedEditors: string[][] = [];
   domainEditValues: boolean[] = [];
   clearCalls = 0;
+  readonly setValuesCalls: Array<{
+    row: number;
+    column: number;
+    rowCount: number;
+    columnCount: number;
+  }> = [];
   clearContentRanges: Array<{
     row: number;
     column: number;
@@ -201,6 +207,13 @@ class FakeRange {
   }
 
   setValues(values: unknown[][]): void {
+    this.sheet.setValuesCalls.push({
+      row: this.row,
+      column: this.column,
+      rowCount: this.rowCount,
+      columnCount: this.columnCount,
+    });
+
     const failure = this.sheet.getSetValuesFailure({
       row: this.row,
       column: this.column,
@@ -979,6 +992,19 @@ describe("manual Apps Script gateway template system sheets", () => {
         },
       ],
     });
+    const queue = spreadsheet.sheets.get("_typed_sheets_task_queue");
+
+    if (queue === undefined) {
+      throw new Error("Expected task queue sheet");
+    }
+
+    // A queue migration can leave a blank fingerprint until the next enqueue.
+    // The hot path repairs only that cell instead of rewriting the full
+    // fingerprint column or re-protecting the sheet.
+    const firstTaskFingerprint = queue.values[1]![16];
+    queue.values[1]![16] = "";
+    queue.setValuesCalls.length = 0;
+
     const secondResult = gateway.enqueueTasks_(spreadsheet, {
       tasks: [
         {
@@ -1014,11 +1040,24 @@ describe("manual Apps Script gateway template system sheets", () => {
       tasks: [{ taskId: "task-3", sequence: 3 }],
     });
 
-    const queue = spreadsheet.sheets.get("_typed_sheets_task_queue");
-
     expect(queue?.values[0]).toEqual(gateway.TYPED_SHEETS_TASK_QUEUE_HEADERS);
-    expect(queue?.hideCalls).toBe(2);
-    expect(queue?.protectCalls).toBe(2);
+    expect(queue?.hideCalls).toBe(1);
+    expect(queue?.protectCalls).toBe(1);
+    expect(queue.values[1]?.[16]).toBe(firstTaskFingerprint);
+    expect(queue.setValuesCalls).toEqual([
+      {
+        row: 2,
+        column: 17,
+        rowCount: 1,
+        columnCount: 1,
+      },
+      {
+        row: 4,
+        column: 1,
+        rowCount: 1,
+        columnCount: gateway.TYPED_SHEETS_TASK_QUEUE_HEADERS.length,
+      },
+    ]);
     expect(queue?.values.slice(1)).toEqual([
       [
         "task-1",
@@ -2468,6 +2507,78 @@ describe("manual Apps Script gateway template system sheets", () => {
       "done",
       "pending",
     ]);
+  });
+
+  it("appends insert-only canonical rows without rewriting the table", async () => {
+    const gateway = await loadGatewayTemplate();
+    const spreadsheet = new FakeSpreadsheet();
+    const systemSheets = gateway.initializeSystemSheets_(spreadsheet, {
+      sheetName: "Users",
+      headers: ["id", "_version"],
+    });
+    const canonical = spreadsheet.sheets.get(systemSheets.canonicalSheetName);
+
+    gateway.enqueueTasks_(spreadsheet, {
+      tasks: [
+        {
+          taskId: "task-append-1",
+          transactionId: "tx-append",
+          transactionIndex: 0,
+          operation: "insert",
+          sheetName: "Users",
+          keyHeader: "id",
+          keyValue: "u1",
+          expectedVersion: null,
+          payloadJson: JSON.stringify({
+            row: { id: "u1", _version: 1 },
+          }),
+        },
+        {
+          taskId: "task-append-2",
+          transactionId: "tx-append",
+          transactionIndex: 1,
+          operation: "insert",
+          sheetName: "Users",
+          keyHeader: "id",
+          keyValue: "u2",
+          expectedVersion: null,
+          payloadJson: JSON.stringify({
+            row: { id: "u2", _version: 1 },
+          }),
+        },
+      ],
+    });
+
+    expect(gateway.processTaskQueue_(spreadsheet, {})).toMatchObject({
+      processedTransactions: 1,
+      processedTasks: 2,
+      failedTransactions: 0,
+      failedTasks: 0,
+    });
+    expect(canonical?.values).toEqual([
+      ["id", "_version"],
+      ["u1", 1],
+      ["u2", 1],
+    ]);
+    expect(canonical?.clearContentRanges).toEqual([]);
+    expect(canonical?.setValuesCalls.filter((call) => call.row > 1)).toEqual([
+      {
+        row: 2,
+        column: 1,
+        rowCount: 2,
+        columnCount: 2,
+      },
+    ]);
+
+    const queue = spreadsheet.sheets.get(
+      gateway.TYPED_SHEETS_TASK_QUEUE_SHEET_NAME,
+    );
+    const queueStatusWrites = queue?.setValuesCalls.filter(
+      (call) => call.row > 1,
+    );
+
+    expect(queueStatusWrites).toHaveLength(9);
+    expect(queueStatusWrites?.every((call) => call.rowCount === 2)).toBe(true);
   });
 
   it("holds incomplete pending transaction groups", async () => {
