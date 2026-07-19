@@ -128,6 +128,54 @@ describe("queued repository transaction API", () => {
     ],
   };
 
+  it("reuses confirmed canonical reads across read-only transactions", async () => {
+    const adapter = new FakeQueueAdapter(ordersSnapshot);
+    const orders = createOrdersRepository(adapter);
+
+    await orders.transaction((tx) => tx.findAll());
+    await orders.transaction((tx) => tx.findById("o1"));
+
+    expect(adapter.readSheets).toEqual(["Orders"]);
+  });
+
+  it("invalidates the read cache when a queued write is attempted", async () => {
+    const adapter = new FakeQueueAdapter(ordersSnapshot);
+    const orders = createOrdersRepository(adapter);
+
+    await orders.transaction((tx) => tx.findAll());
+
+    await orders.transaction((tx) => {
+      tx.save({
+        id: "o3",
+        userId: "u2",
+        status: "new",
+        canceledAt: undefined,
+        _version: 1,
+      });
+    });
+
+    const rows = await orders.transaction((tx) => tx.findAll());
+
+    expect(adapter.readSheets).toEqual(["Orders", "Orders"]);
+    expect(rows.map((row) => row.id)).toEqual(["o1", "o2"]);
+  });
+
+  it("supports disabling the repository read cache", async () => {
+    const adapter = new FakeQueueAdapter(ordersSnapshot);
+    const orders = createQueuedSheetRepository<Order>({
+      adapter,
+      sheetName: "Orders",
+      key: "id",
+      columns,
+      cache: { enabled: false },
+    });
+
+    await orders.transaction((tx) => tx.findAll());
+    await orders.transaction((tx) => tx.findAll());
+
+    expect(adapter.readSheets).toEqual(["Orders", "Orders"]);
+  });
+
   it("flushes a successful callback as one queue transaction", async () => {
     const adapter = new FakeQueueAdapter(ordersSnapshot);
     const orders = createOrdersRepository(adapter);
@@ -223,7 +271,7 @@ describe("queued repository transaction API", () => {
     expect(orders.transaction).toBeTypeOf("function");
   });
 
-  it("rejects a stale entity within its transaction", async () => {
+  it("reuses the transaction snapshot when materializing a loaded entity", async () => {
     const adapter = new FakeQueueAdapter(ordersSnapshot);
     const orders = createOrdersRepository(adapter);
 
@@ -241,9 +289,14 @@ describe("queued repository transaction API", () => {
         });
         tx.save(order);
       }),
-    ).rejects.toThrow("Stale entity");
+    ).resolves.toBeUndefined();
 
-    expect(adapter.enqueuedTasks).toEqual([]);
+    expect(adapter.enqueuedTasks).toHaveLength(1);
+    expect(adapter.enqueuedTasks[0]?.tasks[0]).toMatchObject({
+      operation: "update",
+      keyValue: "o1",
+      expectedVersion: 3,
+    });
   });
 
   it("applies pending transaction mutations to reads inside the transaction", async () => {

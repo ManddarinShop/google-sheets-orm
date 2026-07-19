@@ -161,7 +161,7 @@ This project currently does not support:
 - migrations
 - database-level transactions or rollback
 - multi-row atomic updates
-- cache or request collapse
+- cross-process cache invalidation or request collapse
 - retry/backoff
 - browser support
 - automatic Apps Script gateway installation
