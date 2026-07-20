@@ -9,9 +9,11 @@ import type { NormalizedCell } from "../encoding/types.js";
 import type {
   CanonicalEntityState,
   OwnershipManifest,
+  Projection,
   QuarantinePlan,
   RepairPlan,
   RowBindingContext,
+  RowOperation,
   SyncConflict,
 } from "../model/types.js";
 
@@ -74,4 +76,18 @@ export interface EventKeyField {
   readonly beforeHash: string;
   readonly afterHash: string;
   readonly nextValue: NormalizedCell;
+}
+
+/** Normalized row-change material used to compute a source-independent event key. */
+export interface EventKeyInput {
+  readonly schemaVersion: number;
+  readonly sheetId: string;
+  readonly projection: Projection;
+  readonly rowBindingId: string;
+  readonly baseVisibleRevision: number;
+  readonly baseSnapshotHash: string;
+  readonly operation: RowOperation;
+  readonly beforeRowHash: string;
+  readonly afterRowHash: string;
+  readonly changedFields: readonly EventKeyField[];
 }
