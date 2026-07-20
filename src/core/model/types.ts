@@ -6,6 +6,9 @@
  */
 
 import type { NormalizedCell } from "../encoding/types.js";
+import type { ConflictStatus } from "./constants.js";
+
+export type { ConflictStatus } from "./constants.js";
 
 // ---------------------------------------------------------------------------
 // Entity state (canonical)
@@ -138,8 +141,6 @@ export interface SheetChangeEvent {
 // ---------------------------------------------------------------------------
 // Conflict model
 // ---------------------------------------------------------------------------
-
-export type ConflictStatus = "OPEN" | "NEEDS_REBASE" | "RESOLVED";
 
 /** Field-level conflict record preserving both candidate and canonical state. */
 export interface SyncConflict {
