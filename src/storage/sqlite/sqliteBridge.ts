@@ -16,6 +16,12 @@ type DatabaseSyncConstructor = new (path: string, options?: DatabaseSyncOpenOpti
 
 let cached: DatabaseSyncConstructor | null = null;
 
+// EntityStore writes can be composed inside a writer RPC that already owns an
+// immediate transaction. SQLite does not allow a nested BEGIN, so track the
+// outer scope and use a savepoint for nested calls.
+const transactionDepth = new WeakMap<DatabaseSyncLike, number>();
+let savepointSequence = 0;
+
 // Keep the specifier outside a statically analyzable import so vite-node leaves
 // Node's experimental/built-in sqlite module untouched.
 const nodeSqliteSpecifier: string = "node:sqlite";
@@ -40,7 +46,31 @@ export async function openReadOnlyDatabase(path: string): Promise<DatabaseSyncLi
  * back without exposing a partial canonical or outbox mutation.
  */
 export function withImmediateTransaction<T>(db: DatabaseSyncLike, operation: () => T): T {
+  const depth = transactionDepth.get(db) ?? 0;
+  if (depth > 0) {
+    const savepoint = `typed_sheets_nested_${++savepointSequence}`;
+    try {
+      transactionDepth.set(db, depth + 1);
+      db.exec(`SAVEPOINT ${savepoint}`);
+      const value = operation();
+      db.exec(`RELEASE ${savepoint}`);
+      return value;
+    } catch (error: unknown) {
+      try {
+        db.exec(`ROLLBACK TO ${savepoint}`);
+        db.exec(`RELEASE ${savepoint}`);
+      } catch {
+        // Preserve the original error; a failed savepoint cleanup only adds
+        // diagnostic noise to the writer failure.
+      }
+      throw error;
+    } finally {
+      transactionDepth.set(db, depth);
+    }
+  }
+
   db.exec("BEGIN IMMEDIATE");
+  transactionDepth.set(db, 1);
   try {
     const value = operation();
     db.exec("COMMIT");
@@ -52,6 +82,8 @@ export function withImmediateTransaction<T>(db: DatabaseSyncLike, operation: () 
       // Preserve the original error; a failed rollback only adds diagnostic noise.
     }
     throw error;
+  } finally {
+    transactionDepth.delete(db);
   }
 }
 

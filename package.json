@@ -1,12 +1,12 @@
 {
   "name": "typed-sheets",
-  "version": "0.1.0",
-  "description": "Typed repository and safe write layer for Google Sheets-backed MVPs.",
+  "version": "0.1.0-beta.1",
+  "description": "Standalone SQLite entity store and safe Google Sheets sync runtime.",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "bin": {
-    "typed-sheets": "dist/cli/Cli.js"
+    "typed-sheets": "./dist/cli/Cli.js"
   },
   "exports": {
     ".": {
@@ -16,17 +16,16 @@
   },
   "files": [
     "dist",
-    "docs",
-    "templates/manual-apps-script-gateway/SheetInfo.gs",
-    "templates/manual-apps-script-gateway/Code.gs",
-    "templates/manual-apps-script-gateway/README.md"
+    "README.md",
+    "apps-script/gateway"
   ],
+  "engines": {
+    "node": ">=22.5.0"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "typecheck:test": "tsc -p tsconfig.test.json",
-    "test": "vitest run test/*.test.ts",
-    "test:integration": "node --env-file-if-exists=.env ./node_modules/vitest/vitest.mjs run test/integration/google-sheets-smoke.test.ts"
+    "test": "vitest run test/*.test.ts"
   },
   "keywords": [
     "google-sheets",
@@ -39,9 +38,5 @@
     "@types/node": "^20.14.10",
     "typescript": "^5.5.3",
     "vitest": "^1.6.0"
-  },
-  "dependencies": {
-    "@googleapis/sheets": "^13.0.2",
-    "@inquirer/prompts": "^8.5.2"
   }
 }

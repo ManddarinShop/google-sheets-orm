@@ -82,3 +82,21 @@ export type {
   CompleteRestoreReconciliationOptions,
   ReadyRestore,
 } from "./recovery/restoreRecovery.js";
+export {
+  createEntityStore,
+  ensureEntityTables,
+  openStandaloneEntityStore,
+  EntityDefinitionError,
+  EntitySchemaMismatchError,
+  EntityValueError,
+  ENTITY_COLUMN_KINDS,
+} from "./entity/index.js";
+export type {
+  EntityColumnDefinition,
+  EntityColumnKind,
+  EntityDefinition,
+  EntityStore,
+  EntityValue,
+  OpenStandaloneEntityStoreOptions,
+  StandaloneEntityStore,
+} from "./entity/index.js";
