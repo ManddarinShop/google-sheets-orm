@@ -30,3 +30,4 @@ export type {
   EffectStatus,
   SheetEffect,
 } from "./types.js";
+export { CONFLICT_STATUSES } from "./constants.js";
