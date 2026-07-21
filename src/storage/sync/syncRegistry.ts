@@ -9,6 +9,42 @@
 import { withImmediateTransaction, type DatabaseSyncLike } from "../sqlite/sqliteBridge.js";
 import { isFencingValid, type FencingContext } from "./writerLease.js";
 
+const READ_LOGICAL_SHEET_REGISTRATION_SQL = `
+  SELECT schema_version, ownership_manifest_json, business_key_field, anchor_mode, enabled
+  FROM sheet_registry
+  WHERE sheet_id = ?
+`;
+
+const INSERT_LOGICAL_SHEET_REGISTRATION_SQL = `
+  INSERT INTO sheet_registry (
+    sheet_id, schema_version, ownership_manifest_json, business_key_field, anchor_mode, enabled
+  ) VALUES (?, ?, ?, ?, ?, 1)
+`;
+
+const READ_PHYSICAL_SHEET_REGISTRATION_SQL = `
+  SELECT logical_sheet_id, spreadsheet_id, tab_name, registered_range, projection,
+         schema_version, anchor_mode, enabled
+  FROM physical_sheet_registry
+  WHERE physical_sheet_id = ?
+`;
+
+const INSERT_PHYSICAL_SHEET_REGISTRATION_SQL = `
+  INSERT INTO physical_sheet_registry (
+    physical_sheet_id, logical_sheet_id, spreadsheet_id, tab_name,
+    registered_range, projection, schema_version, anchor_mode, enabled
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
+`;
+
+const READ_REGISTERED_SYNC_SHEET_SQL = `
+  SELECT physical.logical_sheet_id, physical.physical_sheet_id, physical.spreadsheet_id,
+         physical.tab_name, physical.registered_range, physical.projection,
+         physical.schema_version, physical.anchor_mode, physical.enabled AS physical_enabled,
+         logical.ownership_manifest_json, logical.business_key_field, logical.enabled AS logical_enabled
+  FROM physical_sheet_registry AS physical
+  JOIN sheet_registry AS logical ON logical.sheet_id = physical.logical_sheet_id
+  WHERE physical.physical_sheet_id = ?
+`;
+
 /** The only projection labels accepted by the v1 runtime registry. */
 export type RegisteredProjection = "user_input" | "system_state" | "sync_conflicts";
 
@@ -64,16 +100,10 @@ export function registerSyncSheet(
   if (!isFencingValid(db, fence)) return { kind: "fenced_out" };
   return withImmediateTransaction(db, () => {
     if (!isFencingValid(db, fence)) return { kind: "fenced_out" };
-    const logical = db.prepare(`
-      SELECT schema_version, ownership_manifest_json, business_key_field, anchor_mode, enabled
-      FROM sheet_registry WHERE sheet_id = ?
-    `).get(normalizedInput.logicalSheetId) as LogicalRow | undefined;
+    const logical = db.prepare(READ_LOGICAL_SHEET_REGISTRATION_SQL)
+      .get(normalizedInput.logicalSheetId) as LogicalRow | undefined;
     if (logical === undefined) {
-      const inserted = db.prepare(`
-        INSERT INTO sheet_registry (
-          sheet_id, schema_version, ownership_manifest_json, business_key_field, anchor_mode, enabled
-        ) VALUES (?, ?, ?, ?, ?, 1)
-      `).run(
+      const inserted = db.prepare(INSERT_LOGICAL_SHEET_REGISTRATION_SQL).run(
         normalizedInput.logicalSheetId,
         normalizedInput.schemaVersion,
         normalizedInput.ownershipManifestJson,
@@ -91,18 +121,10 @@ export function registerSyncSheet(
       throw new Error("logical sync sheet registration does not match the existing allowlist");
     }
 
-    const physical = db.prepare(`
-      SELECT logical_sheet_id, spreadsheet_id, tab_name, registered_range, projection,
-             schema_version, anchor_mode, enabled
-      FROM physical_sheet_registry WHERE physical_sheet_id = ?
-    `).get(normalizedInput.physicalSheetId) as PhysicalRow | undefined;
+    const physical = db.prepare(READ_PHYSICAL_SHEET_REGISTRATION_SQL)
+      .get(normalizedInput.physicalSheetId) as PhysicalRow | undefined;
     if (physical === undefined) {
-      const inserted = db.prepare(`
-        INSERT INTO physical_sheet_registry (
-          physical_sheet_id, logical_sheet_id, spreadsheet_id, tab_name,
-          registered_range, projection, schema_version, anchor_mode, enabled
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
-      `).run(
+      const inserted = db.prepare(INSERT_PHYSICAL_SHEET_REGISTRATION_SQL).run(
         normalizedInput.physicalSheetId,
         normalizedInput.logicalSheetId,
         normalizedInput.spreadsheetId,
@@ -126,15 +148,8 @@ export function requireRegisteredSyncSheet(
   physicalSheetId: string,
 ): RegisteredSyncSheet {
   if (physicalSheetId.length === 0) throw new Error("physical sheet ID is required");
-  const row = db.prepare(`
-    SELECT physical.logical_sheet_id, physical.physical_sheet_id, physical.spreadsheet_id,
-           physical.tab_name, physical.registered_range, physical.projection,
-           physical.schema_version, physical.anchor_mode, physical.enabled AS physical_enabled,
-           logical.ownership_manifest_json, logical.business_key_field, logical.enabled AS logical_enabled
-    FROM physical_sheet_registry AS physical
-    JOIN sheet_registry AS logical ON logical.sheet_id = physical.logical_sheet_id
-    WHERE physical.physical_sheet_id = ?
-  `).get(physicalSheetId) as RegisteredRow | undefined;
+  const row = db.prepare(READ_REGISTERED_SYNC_SHEET_SQL)
+    .get(physicalSheetId) as RegisteredRow | undefined;
   if (row === undefined || row.physical_enabled !== 1 || row.logical_enabled !== 1) {
     throw new Error("physical sheet is not an enabled sync registry target");
   }
