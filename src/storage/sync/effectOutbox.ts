@@ -12,6 +12,168 @@ import type { DatabaseSyncLike } from "../sqlite/sqliteBridge.js";
 import { isFencingValid } from "./writerLease.js";
 import type { FencingContext } from "./writerLease.js";
 
+const FENCE_EXISTS_SQL = `
+  SELECT 1 FROM writer_lease
+  WHERE role = ? AND writer_epoch = ? AND fencing_token = ? AND lease_until > ?
+`;
+
+const CLAIM_EFFECT_SQL = `
+  UPDATE sheet_effect_outbox AS candidate
+  SET status = 'processing', claim_token = ?, writer_epoch = ?, lease_until = ?,
+      attempts = attempts + 1
+  WHERE candidate.effect_id = ?
+    AND candidate.status = 'pending'
+    AND EXISTS (${FENCE_EXISTS_SQL})
+    AND NOT EXISTS (
+      SELECT 1
+      FROM sheet_effect_outbox AS predecessor
+      WHERE predecessor.logical_sheet_id = candidate.logical_sheet_id
+        AND predecessor.target_kind = candidate.target_kind
+        AND predecessor.target_id = candidate.target_id
+        AND predecessor.stream_sequence < candidate.stream_sequence
+        AND predecessor.status NOT IN ('applied', 'superseded')
+    )
+`;
+
+const INSERT_PENDING_EFFECT_SQL = `
+  INSERT INTO sheet_effect_outbox (
+    effect_id, effect_kind, commit_id, logical_sheet_id, physical_sheet_id,
+    projection, row_binding_id, conflict_id, target_kind, target_id,
+    target_entity_revision, target_field_revision_hash, target_canonical_commit_id,
+    expected_visible_revision, expected_visible_hash, repair_guard_hash,
+    source_quarantine_id, payload_json, payload_hash, effect_dedupe_key,
+    stream_sequence, created_at, status
+  )
+  SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending'
+  WHERE EXISTS (${FENCE_EXISTS_SQL})
+`;
+
+const APPLY_EFFECT_RESULT_SQL = `
+  UPDATE sheet_effect_outbox
+  SET status = ?, last_error_code = ?, last_error_message = ?,
+      claim_token = NULL, lease_until = NULL
+  WHERE effect_id = ?
+    AND status = 'processing'
+    AND claim_token = ?
+    AND writer_epoch = ?
+    AND lease_until IS NOT NULL
+    AND lease_until > ?
+    AND EXISTS (${FENCE_EXISTS_SQL})
+`;
+
+const SUPERSEDE_EFFECT_SQL = `
+  UPDATE sheet_effect_outbox
+  SET status = 'superseded', supersedes_effect_id = ?
+  WHERE effect_id = ?
+    AND status IN ('pending', 'processing', 'blocked_candidate', 'conflict', 'failed')
+    AND EXISTS (${FENCE_EXISTS_SQL})
+`;
+
+const INSERT_REPLANNED_EFFECT_SQL = `
+  INSERT INTO sheet_effect_outbox (
+    effect_id, effect_kind, commit_id, logical_sheet_id, physical_sheet_id,
+    projection, row_binding_id, conflict_id, target_kind, target_id,
+    target_entity_revision, target_field_revision_hash, target_canonical_commit_id,
+    expected_visible_revision, expected_visible_hash, repair_guard_hash,
+    source_quarantine_id, payload_json, payload_hash, effect_dedupe_key,
+    stream_sequence, predecessor_effect_id, created_at, status
+  )
+  SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending'
+  WHERE EXISTS (${FENCE_EXISTS_SQL})
+`;
+
+const RECOVER_EXPIRED_LEASES_SQL = `
+  UPDATE sheet_effect_outbox
+  SET status = 'failed', claim_token = NULL, lease_until = NULL,
+      last_error_code = 'lease_expired_requires_postcondition',
+      last_error_message = 'Read the remote postcondition before retrying this effect.'
+  WHERE status = 'processing' AND lease_until IS NOT NULL AND lease_until <= ?
+    AND EXISTS (${FENCE_EXISTS_SQL})
+`;
+
+const RELEASE_UNPROCESSED_EFFECT_SQL = `
+  UPDATE sheet_effect_outbox
+  SET status = 'pending', claim_token = NULL, lease_until = NULL,
+      last_error_code = 'gateway_batch_deferred',
+      last_error_message = 'Gateway acknowledged a bounded batch before this effect.'
+  WHERE effect_id = ? AND status = 'processing' AND claim_token = ?
+    AND writer_epoch = ? AND lease_until IS NOT NULL AND lease_until > ?
+    AND EXISTS (${FENCE_EXISTS_SQL})
+`;
+
+const SELECT_PENDING_EFFECTS_BY_TARGET_SQL = `
+  SELECT effect_id, effect_kind, commit_id, logical_sheet_id, physical_sheet_id,
+         projection, row_binding_id, conflict_id, target_kind, target_id,
+         target_entity_revision, target_field_revision_hash, target_canonical_commit_id,
+         expected_visible_revision, expected_visible_hash, repair_guard_hash,
+         source_quarantine_id, payload_json, payload_hash, effect_dedupe_key,
+         stream_sequence, created_at, status
+  FROM sheet_effect_outbox
+  WHERE logical_sheet_id = ? AND target_kind = ? AND target_id = ?
+    AND status = 'pending'
+    AND NOT EXISTS (
+      SELECT 1
+      FROM sheet_effect_outbox AS predecessor
+      WHERE predecessor.logical_sheet_id = sheet_effect_outbox.logical_sheet_id
+        AND predecessor.target_kind = sheet_effect_outbox.target_kind
+        AND predecessor.target_id = sheet_effect_outbox.target_id
+        AND predecessor.stream_sequence < sheet_effect_outbox.stream_sequence
+        AND predecessor.status NOT IN ('applied', 'superseded')
+    )
+  ORDER BY stream_sequence
+`;
+
+const SELECT_READY_EFFECTS_SQL = `
+  SELECT effect_id, effect_kind, commit_id, logical_sheet_id, physical_sheet_id,
+         projection, row_binding_id, conflict_id, target_kind, target_id,
+         target_entity_revision, target_field_revision_hash, target_canonical_commit_id,
+         expected_visible_revision, expected_visible_hash, repair_guard_hash,
+         source_quarantine_id, payload_json, payload_hash, effect_dedupe_key,
+         stream_sequence, created_at, status
+  FROM sheet_effect_outbox AS candidate
+  WHERE candidate.status = 'pending'
+    AND NOT EXISTS (
+      SELECT 1
+      FROM sheet_effect_outbox AS predecessor
+      WHERE predecessor.logical_sheet_id = candidate.logical_sheet_id
+        AND predecessor.target_kind = candidate.target_kind
+        AND predecessor.target_id = candidate.target_id
+        AND predecessor.stream_sequence < candidate.stream_sequence
+        AND predecessor.status NOT IN ('applied', 'superseded')
+    )
+  ORDER BY candidate.logical_sheet_id, candidate.physical_sheet_id,
+           candidate.target_kind, candidate.target_id, candidate.stream_sequence
+  LIMIT ?
+`;
+
+const UPSERT_VISIBLE_STATE_SQL = `
+  INSERT INTO sheet_visible_state (
+    physical_sheet_id, projection, row_binding_id, confirmed_snapshot_hash,
+    confirmed_visible_revision, confirmed_entity_revision, last_observed_hash
+  ) VALUES (?, ?, ?, ?, ?, ?, ?)
+  ON CONFLICT(physical_sheet_id, projection, row_binding_id)
+  DO UPDATE SET
+    confirmed_snapshot_hash = excluded.confirmed_snapshot_hash,
+    confirmed_visible_revision = excluded.confirmed_visible_revision,
+    confirmed_entity_revision = excluded.confirmed_entity_revision,
+    last_observed_hash = excluded.last_observed_hash
+  WHERE sheet_visible_state.confirmed_visible_revision <= excluded.confirmed_visible_revision
+`;
+
+const UPSERT_VISIBLE_FIELD_STATE_SQL = `
+  INSERT INTO sheet_visible_field_state (
+    physical_sheet_id, projection, row_binding_id, field_name,
+    confirmed_field_hash, confirmed_visible_revision, candidate_epoch,
+    last_observed_field_hash
+  ) VALUES (?, ?, ?, ?, ?, ?, 0, ?)
+  ON CONFLICT(physical_sheet_id, projection, row_binding_id, field_name)
+  DO UPDATE SET
+    confirmed_field_hash = excluded.confirmed_field_hash,
+    confirmed_visible_revision = excluded.confirmed_visible_revision,
+    last_observed_field_hash = excluded.last_observed_field_hash
+  WHERE sheet_visible_field_state.confirmed_visible_revision <= excluded.confirmed_visible_revision
+`;
+
 export interface ClaimResult {
   readonly effectId: string;
   readonly claimToken: string;
@@ -44,23 +206,7 @@ export function claimEffect(db: DatabaseSyncLike, options: ClaimEffectOptions): 
   }
 
   const result = db
-    .prepare(
-      `UPDATE sheet_effect_outbox AS candidate
-       SET status = 'processing', claim_token = ?, writer_epoch = ?, lease_until = ?,
-           attempts = attempts + 1
-       WHERE candidate.effect_id = ?
-         AND candidate.status = 'pending'
-         AND EXISTS (${fenceExistsSql()})
-         AND NOT EXISTS (
-           SELECT 1
-           FROM sheet_effect_outbox AS predecessor
-           WHERE predecessor.logical_sheet_id = candidate.logical_sheet_id
-             AND predecessor.target_kind = candidate.target_kind
-             AND predecessor.target_id = candidate.target_id
-             AND predecessor.stream_sequence < candidate.stream_sequence
-             AND predecessor.status NOT IN ('applied', 'superseded')
-         )`,
-    )
+    .prepare(CLAIM_EFFECT_SQL)
     .run(
       options.claimToken,
       options.writerEpoch,
@@ -149,18 +295,7 @@ export function appendPendingEffects(
   db.exec("SAVEPOINT append_pending_effects");
   try {
     for (const effect of effects) {
-      const result = db.prepare(`
-        INSERT INTO sheet_effect_outbox (
-          effect_id, effect_kind, commit_id, logical_sheet_id, physical_sheet_id,
-          projection, row_binding_id, conflict_id, target_kind, target_id,
-          target_entity_revision, target_field_revision_hash, target_canonical_commit_id,
-          expected_visible_revision, expected_visible_hash, repair_guard_hash,
-          source_quarantine_id, payload_json, payload_hash, effect_dedupe_key,
-          stream_sequence, created_at, status
-        )
-        SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending'
-        WHERE EXISTS (${fenceExistsSql()})
-      `).run(
+      const result = db.prepare(INSERT_PENDING_EFFECT_SQL).run(
         effect.effectId,
         effect.effectKind,
         effect.commitId,
@@ -222,18 +357,7 @@ export function applyEffectResult(db: DatabaseSyncLike, options: ApplyResultOpti
   db.exec("SAVEPOINT apply_effect_result");
   try {
     const result = db
-      .prepare(
-        `UPDATE sheet_effect_outbox
-         SET status = ?, last_error_code = ?, last_error_message = ?,
-             claim_token = NULL, lease_until = NULL
-         WHERE effect_id = ?
-           AND status = 'processing'
-           AND claim_token = ?
-           AND writer_epoch = ?
-           AND lease_until IS NOT NULL
-           AND lease_until > ?
-           AND EXISTS (${fenceExistsSql()})`,
-      )
+      .prepare(APPLY_EFFECT_RESULT_SQL)
       .run(
         options.status,
         options.lastErrorCode ?? null,
@@ -283,30 +407,14 @@ export function supersedeAndReplan(
   requireCurrentFence(db, fence);
   db.exec("SAVEPOINT replan");
   try {
-    const superseded = db.prepare(
-      `UPDATE sheet_effect_outbox
-       SET status = 'superseded', supersedes_effect_id = ?
-       WHERE effect_id = ?
-         AND status IN ('pending', 'processing', 'blocked_candidate', 'conflict', 'failed')
-         AND EXISTS (${fenceExistsSql()})`,
-    ).run(newEffect.effectId, oldEffectId, ...fenceParameters(fence));
+    const superseded = db.prepare(SUPERSEDE_EFFECT_SQL)
+      .run(newEffect.effectId, oldEffectId, ...fenceParameters(fence));
     if (superseded.changes !== 1) {
       requireCurrentFence(db, fence);
       throw new Error(`effect ${oldEffectId} cannot be replanned from its current status`);
     }
 
-    const inserted = db.prepare(
-      `INSERT INTO sheet_effect_outbox (
-         effect_id, effect_kind, commit_id, logical_sheet_id, physical_sheet_id,
-         projection, row_binding_id, conflict_id, target_kind, target_id,
-         target_entity_revision, target_field_revision_hash, target_canonical_commit_id,
-         expected_visible_revision, expected_visible_hash, repair_guard_hash,
-         source_quarantine_id, payload_json, payload_hash, effect_dedupe_key,
-         stream_sequence, predecessor_effect_id, created_at, status
-       )
-       SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending'
-       WHERE EXISTS (${fenceExistsSql()})`,
-    ).run(
+    const inserted = db.prepare(INSERT_REPLANNED_EFFECT_SQL).run(
       newEffect.effectId,
       newEffect.effectKind,
       newEffect.commitId,
@@ -357,14 +465,7 @@ export function recoverExpiredLeases(
 ): number {
   requireCurrentFence(db, fence);
   const result = db
-    .prepare(
-      `UPDATE sheet_effect_outbox
-       SET status = 'failed', claim_token = NULL, lease_until = NULL,
-           last_error_code = 'lease_expired_requires_postcondition',
-           last_error_message = 'Read the remote postcondition before retrying this effect.'
-       WHERE status = 'processing' AND lease_until IS NOT NULL AND lease_until <= ?
-         AND EXISTS (${fenceExistsSql()})`,
-    )
+    .prepare(RECOVER_EXPIRED_LEASES_SQL)
     .run(fence.now, ...fenceParameters(fence));
   return result.changes;
 }
@@ -384,15 +485,7 @@ export function releaseUnprocessedEffect(
   },
 ): boolean {
   if (!isFencingValid(db, options)) return false;
-  const result = db.prepare(`
-    UPDATE sheet_effect_outbox
-    SET status = 'pending', claim_token = NULL, lease_until = NULL,
-        last_error_code = 'gateway_batch_deferred',
-        last_error_message = 'Gateway acknowledged a bounded batch before this effect.'
-    WHERE effect_id = ? AND status = 'processing' AND claim_token = ?
-      AND writer_epoch = ? AND lease_until IS NOT NULL AND lease_until > ?
-      AND EXISTS (${fenceExistsSql()})
-  `).run(
+  const result = db.prepare(RELEASE_UNPROCESSED_EFFECT_SQL).run(
     options.effectId,
     options.claimToken,
     options.writerEpoch,
@@ -413,27 +506,7 @@ export function findPendingEffectsByTarget(
   targetId: string,
 ): readonly PendingEffect[] {
   return db
-    .prepare(
-      `SELECT effect_id, effect_kind, commit_id, logical_sheet_id, physical_sheet_id,
-              projection, row_binding_id, conflict_id, target_kind, target_id,
-              target_entity_revision, target_field_revision_hash, target_canonical_commit_id,
-              expected_visible_revision, expected_visible_hash, repair_guard_hash,
-            source_quarantine_id, payload_json, payload_hash, effect_dedupe_key,
-              stream_sequence, created_at, status
-       FROM sheet_effect_outbox
-       WHERE logical_sheet_id = ? AND target_kind = ? AND target_id = ?
-         AND status = 'pending'
-         AND NOT EXISTS (
-           SELECT 1
-           FROM sheet_effect_outbox AS predecessor
-           WHERE predecessor.logical_sheet_id = sheet_effect_outbox.logical_sheet_id
-             AND predecessor.target_kind = sheet_effect_outbox.target_kind
-             AND predecessor.target_id = sheet_effect_outbox.target_id
-             AND predecessor.stream_sequence < sheet_effect_outbox.stream_sequence
-             AND predecessor.status NOT IN ('applied', 'superseded')
-         )
-       ORDER BY stream_sequence`,
-    )
+    .prepare(SELECT_PENDING_EFFECTS_BY_TARGET_SQL)
     .all(logicalSheetId, targetKind, targetId) as PendingEffect[];
 }
 
@@ -450,28 +523,7 @@ export function listReadyEffects(
   if (!Number.isSafeInteger(limit) || limit < 1) {
     throw new Error("ready effect limit must be a positive safe integer");
   }
-  return db.prepare(
-    `SELECT effect_id, effect_kind, commit_id, logical_sheet_id, physical_sheet_id,
-            projection, row_binding_id, conflict_id, target_kind, target_id,
-            target_entity_revision, target_field_revision_hash, target_canonical_commit_id,
-            expected_visible_revision, expected_visible_hash, repair_guard_hash,
-            source_quarantine_id, payload_json, payload_hash, effect_dedupe_key,
-            stream_sequence, created_at, status
-     FROM sheet_effect_outbox AS candidate
-     WHERE candidate.status = 'pending'
-       AND NOT EXISTS (
-         SELECT 1
-         FROM sheet_effect_outbox AS predecessor
-         WHERE predecessor.logical_sheet_id = candidate.logical_sheet_id
-           AND predecessor.target_kind = candidate.target_kind
-           AND predecessor.target_id = candidate.target_id
-           AND predecessor.stream_sequence < candidate.stream_sequence
-           AND predecessor.status NOT IN ('applied', 'superseded')
-       )
-     ORDER BY candidate.logical_sheet_id, candidate.physical_sheet_id,
-              candidate.target_kind, candidate.target_id, candidate.stream_sequence
-     LIMIT ?`,
-  ).all(limit) as PendingEffect[];
+  return db.prepare(SELECT_READY_EFFECTS_SQL).all(limit) as PendingEffect[];
 }
 
 export interface PendingEffect {
@@ -523,19 +575,7 @@ function writeProjectionConfirmation(
   db: DatabaseSyncLike,
   confirmation: EffectProjectionConfirmation,
 ): void {
-  const row = db.prepare(`
-    INSERT INTO sheet_visible_state (
-      physical_sheet_id, projection, row_binding_id, confirmed_snapshot_hash,
-      confirmed_visible_revision, confirmed_entity_revision, last_observed_hash
-    ) VALUES (?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(physical_sheet_id, projection, row_binding_id)
-    DO UPDATE SET
-      confirmed_snapshot_hash = excluded.confirmed_snapshot_hash,
-      confirmed_visible_revision = excluded.confirmed_visible_revision,
-      confirmed_entity_revision = excluded.confirmed_entity_revision,
-      last_observed_hash = excluded.last_observed_hash
-    WHERE sheet_visible_state.confirmed_visible_revision <= excluded.confirmed_visible_revision
-  `).run(
+  const row = db.prepare(UPSERT_VISIBLE_STATE_SQL).run(
     confirmation.physicalSheetId,
     confirmation.projection,
     confirmation.rowBindingId,
@@ -549,19 +589,7 @@ function writeProjectionConfirmation(
   }
 
   for (const [fieldName, hash] of Object.entries(confirmation.fieldHashes)) {
-    const field = db.prepare(`
-      INSERT INTO sheet_visible_field_state (
-        physical_sheet_id, projection, row_binding_id, field_name,
-        confirmed_field_hash, confirmed_visible_revision, candidate_epoch,
-        last_observed_field_hash
-      ) VALUES (?, ?, ?, ?, ?, ?, 0, ?)
-      ON CONFLICT(physical_sheet_id, projection, row_binding_id, field_name)
-      DO UPDATE SET
-        confirmed_field_hash = excluded.confirmed_field_hash,
-        confirmed_visible_revision = excluded.confirmed_visible_revision,
-        last_observed_field_hash = excluded.last_observed_field_hash
-      WHERE sheet_visible_field_state.confirmed_visible_revision <= excluded.confirmed_visible_revision
-    `).run(
+    const field = db.prepare(UPSERT_VISIBLE_FIELD_STATE_SQL).run(
       confirmation.physicalSheetId,
       confirmation.projection,
       confirmation.rowBindingId,
@@ -580,13 +608,6 @@ function requireCurrentFence(db: DatabaseSyncLike, fence: FencingContext): void 
   if (!isFencingValid(db, fence)) {
     throw new Error("writer fencing is stale or expired");
   }
-}
-
-function fenceExistsSql(): string {
-  return `
-    SELECT 1 FROM writer_lease
-    WHERE role = ? AND writer_epoch = ? AND fencing_token = ? AND lease_until > ?
-  `;
 }
 
 function fenceParameters(fence: FencingContext): readonly [string, number, string, number] {
