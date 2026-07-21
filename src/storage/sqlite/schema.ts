@@ -151,6 +151,150 @@ export function migrateSchema(db: DatabaseSyncLike): SchemaMigrationResult {
   });
 }
 
+/** Returns table DDL only, so migration transactions never change connection pragmas. */
+function latestSchemaDdl(): string {
+  return [
+    REGISTRY_TABLES_DDL,
+    IDENTITY_TABLES_DDL,
+    CANONICAL_STATE_TABLES_DDL,
+    VISIBLE_STATE_TABLES_DDL,
+    EVENT_LEDGER_TABLES_DDL,
+    CONFLICT_AND_QUARANTINE_TABLES_DDL,
+    BUSINESS_KEY_INDEX_DDL,
+    EFFECT_OUTBOX_DDL,
+    GATEWAY_REQUEST_RECEIPT_DDL,
+    WRITER_LEASE_DDL,
+    CUTOVER_STATE_DDL,
+  ].join("\n");
+}
+
+/**
+ * Creates indexes that depend on additive migration columns only after those
+ * columns have been confirmed. This keeps a version-one upgrade ordered.
+ */
+function currentIndexesDdl(): string {
+  return `
+    CREATE UNIQUE INDEX IF NOT EXISTS sync_conflict_candidate_attempt_uq
+      ON sync_conflict(row_binding_id, field_name, candidate_epoch);
+  `;
+}
+
+/** Applies the first additive migration after the historical one-shot DDL. */
+function applyVersion2CandidateEpochMigration(db: DatabaseSyncLike): void {
+  addColumnIfMissing(db, "sync_conflict", "candidate_epoch", "INTEGER NOT NULL DEFAULT 0");
+  addColumnIfMissing(
+    db,
+    "resolution_command",
+    "expected_candidate_epoch",
+    "INTEGER NOT NULL DEFAULT 0",
+  );
+}
+
+/** Adds durable effect creation time without rewriting existing outbox evidence. */
+function applyVersion3EffectTimestampMigration(db: DatabaseSyncLike): void {
+  addColumnIfMissing(db, "sheet_effect_outbox", "created_at", "INTEGER NOT NULL DEFAULT 0");
+}
+
+/** Refuses to treat a user_version marker as authoritative when required columns are absent. */
+function verifyCurrentSchema(db: DatabaseSyncLike): void {
+  verifyRequiredColumns(db);
+  if (!indexExists(db, "sync_conflict_candidate_attempt_uq")) {
+    throw new StorageError(
+      STORAGE_ERROR_CODES.SCHEMA_INDEX_MISSING,
+      "SQLite schema is missing sync_conflict_candidate_attempt_uq.",
+    );
+  }
+}
+
+/** Verifies columns before a dependent unique index is created. */
+function verifyRequiredColumns(db: DatabaseSyncLike): void {
+  for (const [tableName, requiredColumns] of Object.entries(REQUIRED_V2_COLUMNS) as Array<
+    ["sync_conflict" | "resolution_command", readonly string[]]
+  >) {
+    if (!tableExists(db, tableName)) {
+      throw new StorageError(
+        STORAGE_ERROR_CODES.SCHEMA_TABLE_MISSING,
+        `SQLite schema is missing ${tableName}; refusing an unsafe migration marker.`,
+      );
+    }
+    for (const columnName of requiredColumns) {
+      if (!columnExists(db, tableName, columnName)) {
+        throw new StorageError(
+          STORAGE_ERROR_CODES.SCHEMA_COLUMN_MISSING,
+          `SQLite schema is missing ${tableName}.${columnName}; refusing an unsafe migration marker.`,
+        );
+      }
+    }
+  }
+  for (const [tableName, requiredColumns] of Object.entries(REQUIRED_V3_COLUMNS) as Array<
+    ["sheet_effect_outbox", readonly string[]]
+  >) {
+    if (!tableExists(db, tableName)) {
+      throw new StorageError(
+        STORAGE_ERROR_CODES.SCHEMA_TABLE_MISSING,
+        `SQLite schema is missing ${tableName}; refusing an unsafe migration marker.`,
+      );
+    }
+    for (const columnName of requiredColumns) {
+      if (!columnExists(db, tableName, columnName)) {
+        throw new StorageError(
+          STORAGE_ERROR_CODES.SCHEMA_COLUMN_MISSING,
+          `SQLite schema is missing ${tableName}.${columnName}; refusing an unsafe migration marker.`,
+        );
+      }
+    }
+  }
+}
+
+/** Adds one known additive column exactly once. Table and column names are internal constants. */
+function addColumnIfMissing(
+  db: DatabaseSyncLike,
+  tableName: SchemaMigrationTableName,
+  columnName: SchemaMigrationColumnName,
+  definition: string,
+): void {
+  if (columnExists(db, tableName, columnName)) return;
+  db.exec(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${definition}`);
+}
+
+/** Reads SQLite's built-in durable schema marker. */
+function readSchemaVersion(db: DatabaseSyncLike): number {
+  const row = db.prepare("PRAGMA user_version").get() as { user_version?: unknown } | undefined;
+  const version = row?.user_version;
+  if (typeof version !== "number" || !Number.isSafeInteger(version) || version < 0) {
+    throw new StorageError(
+      STORAGE_ERROR_CODES.SCHEMA_VERSION_INVALID,
+      "SQLite user_version must be a non-negative safe integer.",
+    );
+  }
+  return version;
+}
+
+/** Writes the schema marker only in the same transaction as its DDL changes. */
+function writeSchemaVersion(db: DatabaseSyncLike, version: number): void {
+  db.exec(`PRAGMA user_version = ${version}`);
+}
+
+/** Checks for one schema-owned table without interpolating external input. */
+function tableExists(db: DatabaseSyncLike, tableName: string): boolean {
+  return db.prepare(
+    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+  ).get(tableName) !== undefined;
+}
+
+/** Reads the schema-owned table definition to make an ALTER migration idempotent. */
+function columnExists(db: DatabaseSyncLike, tableName: string, columnName: string): boolean {
+  const rows = db.prepare(`PRAGMA table_info(${tableName})`).all() as readonly { name?: unknown }[];
+  return rows.some((row) => row.name === columnName);
+}
+
+/** Checks the immutable candidate-attempt index created by the current schema. */
+function indexExists(db: DatabaseSyncLike, indexName: string): boolean {
+  return db.prepare(
+    "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?",
+  ).get(indexName) !== undefined;
+}
+
 const REGISTRY_TABLES_DDL = `
   CREATE TABLE IF NOT EXISTS sheet_registry (
     sheet_id TEXT PRIMARY KEY,
@@ -500,147 +644,3 @@ const CUTOVER_STATE_DDL = `
     created_at INTEGER NOT NULL
   );
 `;
-
-/** Returns table DDL only, so migration transactions never change connection pragmas. */
-function latestSchemaDdl(): string {
-  return [
-    REGISTRY_TABLES_DDL,
-    IDENTITY_TABLES_DDL,
-    CANONICAL_STATE_TABLES_DDL,
-    VISIBLE_STATE_TABLES_DDL,
-    EVENT_LEDGER_TABLES_DDL,
-    CONFLICT_AND_QUARANTINE_TABLES_DDL,
-    BUSINESS_KEY_INDEX_DDL,
-    EFFECT_OUTBOX_DDL,
-    GATEWAY_REQUEST_RECEIPT_DDL,
-    WRITER_LEASE_DDL,
-    CUTOVER_STATE_DDL,
-  ].join("\n");
-}
-
-/**
- * Creates indexes that depend on additive migration columns only after those
- * columns have been confirmed. This keeps a version-one upgrade ordered.
- */
-function currentIndexesDdl(): string {
-  return `
-    CREATE UNIQUE INDEX IF NOT EXISTS sync_conflict_candidate_attempt_uq
-      ON sync_conflict(row_binding_id, field_name, candidate_epoch);
-  `;
-}
-
-/** Applies the first additive migration after the historical one-shot DDL. */
-function applyVersion2CandidateEpochMigration(db: DatabaseSyncLike): void {
-  addColumnIfMissing(db, "sync_conflict", "candidate_epoch", "INTEGER NOT NULL DEFAULT 0");
-  addColumnIfMissing(
-    db,
-    "resolution_command",
-    "expected_candidate_epoch",
-    "INTEGER NOT NULL DEFAULT 0",
-  );
-}
-
-/** Adds durable effect creation time without rewriting existing outbox evidence. */
-function applyVersion3EffectTimestampMigration(db: DatabaseSyncLike): void {
-  addColumnIfMissing(db, "sheet_effect_outbox", "created_at", "INTEGER NOT NULL DEFAULT 0");
-}
-
-/** Refuses to treat a user_version marker as authoritative when required columns are absent. */
-function verifyCurrentSchema(db: DatabaseSyncLike): void {
-  verifyRequiredColumns(db);
-  if (!indexExists(db, "sync_conflict_candidate_attempt_uq")) {
-    throw new StorageError(
-      STORAGE_ERROR_CODES.SCHEMA_INDEX_MISSING,
-      "SQLite schema is missing sync_conflict_candidate_attempt_uq.",
-    );
-  }
-}
-
-/** Verifies columns before a dependent unique index is created. */
-function verifyRequiredColumns(db: DatabaseSyncLike): void {
-  for (const [tableName, requiredColumns] of Object.entries(REQUIRED_V2_COLUMNS) as Array<
-    ["sync_conflict" | "resolution_command", readonly string[]]
-  >) {
-    if (!tableExists(db, tableName)) {
-      throw new StorageError(
-        STORAGE_ERROR_CODES.SCHEMA_TABLE_MISSING,
-        `SQLite schema is missing ${tableName}; refusing an unsafe migration marker.`,
-      );
-    }
-    for (const columnName of requiredColumns) {
-      if (!columnExists(db, tableName, columnName)) {
-        throw new StorageError(
-          STORAGE_ERROR_CODES.SCHEMA_COLUMN_MISSING,
-          `SQLite schema is missing ${tableName}.${columnName}; refusing an unsafe migration marker.`,
-        );
-      }
-    }
-  }
-  for (const [tableName, requiredColumns] of Object.entries(REQUIRED_V3_COLUMNS) as Array<
-    ["sheet_effect_outbox", readonly string[]]
-  >) {
-    if (!tableExists(db, tableName)) {
-      throw new StorageError(
-        STORAGE_ERROR_CODES.SCHEMA_TABLE_MISSING,
-        `SQLite schema is missing ${tableName}; refusing an unsafe migration marker.`,
-      );
-    }
-    for (const columnName of requiredColumns) {
-      if (!columnExists(db, tableName, columnName)) {
-        throw new StorageError(
-          STORAGE_ERROR_CODES.SCHEMA_COLUMN_MISSING,
-          `SQLite schema is missing ${tableName}.${columnName}; refusing an unsafe migration marker.`,
-        );
-      }
-    }
-  }
-}
-
-/** Adds one known additive column exactly once. Table and column names are internal constants. */
-function addColumnIfMissing(
-  db: DatabaseSyncLike,
-  tableName: SchemaMigrationTableName,
-  columnName: SchemaMigrationColumnName,
-  definition: string,
-): void {
-  if (columnExists(db, tableName, columnName)) return;
-  db.exec(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${definition}`);
-}
-
-/** Reads SQLite's built-in durable schema marker. */
-function readSchemaVersion(db: DatabaseSyncLike): number {
-  const row = db.prepare("PRAGMA user_version").get() as { user_version?: unknown } | undefined;
-  const version = row?.user_version;
-  if (typeof version !== "number" || !Number.isSafeInteger(version) || version < 0) {
-    throw new StorageError(
-      STORAGE_ERROR_CODES.SCHEMA_VERSION_INVALID,
-      "SQLite user_version must be a non-negative safe integer.",
-    );
-  }
-  return version;
-}
-
-/** Writes the schema marker only in the same transaction as its DDL changes. */
-function writeSchemaVersion(db: DatabaseSyncLike, version: number): void {
-  db.exec(`PRAGMA user_version = ${version}`);
-}
-
-/** Checks for one schema-owned table without interpolating external input. */
-function tableExists(db: DatabaseSyncLike, tableName: string): boolean {
-  return db.prepare(
-    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
-  ).get(tableName) !== undefined;
-}
-
-/** Reads the schema-owned table definition to make an ALTER migration idempotent. */
-function columnExists(db: DatabaseSyncLike, tableName: string, columnName: string): boolean {
-  const rows = db.prepare(`PRAGMA table_info(${tableName})`).all() as readonly { name?: unknown }[];
-  return rows.some((row) => row.name === columnName);
-}
-
-/** Checks the immutable candidate-attempt index created by the current schema. */
-function indexExists(db: DatabaseSyncLike, indexName: string): boolean {
-  return db.prepare(
-    "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?",
-  ).get(indexName) !== undefined;
-}
