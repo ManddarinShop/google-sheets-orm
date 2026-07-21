@@ -8,6 +8,7 @@
  * - Supersede/replan atomically closes old effect and inserts new one.
  */
 
+import { STORAGE_ERROR_CODES, StorageError } from "../errors.js";
 import type { DatabaseSyncLike } from "../sqlite/sqliteBridge.js";
 import { isFencingValid } from "./writerLease.js";
 import type { FencingContext } from "./writerLease.js";
@@ -202,7 +203,10 @@ export function claimEffect(db: DatabaseSyncLike, options: ClaimEffectOptions): 
     };
   }
   if (!Number.isSafeInteger(options.leaseDurationMs) || options.leaseDurationMs <= 0) {
-    throw new Error("effect lease duration must be a positive safe integer");
+    throw new StorageError(
+      STORAGE_ERROR_CODES.INVALID_EFFECT_OPTIONS,
+      "effect lease duration must be a positive safe integer",
+    );
   }
 
   const result = db
@@ -326,7 +330,10 @@ export function appendPendingEffects(
           db.exec("RELEASE append_pending_effects");
           return false;
         }
-        throw new Error(`could not insert effect ${effect.effectId}`);
+        throw new StorageError(
+          STORAGE_ERROR_CODES.EFFECT_WRITE_FAILED,
+          `could not insert effect ${effect.effectId}`,
+        );
       }
     }
     db.exec("RELEASE append_pending_effects");
@@ -348,7 +355,10 @@ export function applyEffectResult(db: DatabaseSyncLike, options: ApplyResultOpti
     return false;
   }
   if (options.status !== "applied" && options.projectionConfirmation !== undefined) {
-    throw new Error("only an applied effect may advance confirmed projection state");
+    throw new StorageError(
+      STORAGE_ERROR_CODES.INVALID_EFFECT_RESULT,
+      "only an applied effect may advance confirmed projection state",
+    );
   }
   if (options.projectionConfirmation !== undefined) {
     validateProjectionConfirmation(options.projectionConfirmation);
@@ -411,7 +421,10 @@ export function supersedeAndReplan(
       .run(newEffect.effectId, oldEffectId, ...fenceParameters(fence));
     if (superseded.changes !== 1) {
       requireCurrentFence(db, fence);
-      throw new Error(`effect ${oldEffectId} cannot be replanned from its current status`);
+      throw new StorageError(
+        STORAGE_ERROR_CODES.EFFECT_REPLAN_CONFLICT,
+        `effect ${oldEffectId} cannot be replanned from its current status`,
+      );
     }
 
     const inserted = db.prepare(INSERT_REPLANNED_EFFECT_SQL).run(
@@ -442,7 +455,10 @@ export function supersedeAndReplan(
     );
     if (inserted.changes !== 1) {
       requireCurrentFence(db, fence);
-      throw new Error(`effect ${newEffect.effectId} could not be inserted during replan`);
+      throw new StorageError(
+        STORAGE_ERROR_CODES.EFFECT_WRITE_FAILED,
+        `effect ${newEffect.effectId} could not be inserted during replan`,
+      );
     }
 
     db.exec("RELEASE replan");
@@ -521,7 +537,10 @@ export function listReadyEffects(
   limit: number,
 ): readonly PendingEffect[] {
   if (!Number.isSafeInteger(limit) || limit < 1) {
-    throw new Error("ready effect limit must be a positive safe integer");
+    throw new StorageError(
+      STORAGE_ERROR_CODES.INVALID_EFFECT_OPTIONS,
+      "ready effect limit must be a positive safe integer",
+    );
   }
   return db.prepare(SELECT_READY_EFFECTS_SQL).all(limit) as PendingEffect[];
 }
@@ -561,11 +580,17 @@ function validateProjectionConfirmation(confirmation: EffectProjectionConfirmati
     !Number.isSafeInteger(confirmation.visibleRevision) ||
     confirmation.visibleRevision < 1
   ) {
-    throw new Error("projection confirmation has an invalid identity or visible revision");
+    throw new StorageError(
+      STORAGE_ERROR_CODES.INVALID_PROJECTION_CONFIRMATION,
+      "projection confirmation has an invalid identity or visible revision",
+    );
   }
   for (const [fieldName, hash] of Object.entries(confirmation.fieldHashes)) {
     if (fieldName.length === 0 || hash.length === 0) {
-      throw new Error("projection confirmation contains an invalid field hash");
+      throw new StorageError(
+        STORAGE_ERROR_CODES.INVALID_PROJECTION_CONFIRMATION,
+        "projection confirmation contains an invalid field hash",
+      );
     }
   }
 }
@@ -585,7 +610,10 @@ function writeProjectionConfirmation(
     confirmation.visibleHash,
   );
   if (row.changes !== 1) {
-    throw new Error("projection confirmation would move visible state backwards");
+    throw new StorageError(
+      STORAGE_ERROR_CODES.PROJECTION_CONFIRMATION_REGRESSION,
+      "projection confirmation would move visible state backwards",
+    );
   }
 
   for (const [fieldName, hash] of Object.entries(confirmation.fieldHashes)) {
@@ -599,14 +627,20 @@ function writeProjectionConfirmation(
       hash,
     );
     if (field.changes !== 1) {
-      throw new Error("projection confirmation would move a field visible state backwards");
+      throw new StorageError(
+        STORAGE_ERROR_CODES.PROJECTION_CONFIRMATION_REGRESSION,
+        "projection confirmation would move a field visible state backwards",
+      );
     }
   }
 }
 
 function requireCurrentFence(db: DatabaseSyncLike, fence: FencingContext): void {
   if (!isFencingValid(db, fence)) {
-    throw new Error("writer fencing is stale or expired");
+    throw new StorageError(
+      STORAGE_ERROR_CODES.STALE_WRITER_FENCE,
+      "writer fencing is stale or expired",
+    );
   }
 }
 
