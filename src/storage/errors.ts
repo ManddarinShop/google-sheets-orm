@@ -1,6 +1,11 @@
 /** Stable error categories shared by the storage layer. */
 export const STORAGE_ERROR_CODES = {
   INVALID_WRITER_LEASE_OPTIONS: "invalid_writer_lease_options",
+  INVALID_SYNC_REGISTRATION: "invalid_sync_registration",
+  SYNC_REGISTRATION_WRITE_FAILED: "sync_registration_write_failed",
+  SYNC_REGISTRATION_CONFLICT: "sync_registration_conflict",
+  SYNC_REGISTRY_TARGET_UNAVAILABLE: "sync_registry_target_unavailable",
+  INVALID_READ_ONLY_OBSERVATION: "invalid_read_only_observation",
   SQLITE_RUNTIME_UNAVAILABLE: "sqlite_runtime_unavailable",
   SCHEMA_VERSION_TOO_NEW: "schema_version_too_new",
   SCHEMA_TABLE_MISSING: "schema_table_missing",

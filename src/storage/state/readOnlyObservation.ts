@@ -8,6 +8,7 @@
  */
 
 import { withImmediateTransaction, type DatabaseSyncLike } from "../sqlite/sqliteBridge.js";
+import { STORAGE_ERROR_CODES, StorageError } from "../errors.js";
 import { isFencingValid, type FencingContext } from "../sync/writerLease.js";
 
 const READ_OBSERVATION_RECEIPT_SQL = `
@@ -138,7 +139,10 @@ function ensureRegisteredTarget(db: DatabaseSyncLike, input: ReadOnlySnapshotObs
   } | undefined;
   if (row === undefined || row.physical_enabled !== 1 || row.logical_enabled !== 1 ||
     row.logical_sheet_id !== input.logicalSheetId) {
-    throw new Error("read-only snapshot target is not an enabled registered projection");
+    throw new StorageError(
+      STORAGE_ERROR_CODES.SYNC_REGISTRY_TARGET_UNAVAILABLE,
+      "read-only snapshot target is not an enabled registered projection",
+    );
   }
 }
 
@@ -152,17 +156,38 @@ function validateInput(input: ReadOnlySnapshotObservationInput): void {
     ["payload hash", input.payloadHash],
     ["ingress actor ID", input.ingressActorId],
   ] as const) {
-    if (value.length === 0) throw new Error(label + " is required");
+    if (value.length === 0) {
+      throw new StorageError(
+        STORAGE_ERROR_CODES.INVALID_READ_ONLY_OBSERVATION,
+        label + " is required",
+      );
+    }
   }
-  if (input.source !== "polling" && input.source !== "onEdit") throw new Error("invalid observation source");
+  if (input.source !== "polling" && input.source !== "onEdit") {
+    throw new StorageError(
+      STORAGE_ERROR_CODES.INVALID_READ_ONLY_OBSERVATION,
+      "invalid observation source",
+    );
+  }
   for (const [label, value] of [["detectedAt", input.detectedAt], ["receivedAt", input.receivedAt]] as const) {
-    if (!Number.isSafeInteger(value) || value < 0) throw new Error(label + " must be a non-negative safe integer");
+    if (!Number.isSafeInteger(value) || value < 0) {
+      throw new StorageError(
+        STORAGE_ERROR_CODES.INVALID_READ_ONLY_OBSERVATION,
+        label + " must be a non-negative safe integer",
+      );
+    }
   }
   if (input.editorActorSource === "google_active_user" &&
     (typeof input.editorActorId !== "string" || input.editorActorId.length === 0)) {
-    throw new Error("verified editor source requires an editor actor ID");
+    throw new StorageError(
+      STORAGE_ERROR_CODES.INVALID_READ_ONLY_OBSERVATION,
+      "verified editor source requires an editor actor ID",
+    );
   }
   if (input.editorActorSource === "unavailable" && input.editorActorId !== null) {
-    throw new Error("unavailable editor source cannot include an editor actor ID");
+    throw new StorageError(
+      STORAGE_ERROR_CODES.INVALID_READ_ONLY_OBSERVATION,
+      "unavailable editor source cannot include an editor actor ID",
+    );
   }
 }
