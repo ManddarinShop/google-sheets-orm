@@ -14,6 +14,7 @@ import type {
   ResolutionCommand,
   SyncConflict,
 } from "../../core/index.js";
+import { STORAGE_ERROR_CODES, StorageError } from "../errors.js";
 import { appendPendingEffects, type NewEffect } from "../sync/effectOutbox.js";
 import { withImmediateTransaction, type DatabaseSyncLike } from "../sqlite/sqliteBridge.js";
 import { isFencingValid, type FencingContext } from "../sync/writerLease.js";
@@ -296,7 +297,10 @@ export function persistResolutionCommand(
 
 function validateInput(input: PersistResolutionCommandInput): void {
   if (input.logicalSheetId.length === 0 || input.commitId.length === 0) {
-    throw new Error("logical sheet ID and resolution commit ID are required");
+    throw new StorageError(
+      STORAGE_ERROR_CODES.INVALID_RESOLUTION_COMMAND,
+      "logical sheet ID and resolution commit ID are required",
+    );
   }
   const command = input.command;
   if (
@@ -311,7 +315,10 @@ function validateInput(input: PersistResolutionCommandInput): void {
     !Number.isSafeInteger(command.expectedCandidateEpoch) ||
     command.expectedCandidateEpoch < 0
   ) {
-    throw new Error("resolution command has an invalid durable identity or CAS input");
+    throw new StorageError(
+      STORAGE_ERROR_CODES.INVALID_RESOLUTION_COMMAND,
+      "resolution command has an invalid durable identity or CAS input",
+    );
   }
   for (const effect of allResolutionEffects(input)) {
     const isConflictControlProjection =
@@ -319,7 +326,10 @@ function validateInput(input: PersistResolutionCommandInput): void {
       effect.targetKind === "conflict" &&
       effect.conflictId === command.targetConflictId;
     if (effect.logicalSheetId !== input.logicalSheetId && !isConflictControlProjection) {
-      throw new Error("resolution effect belongs to a different logical sheet");
+      throw new StorageError(
+        STORAGE_ERROR_CODES.INVALID_RESOLUTION_COMMAND,
+        "resolution effect belongs to a different logical sheet",
+      );
     }
   }
 }
@@ -331,11 +341,24 @@ function findExistingCommand(
   const rows = db.prepare(FIND_EXISTING_COMMAND_SQL)
     .all<CommandRow>(command.commandId, command.requestKey);
   if (rows.length === 0) return null;
-  if (rows.length !== 1) throw new Error("resolution command identity is internally inconsistent");
+  if (rows.length !== 1) {
+    throw new StorageError(
+      STORAGE_ERROR_CODES.RESOLUTION_COMMAND_IDENTITY_CONFLICT,
+      "resolution command identity is internally inconsistent",
+    );
+  }
   const existing = rows[0];
-  if (existing === undefined) throw new Error("resolution command lookup unexpectedly lost its row");
+  if (existing === undefined) {
+    throw new StorageError(
+      STORAGE_ERROR_CODES.RESOLUTION_STORAGE_INCONSISTENT,
+      "resolution command lookup unexpectedly lost its row",
+    );
+  }
   if (!sameCommandIdentity(existing, command)) {
-    throw new Error("resolution command ID or request key was replayed with a different payload");
+    throw new StorageError(
+      STORAGE_ERROR_CODES.RESOLUTION_COMMAND_IDENTITY_CONFLICT,
+      "resolution command ID or request key was replayed with a different payload",
+    );
   }
   return { kind: "duplicate", commandId: existing.command_id, status: existing.status };
 }
@@ -391,7 +414,10 @@ function readActiveCandidatePointer(
     .all(conflict.rowBindingId, conflict.fieldName, conflict.conflictId) as ActiveCandidatePointer[];
   if (rows.length === 0) return null;
   if (rows.length !== 1) {
-    throw new Error("a conflict cannot be active in more than one physical projection");
+    throw new StorageError(
+      STORAGE_ERROR_CODES.RESOLUTION_STORAGE_INCONSISTENT,
+      "a conflict cannot be active in more than one physical projection",
+    );
   }
   return rows[0] ?? null;
 }
@@ -426,7 +452,12 @@ function applyResolvedCommand(
   conflict: SyncConflict,
   pointer: ActiveCandidatePointer | null,
 ): void {
-  if (pointer === null) throw new Error("resolved command lost its active candidate pointer");
+  if (pointer === null) {
+    throw new StorageError(
+      STORAGE_ERROR_CODES.RESOLUTION_STORAGE_INCONSISTENT,
+      "resolved command lost its active candidate pointer",
+    );
+  }
   const command = input.command;
   const conflictResult = db.prepare(MARK_CONFLICT_RESOLVED_SQL).run(
     command.commandId,
@@ -516,7 +547,10 @@ function appendResolutionEffects(
       existing.target_id !== effect.targetId ||
       existing.payload_hash !== effect.payloadHash
     ) {
-      throw new Error("resolution effect dedupe key was reused with a different payload");
+      throw new StorageError(
+        STORAGE_ERROR_CODES.RESOLUTION_EFFECT_CONFLICT,
+        "resolution effect dedupe key was reused with a different payload",
+      );
     }
     return false;
   });
@@ -538,7 +572,10 @@ function ensureResolutionEffectsRegistered(
       target.projection !== effect.projection ||
       target.enabled !== 1
     ) {
-      throw new Error("resolution effect targets an unregistered physical projection");
+      throw new StorageError(
+        STORAGE_ERROR_CODES.RESOLUTION_TARGET_UNAVAILABLE,
+        "resolution effect targets an unregistered physical projection",
+      );
     }
   }
 }
@@ -558,11 +595,17 @@ function parseNormalizedCell(serialized: string, fieldName: string): NormalizedC
   try {
     value = JSON.parse(serialized) as unknown;
   } catch {
-    throw new Error(`stored ${fieldName} is not valid JSON`);
+    throw new StorageError(
+      STORAGE_ERROR_CODES.INVALID_STORED_CONFLICT,
+      `stored ${fieldName} is not valid JSON`,
+    );
   }
   if (value === null) return null;
   if (typeof value !== "object" || Array.isArray(value)) {
-    throw new Error(`stored ${fieldName} is not a normalized cell`);
+    throw new StorageError(
+      STORAGE_ERROR_CODES.INVALID_STORED_CONFLICT,
+      `stored ${fieldName} is not a normalized cell`,
+    );
   }
   const cell = value as { readonly kind?: unknown; readonly value?: unknown };
   if (cell.kind === "string" && typeof cell.value === "string") {
@@ -577,7 +620,10 @@ function parseNormalizedCell(serialized: string, fieldName: string): NormalizedC
   if (cell.kind === "date" && typeof cell.value === "string" && isCanonicalDate(cell.value)) {
     return { kind: "date", value: cell.value };
   }
-  throw new Error(`stored ${fieldName} is not a normalized cell`);
+  throw new StorageError(
+    STORAGE_ERROR_CODES.INVALID_STORED_CONFLICT,
+    `stored ${fieldName} is not a normalized cell`,
+  );
 }
 
 function isCanonicalDate(value: string): boolean {
@@ -588,7 +634,10 @@ function isCanonicalDate(value: string): boolean {
 
 function requireConflictStatus(value: string): ConflictStatus {
   if (value === "OPEN" || value === "NEEDS_REBASE" || value === "RESOLVED") return value;
-  throw new Error(`stored conflict has invalid status ${value}`);
+  throw new StorageError(
+    STORAGE_ERROR_CODES.INVALID_STORED_CONFLICT,
+    `stored conflict has invalid status ${value}`,
+  );
 }
 
 function assertCurrentFence(db: DatabaseSyncLike, fence: FencingContext): void {
@@ -599,4 +648,8 @@ function fenceParameters(fence: FencingContext): readonly [string, number, strin
   return [fence.role, fence.writerEpoch, fence.fencingToken, fence.now];
 }
 
-class FenceLostError extends Error {}
+class FenceLostError extends StorageError {
+  constructor() {
+    super(STORAGE_ERROR_CODES.STALE_WRITER_FENCE, "writer fencing is stale or expired");
+  }
+}
