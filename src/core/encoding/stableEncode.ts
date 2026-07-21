@@ -25,7 +25,14 @@
  */
 
 import { createHash } from "node:crypto";
+import {
+  JAVASCRIPT_TYPE_NAMES,
+  NORMALIZED_CELL_KINDS,
+  STABLE_ENCODING_ERROR_CODES,
+} from "./constants.js";
+import { isJavaScriptType } from "./typeGuards.js";
 import type { DateValue, StableValue } from "./types.js";
+import { StableEncodingError } from "../errors/stableEncoding.js";
 
 /**
  * Encodes a stable value to its canonical byte sequence.
@@ -55,11 +62,11 @@ function encodeValue(value: StableValue, chunks: Uint8Array[]): void {
     chunks.push(ascii("b0"));
     return;
   }
-  if (typeof value === "number") {
+  if (isJavaScriptType(value, JAVASCRIPT_TYPE_NAMES.NUMBER)) {
     encodeNumber(value, chunks);
     return;
   }
-  if (typeof value === "string") {
+  if (isJavaScriptType(value, JAVASCRIPT_TYPE_NAMES.STRING)) {
     encodeString(value, chunks);
     return;
   }
@@ -71,16 +78,22 @@ function encodeValue(value: StableValue, chunks: Uint8Array[]): void {
     encodeArray(value, chunks);
     return;
   }
-  if (typeof value === "object") {
+  if (isJavaScriptType(value, JAVASCRIPT_TYPE_NAMES.OBJECT)) {
     encodeObject(value as Record<string, StableValue>, chunks);
     return;
   }
-  throw new Error(`stable_encode: unsupported value type: ${typeof value}`);
+  throw new StableEncodingError(
+    STABLE_ENCODING_ERROR_CODES.UNSUPPORTED_VALUE_TYPE,
+    `stable_encode: unsupported value type: ${typeof value}`,
+  );
 }
 
 function encodeNumber(value: number, chunks: Uint8Array[]): void {
   if (!Number.isFinite(value)) {
-    throw new Error(`stable_encode: non-finite number: ${value}`);
+    throw new StableEncodingError(
+      STABLE_ENCODING_ERROR_CODES.NON_FINITE_NUMBER,
+      `stable_encode: non-finite number: ${value}`,
+    );
   }
   const unified = value === 0 ? 0 : value; // unify -0 to 0
   const decimal = shortestRoundTripDecimal(unified);
@@ -98,11 +111,17 @@ function encodeString(value: string, chunks: Uint8Array[]): void {
 
 function encodeDate(iso: string, chunks: Uint8Array[]): void {
   if (!DATE_REGEX.test(iso) || !isCanonicalDate(iso)) {
-    throw new Error(`stable_encode: invalid date format: ${iso}`);
+    throw new StableEncodingError(
+      STABLE_ENCODING_ERROR_CODES.INVALID_DATE_FORMAT,
+      `stable_encode: invalid date format: ${iso}`,
+    );
   }
   const bytes = textEncode(iso);
   if (bytes.length !== 24) {
-    throw new Error(`stable_encode: date must be exactly 24 bytes, got ${bytes.length}`);
+    throw new StableEncodingError(
+      STABLE_ENCODING_ERROR_CODES.INVALID_DATE_BYTE_LENGTH,
+      `stable_encode: date must be exactly 24 bytes, got ${bytes.length}`,
+    );
   }
   chunks.push(ascii("d24:"), bytes);
 }
@@ -122,7 +141,10 @@ function encodeObject(obj: Record<string, StableValue>, chunks: Uint8Array[]): v
   for (const key of keys) {
     const nfcKey = normalizeScalarString(key);
     if (normalizedKeys.has(nfcKey)) {
-      throw new Error(`stable_encode: duplicate object key after NFC normalization: ${nfcKey}`);
+      throw new StableEncodingError(
+        STABLE_ENCODING_ERROR_CODES.DUPLICATE_OBJECT_KEY,
+        `stable_encode: duplicate object key after NFC normalization: ${nfcKey}`,
+      );
     }
     normalizedKeys.add(nfcKey);
     const encodedKey = textEncode(nfcKey);
@@ -160,12 +182,15 @@ const DATE_REGEX = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 
 function isDateValue(value: unknown): value is DateValue {
   return (
-    typeof value === "object" &&
+    isJavaScriptType(value, JAVASCRIPT_TYPE_NAMES.OBJECT) &&
     value !== null &&
     !Array.isArray(value) &&
     Object.keys(value).length === 2 &&
-    (value as Record<string, unknown>).kind === "date" &&
-    typeof (value as Record<string, unknown>).value === "string"
+    (value as Record<string, unknown>).kind === NORMALIZED_CELL_KINDS.DATE &&
+    isJavaScriptType(
+      (value as Record<string, unknown>).value,
+      JAVASCRIPT_TYPE_NAMES.STRING,
+    )
   );
 }
 
@@ -176,13 +201,19 @@ function normalizeScalarString(value: string): string {
     if (codeUnit >= 0xd800 && codeUnit <= 0xdbff) {
       const next = value.charCodeAt(index + 1);
       if (!Number.isInteger(next) || next < 0xdc00 || next > 0xdfff) {
-        throw new Error("stable_encode: string contains an unpaired high surrogate");
+        throw new StableEncodingError(
+          STABLE_ENCODING_ERROR_CODES.UNPAIRED_HIGH_SURROGATE,
+          "stable_encode: string contains an unpaired high surrogate",
+        );
       }
       index += 1;
       continue;
     }
     if (codeUnit >= 0xdc00 && codeUnit <= 0xdfff) {
-      throw new Error("stable_encode: string contains an unpaired low surrogate");
+      throw new StableEncodingError(
+        STABLE_ENCODING_ERROR_CODES.UNPAIRED_LOW_SURROGATE,
+        "stable_encode: string contains an unpaired low surrogate",
+      );
     }
   }
   return value.normalize("NFC");

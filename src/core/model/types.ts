@@ -6,6 +6,29 @@
  */
 
 import type { NormalizedCell } from "../encoding/types.js";
+import type { ConflictStatus } from "./constants.js";
+import type { NormalizedCellKind } from "../encoding/types.js";
+import type {
+  CANONICAL_RESOLUTION_STATUSES,
+  CanonicalResolutionStatus,
+  DeleteEvidence,
+  FieldOwnership,
+  QuarantineReason,
+  RowBindingState,
+  RowOperation,
+  ROW_BINDING_STATES,
+  ROW_OPERATIONS,
+} from "./constants.js";
+
+export type {
+  CanonicalResolutionStatus,
+  ConflictStatus,
+  DeleteEvidence,
+  FieldOwnership,
+  QuarantineReason,
+  RowBindingState,
+  RowOperation,
+} from "./constants.js";
 
 // ---------------------------------------------------------------------------
 // Entity state (canonical)
@@ -19,9 +42,6 @@ export interface CanonicalFieldState {
   readonly ownership: FieldOwnership;
 }
 
-/** Ownership of a field, determining whether user edits are accepted. */
-export type FieldOwnership = "user" | "system";
-
 /** The canonical accepted state of an entity as seen by the evaluator. */
 export interface CanonicalEntityState {
   readonly entityId: string;
@@ -30,17 +50,19 @@ export interface CanonicalEntityState {
   readonly fields: ReadonlyMap<string, CanonicalFieldState>;
 }
 
+/** Explicitly represents whether canonical state is available to evaluation. */
+export type CanonicalResolution =
+  | {
+      readonly status: typeof CANONICAL_RESOLUTION_STATUSES.AVAILABLE;
+      readonly entity: CanonicalEntityState;
+    }
+  | { readonly status: typeof CANONICAL_RESOLUTION_STATUSES.MISSING };
+
 // ---------------------------------------------------------------------------
 // Projection types
 // ---------------------------------------------------------------------------
 
 export type Projection = "user_input" | "system_state" | "legacy_combined";
-
-export type RowBindingState =
-  | "candidate"
-  | "active"
-  | "tombstoned"
-  | "ambiguous";
 
 // ---------------------------------------------------------------------------
 // Normalized row
@@ -65,34 +87,127 @@ export interface NormalizedRow {
 
 export type ObservationSource = "onEdit" | "polling" | "resolution" | "repair";
 
-export type RowOperation = "insert" | "update" | "delete" | "rename";
-
-/** Evidence supplied by the anchor provider when an observed row disappeared. */
-export type DeleteEvidence = "deleted_confirmed" | "anchor_lost" | "unavailable";
-
 /** Provenance of an optional editor identity retained for audit only. */
 export type EditorActorSource = "google_active_user" | "unavailable";
 
-/** A single field change within a row. */
-export interface ObservedFieldChange {
+/** A single normalized field change without operation-specific revision state. */
+interface ObservedFieldChangeBase {
   readonly fieldName: string;
   readonly previousValue: NormalizedCell;
   readonly nextValue: NormalizedCell;
-  readonly baseFieldRevision: number | null;
 }
 
-/** A single row change within a batch. */
-export interface ObservedRowChange {
-  readonly rowBindingId: string;
-  readonly operation: RowOperation;
-  readonly beforeRow: NormalizedRow | null;
-  readonly afterRow: NormalizedRow | null;
-  readonly baseVisibleRevision: number;
-  readonly baseEntityRevision: number | null;
-  /** Required for delete; anchor loss is never treated as a tombstone. */
-  readonly deleteEvidence: DeleteEvidence | null;
-  readonly fields: readonly ObservedFieldChange[];
+/** A field change for an inserted row, which has no prior field revision. */
+export interface ObservedInsertFieldChange extends ObservedFieldChangeBase {
+  readonly baseFieldRevision?: never;
 }
+
+/** A field change for an existing row with a required prior field revision. */
+export interface ObservedVersionedFieldChange extends ObservedFieldChangeBase {
+  readonly baseFieldRevision: number;
+}
+
+/** A validated field change accepted by the evaluator. */
+export type ObservedFieldChange =
+  | ObservedInsertFieldChange
+  | ObservedVersionedFieldChange;
+
+/** Common untrusted field data before cell normalization. */
+interface RawObservedFieldChangeBase {
+  readonly fieldName: string;
+  readonly previousValue: unknown;
+  readonly nextValue: unknown;
+}
+
+/** Raw field data for an insertion, which has no prior field revision. */
+export interface RawObservedInsertFieldChange extends RawObservedFieldChangeBase {
+  readonly baseFieldRevision?: never;
+}
+
+/** Raw field data for an existing row with a prior field revision. */
+export interface RawObservedVersionedFieldChange extends RawObservedFieldChangeBase {
+  readonly baseFieldRevision: number;
+}
+
+/** Raw field data whose revision shape is determined by row state. */
+export type RawObservedFieldChange =
+  | RawObservedInsertFieldChange
+  | RawObservedVersionedFieldChange;
+
+/** Common identity and visibility data for a validated row change. */
+interface ObservedRowChangeBase {
+  readonly rowBindingId: string;
+  readonly baseVisibleRevision: number;
+}
+
+/** A validated insertion with only the state an insertion can carry. */
+export interface ObservedInsertRowChange extends ObservedRowChangeBase {
+  readonly operation: typeof ROW_OPERATIONS.INSERT;
+  readonly afterRow: NormalizedRow;
+  readonly fields: readonly ObservedInsertFieldChange[];
+}
+
+/** A validated update or rename with both visible row snapshots. */
+export interface ObservedExistingRowChange extends ObservedRowChangeBase {
+  readonly operation: typeof ROW_OPERATIONS.UPDATE | typeof ROW_OPERATIONS.RENAME;
+  readonly beforeRow: NormalizedRow;
+  readonly afterRow: NormalizedRow;
+  readonly baseEntityRevision: number;
+  readonly fields: readonly ObservedVersionedFieldChange[];
+}
+
+/** A validated deletion with required evidence that may later be rejected. */
+export interface ObservedDeleteRowChange extends ObservedRowChangeBase {
+  readonly operation: typeof ROW_OPERATIONS.DELETE;
+  readonly beforeRow: NormalizedRow;
+  readonly baseEntityRevision: number;
+  /** Anchor evidence is checked by operation preconditions after normalization. */
+  readonly deleteEvidence: DeleteEvidence;
+  readonly fields: readonly ObservedVersionedFieldChange[];
+}
+
+/** A validated row change whose shape is determined by its operation. */
+export type ObservedRowChange =
+  | ObservedInsertRowChange
+  | ObservedExistingRowChange
+  | ObservedDeleteRowChange;
+
+/** Common raw row data shared by operation-specific input variants. */
+interface RawObservedRowChangeBase {
+  readonly rowBindingId: string;
+  readonly baseVisibleRevision: number;
+}
+
+/** Raw insertion input with no existing-row state fields. */
+export interface RawObservedInsertRowChange extends RawObservedRowChangeBase {
+  readonly operation: typeof ROW_OPERATIONS.INSERT;
+  readonly afterRow: NormalizedRow;
+  readonly fields: readonly RawObservedInsertFieldChange[];
+}
+
+/** Raw update or rename input with required existing-row state. */
+export interface RawObservedExistingRowChange extends RawObservedRowChangeBase {
+  readonly operation: typeof ROW_OPERATIONS.UPDATE | typeof ROW_OPERATIONS.RENAME;
+  readonly beforeRow: NormalizedRow;
+  readonly afterRow: NormalizedRow;
+  readonly baseEntityRevision: number;
+  readonly fields: readonly RawObservedVersionedFieldChange[];
+}
+
+/** Raw delete input with required deletion evidence and entity revision. */
+export interface RawObservedDeleteRowChange extends RawObservedRowChangeBase {
+  readonly operation: typeof ROW_OPERATIONS.DELETE;
+  readonly beforeRow: NormalizedRow;
+  readonly baseEntityRevision: number;
+  readonly deleteEvidence: DeleteEvidence;
+  readonly fields: readonly RawObservedVersionedFieldChange[];
+}
+
+/** Raw row input whose shape is determined by its operation. */
+export type RawObservedRowChange =
+  | RawObservedInsertRowChange
+  | RawObservedExistingRowChange
+  | RawObservedDeleteRowChange;
 
 /** A batch of row changes observed from one paste/drag-fill/poll cycle. */
 export interface ObservedEditBatch {
@@ -116,8 +231,8 @@ export interface ObservedEditBatch {
 // Event model
 // ---------------------------------------------------------------------------
 
-/** A normalized Sheet change event after identity resolution. */
-export interface SheetChangeEvent {
+/** Common metadata for a normalized Sheet change event. */
+interface SheetChangeEventBase {
   readonly eventId: string;
   readonly eventKey: string;
   readonly payloadHash: string;
@@ -126,20 +241,41 @@ export interface SheetChangeEvent {
   readonly sheetId: string;
   readonly projection: Projection;
   readonly rowBindingId: string;
-  readonly operation: RowOperation;
   readonly baseVisibleRevision: number;
   readonly baseSnapshotHash: string;
-  readonly baseEntityRevision: number | null;
-  readonly fields: readonly ObservedFieldChange[];
   readonly beforeRowHash: string;
   readonly afterRowHash: string;
 }
 
+/** An event for a newly observed row with no prior entity revision. */
+export interface InsertSheetChangeEvent extends SheetChangeEventBase {
+  readonly operation: typeof ROW_OPERATIONS.INSERT;
+  readonly fields: readonly ObservedInsertFieldChange[];
+}
+
+/** An event for an existing row with a required entity revision. */
+export interface ExistingSheetChangeEvent extends SheetChangeEventBase {
+  readonly operation: typeof ROW_OPERATIONS.UPDATE | typeof ROW_OPERATIONS.RENAME;
+  readonly baseEntityRevision: number;
+  readonly fields: readonly ObservedVersionedFieldChange[];
+}
+
+/** A delete event with a required entity revision and deletion evidence. */
+export interface DeleteSheetChangeEvent extends SheetChangeEventBase {
+  readonly operation: typeof ROW_OPERATIONS.DELETE;
+  readonly baseEntityRevision: number;
+  readonly fields: readonly ObservedVersionedFieldChange[];
+}
+
+/** A normalized event whose shape is determined by its operation. */
+export type SheetChangeEvent =
+  | InsertSheetChangeEvent
+  | ExistingSheetChangeEvent
+  | DeleteSheetChangeEvent;
+
 // ---------------------------------------------------------------------------
 // Conflict model
 // ---------------------------------------------------------------------------
-
-export type ConflictStatus = "OPEN" | "NEEDS_REBASE" | "RESOLVED";
 
 /** Field-level conflict record preserving both candidate and canonical state. */
 export interface SyncConflict {
@@ -165,32 +301,42 @@ export interface SyncConflict {
 // Quarantine model
 // ---------------------------------------------------------------------------
 
-export type QuarantineReason =
-  | "unknown_field"
-  | "unknown_base_revision"
-  | "ambiguous_identity"
-  | "identity_tampering"
-  | "schema_drift"
-  | "system_field_edit"
-  | "mixed_ownership_edit"
-  | "invalid_cell"
-  | "formula_unsupported"
-  | "merged_cell_unsupported"
-  | "cell_error"
-  | "anchor_lost"
-  | "invalid_snapshot_metadata"
-  | "invalid_event";
-
 /** A plan to quarantine a row with preserved evidence. */
-export interface QuarantinePlan {
+interface QuarantinePlanBase {
   readonly quarantineId: string;
   readonly reason: QuarantineReason;
   readonly rowBindingId: string;
-  readonly beforeRow: NormalizedRow | null;
-  readonly afterRow: NormalizedRow | null;
+  readonly operation: RowOperation;
   readonly fields: readonly ObservedFieldChange[];
   readonly repairFields: readonly string[];
 }
+
+/** Quarantine evidence for an inserted row. */
+export interface InsertQuarantinePlan extends QuarantinePlanBase {
+  readonly operation: typeof ROW_OPERATIONS.INSERT;
+  readonly afterRow: NormalizedRow;
+}
+
+/** Quarantine evidence for an existing row edit. */
+export interface ExistingQuarantinePlan extends QuarantinePlanBase {
+  readonly operation: typeof ROW_OPERATIONS.UPDATE | typeof ROW_OPERATIONS.RENAME;
+  readonly beforeRow: NormalizedRow;
+  readonly afterRow: NormalizedRow;
+}
+
+/** Quarantine evidence for a deleted row. */
+export interface DeleteQuarantinePlan extends QuarantinePlanBase {
+  readonly operation: typeof ROW_OPERATIONS.DELETE;
+  readonly beforeRow: NormalizedRow;
+}
+
+export type QuarantinePlan =
+  | InsertQuarantinePlan
+  | ExistingQuarantinePlan
+  | DeleteQuarantinePlan;
+
+/** Alias kept for internal code that needs to emphasize the typed shape. */
+export type TypedQuarantinePlan = QuarantinePlan;
 
 // ---------------------------------------------------------------------------
 // Repair model
@@ -215,7 +361,7 @@ export interface FieldManifestEntry {
   readonly fieldName: string;
   readonly ownership: FieldOwnership;
   readonly projection: Projection;
-  readonly type: "string" | "number" | "boolean" | "date";
+  readonly type: NormalizedCellKind;
   readonly required: boolean;
   readonly unique: boolean;
 }
@@ -227,14 +373,43 @@ export type OwnershipManifest = ReadonlyMap<string, FieldManifestEntry>;
 // Row binding context (provided by storage layer)
 // ---------------------------------------------------------------------------
 
-/** Identity context for a row binding, provided to the evaluator. */
-export interface RowBindingContext {
+/** Common identity context shared by operation-state-specific bindings. */
+interface RowBindingContextBase {
   readonly rowBindingId: string;
-  readonly entityId: string | null;
-  readonly bindingState: RowBindingState;
-  readonly businessKey: string | null;
   readonly candidateEpoch: number;
 }
+
+/** A candidate binding that has not been attached to a canonical entity. */
+export interface CandidateRowBindingContext extends RowBindingContextBase {
+  readonly bindingState: typeof ROW_BINDING_STATES.CANDIDATE;
+  readonly businessKey?: string;
+}
+
+/** An active binding with an entity and business key. */
+export interface ActiveRowBindingContext extends RowBindingContextBase {
+  readonly bindingState: typeof ROW_BINDING_STATES.ACTIVE;
+  readonly entityId: string;
+  readonly businessKey: string;
+}
+
+/** A tombstoned binding that still points to its former entity. */
+export interface TombstonedRowBindingContext extends RowBindingContextBase {
+  readonly bindingState: typeof ROW_BINDING_STATES.TOMBSTONED;
+  readonly entityId: string;
+  readonly businessKey: string;
+}
+
+/** An ambiguous binding whose entity identity cannot be trusted. */
+export interface AmbiguousRowBindingContext extends RowBindingContextBase {
+  readonly bindingState: typeof ROW_BINDING_STATES.AMBIGUOUS;
+}
+
+/** A binding whose shape is determined by its lifecycle state. */
+export type RowBindingContext =
+  | CandidateRowBindingContext
+  | ActiveRowBindingContext
+  | TombstonedRowBindingContext
+  | AmbiguousRowBindingContext;
 
 // ---------------------------------------------------------------------------
 // Resolution command
