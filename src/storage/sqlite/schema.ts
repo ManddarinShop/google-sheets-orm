@@ -1,4 +1,9 @@
 import { withImmediateTransaction, type DatabaseSyncLike } from "./sqliteBridge.js";
+import type {
+  SchemaMigrationColumnName,
+  SchemaMigrationTableName,
+} from "./schemaTypes.js";
+import { STORAGE_ERROR_CODES, StorageError } from "../errors.js";
 
 /**
  * SQLite schema and migration DDL for the SQLite-authoritative sync storage layer.
@@ -93,7 +98,8 @@ export function migrateSchema(db: DatabaseSyncLike): SchemaMigrationResult {
   return withImmediateTransaction(db, () => {
     const fromVersion = readSchemaVersion(db);
     if (fromVersion > CURRENT_SCHEMA_VERSION) {
-      throw new Error(
+      throw new StorageError(
+        STORAGE_ERROR_CODES.SCHEMA_VERSION_TOO_NEW,
         `SQLite schema version ${fromVersion} is newer than supported version ${CURRENT_SCHEMA_VERSION}.`,
       );
     }
@@ -113,7 +119,10 @@ export function migrateSchema(db: DatabaseSyncLike): SchemaMigrationResult {
     }
 
     if (!hasSchema) {
-      throw new Error("SQLite schema is missing sheet_registry and cannot be migrated safely.");
+      throw new StorageError(
+        STORAGE_ERROR_CODES.SCHEMA_TABLE_MISSING,
+        "SQLite schema is missing sheet_registry and cannot be migrated safely.",
+      );
     }
 
     // Create tables that were added after the original one-shot bootstrap,
@@ -142,381 +151,371 @@ export function migrateSchema(db: DatabaseSyncLike): SchemaMigrationResult {
   });
 }
 
+const REGISTRY_TABLES_DDL = `
+  CREATE TABLE IF NOT EXISTS sheet_registry (
+    sheet_id TEXT PRIMARY KEY,
+    schema_version INTEGER NOT NULL,
+    ownership_manifest_json TEXT NOT NULL,
+    business_key_field TEXT NOT NULL,
+    locale TEXT,
+    timezone TEXT,
+    anchor_mode TEXT NOT NULL DEFAULT 'developer_metadata',
+    stable_encode_version TEXT NOT NULL DEFAULT 'stable_encode_v1',
+    enabled INTEGER NOT NULL DEFAULT 1
+  );
+
+  CREATE TABLE IF NOT EXISTS physical_sheet_registry (
+    physical_sheet_id TEXT PRIMARY KEY,
+    logical_sheet_id TEXT NOT NULL REFERENCES sheet_registry(sheet_id),
+    spreadsheet_id TEXT NOT NULL,
+    tab_name TEXT NOT NULL,
+    registered_range TEXT NOT NULL,
+    projection TEXT NOT NULL,
+    schema_version INTEGER NOT NULL,
+    anchor_mode TEXT NOT NULL DEFAULT 'developer_metadata',
+    enabled INTEGER NOT NULL DEFAULT 1,
+    UNIQUE(spreadsheet_id, tab_name, registered_range, projection)
+  );
+`;
+
+const IDENTITY_TABLES_DDL = `
+  CREATE TABLE IF NOT EXISTS row_binding (
+    row_binding_id TEXT PRIMARY KEY,
+    logical_sheet_id TEXT NOT NULL REFERENCES sheet_registry(sheet_id),
+    anchor_reference TEXT NOT NULL,
+    entity_id TEXT,
+    last_business_id TEXT,
+    state TEXT NOT NULL CHECK (state IN ('candidate', 'active', 'tombstoned', 'ambiguous')),
+    candidate_epoch INTEGER NOT NULL DEFAULT 0,
+    UNIQUE(logical_sheet_id, anchor_reference)
+  );
+
+  CREATE TABLE IF NOT EXISTS projection_row_binding (
+    projection_row_id TEXT PRIMARY KEY,
+    physical_sheet_id TEXT NOT NULL REFERENCES physical_sheet_registry(physical_sheet_id),
+    row_binding_id TEXT REFERENCES row_binding(row_binding_id),
+    conflict_id TEXT,
+    anchor_reference TEXT NOT NULL,
+    physical_row_locator INTEGER NOT NULL,
+    state TEXT NOT NULL DEFAULT 'active',
+    CHECK ((row_binding_id IS NOT NULL) != (conflict_id IS NOT NULL)),
+    UNIQUE(physical_sheet_id, anchor_reference)
+  );
+
+  CREATE UNIQUE INDEX IF NOT EXISTS projection_row_binding_entity_uq
+    ON projection_row_binding(physical_sheet_id, row_binding_id)
+    WHERE row_binding_id IS NOT NULL;
+
+  CREATE UNIQUE INDEX IF NOT EXISTS projection_row_binding_conflict_uq
+    ON projection_row_binding(physical_sheet_id, conflict_id)
+    WHERE conflict_id IS NOT NULL;
+`;
+
+const CANONICAL_STATE_TABLES_DDL = `
+  CREATE TABLE IF NOT EXISTS entity_state (
+    entity_id TEXT PRIMARY KEY,
+    entity_revision INTEGER NOT NULL,
+    accepted_snapshot_hash TEXT,
+    status TEXT NOT NULL DEFAULT 'active'
+  );
+
+  CREATE TABLE IF NOT EXISTS entity_field_state (
+    entity_id TEXT NOT NULL REFERENCES entity_state(entity_id),
+    field_name TEXT NOT NULL,
+    normalized_value TEXT NOT NULL,
+    field_revision INTEGER NOT NULL,
+    ownership TEXT NOT NULL CHECK (ownership IN ('user', 'system')),
+    PRIMARY KEY(entity_id, field_name)
+  );
+`;
+
+const VISIBLE_STATE_TABLES_DDL = `
+  CREATE TABLE IF NOT EXISTS sheet_visible_state (
+    physical_sheet_id TEXT NOT NULL,
+    projection TEXT NOT NULL,
+    row_binding_id TEXT NOT NULL,
+    confirmed_snapshot_hash TEXT NOT NULL,
+    confirmed_visible_revision INTEGER NOT NULL,
+    confirmed_entity_revision INTEGER,
+    last_observed_hash TEXT,
+    PRIMARY KEY(physical_sheet_id, projection, row_binding_id),
+    FOREIGN KEY(physical_sheet_id) REFERENCES physical_sheet_registry(physical_sheet_id)
+  );
+
+  CREATE TABLE IF NOT EXISTS sheet_visible_field_state (
+    physical_sheet_id TEXT NOT NULL,
+    projection TEXT NOT NULL,
+    row_binding_id TEXT NOT NULL,
+    field_name TEXT NOT NULL,
+    confirmed_field_hash TEXT NOT NULL,
+    confirmed_visible_revision INTEGER NOT NULL,
+    active_candidate_conflict_id TEXT,
+    active_candidate_hash TEXT,
+    candidate_epoch INTEGER NOT NULL DEFAULT 0,
+    last_observed_field_hash TEXT,
+    PRIMARY KEY(physical_sheet_id, projection, row_binding_id, field_name),
+    FOREIGN KEY(physical_sheet_id) REFERENCES physical_sheet_registry(physical_sheet_id)
+  );
+`;
+
+const EVENT_LEDGER_TABLES_DDL = `
+  CREATE TABLE IF NOT EXISTS event_batch (
+    batch_id TEXT PRIMARY KEY,
+    logical_sheet_id TEXT NOT NULL REFERENCES sheet_registry(sheet_id),
+    physical_sheet_id TEXT NOT NULL REFERENCES physical_sheet_registry(physical_sheet_id),
+    source TEXT NOT NULL,
+    projection TEXT NOT NULL,
+    atomicity TEXT NOT NULL DEFAULT 'row_independent',
+    base_snapshot_hash TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS event_log (
+    event_id TEXT PRIMARY KEY,
+    logical_sheet_id TEXT NOT NULL,
+    physical_sheet_id TEXT NOT NULL,
+    event_key TEXT NOT NULL,
+    payload_hash TEXT NOT NULL,
+    event_sequence INTEGER NOT NULL,
+    batch_id TEXT NOT NULL REFERENCES event_batch(batch_id),
+    row_binding_id TEXT NOT NULL,
+    operation TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('accepted', 'conflict', 'quarantined')),
+    received_at INTEGER NOT NULL,
+    UNIQUE(logical_sheet_id, event_key)
+  );
+
+  CREATE TABLE IF NOT EXISTS event_observation (
+    observation_id TEXT PRIMARY KEY,
+    logical_sheet_id TEXT NOT NULL,
+    physical_sheet_id TEXT NOT NULL,
+    observation_key TEXT NOT NULL,
+    event_id TEXT,
+    source TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    payload_hash TEXT NOT NULL,
+    detected_at INTEGER NOT NULL,
+    received_at INTEGER NOT NULL,
+    redacted_at INTEGER,
+    ingress_actor_id TEXT NOT NULL,
+    editor_actor_id TEXT,
+    editor_actor_source TEXT NOT NULL DEFAULT 'unavailable'
+  );
+
+  CREATE TABLE IF NOT EXISTS observation_receipt (
+    logical_sheet_id TEXT NOT NULL,
+    observation_key TEXT NOT NULL,
+    representative_payload_hash TEXT NOT NULL,
+    first_observation_id TEXT NOT NULL,
+    last_observation_id TEXT NOT NULL,
+    event_id TEXT,
+    state TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending', 'evaluated', 'duplicate', 'quarantined')),
+    first_seen_at INTEGER NOT NULL,
+    last_seen_at INTEGER NOT NULL,
+    redacted_at INTEGER,
+    PRIMARY KEY(logical_sheet_id, observation_key)
+  );
+
+  CREATE TABLE IF NOT EXISTS event_row (
+    event_id TEXT PRIMARY KEY REFERENCES event_log(event_id),
+    before_row_json TEXT,
+    after_row_json TEXT,
+    before_hash TEXT,
+    after_hash TEXT
+  );
+
+  CREATE TABLE IF NOT EXISTS event_field (
+    event_id TEXT NOT NULL REFERENCES event_log(event_id),
+    field_name TEXT NOT NULL,
+    previous_value TEXT,
+    next_value TEXT,
+    base_field_revision INTEGER,
+    PRIMARY KEY(event_id, field_name)
+  );
+`;
+
+const CONFLICT_AND_QUARANTINE_TABLES_DDL = `
+  CREATE TABLE IF NOT EXISTS sync_conflict (
+    conflict_id TEXT PRIMARY KEY,
+    conflict_group_id TEXT,
+    event_id TEXT NOT NULL REFERENCES event_log(event_id),
+    logical_sheet_id TEXT NOT NULL REFERENCES sheet_registry(sheet_id),
+    entity_id TEXT NOT NULL,
+    row_binding_id TEXT NOT NULL REFERENCES row_binding(row_binding_id),
+    field_name TEXT NOT NULL,
+    user_value TEXT NOT NULL,
+    user_base_revision INTEGER NOT NULL,
+    canonical_value_at_detection TEXT NOT NULL,
+    canonical_revision_at_detection INTEGER NOT NULL,
+    current_canonical_value TEXT NOT NULL,
+    current_canonical_revision INTEGER NOT NULL,
+    candidate_epoch INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'OPEN' CHECK (status IN ('OPEN', 'NEEDS_REBASE', 'RESOLVED')),
+    last_rebased_commit_id TEXT,
+    resolution_command_id TEXT,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS quarantine_record (
+    quarantine_id TEXT PRIMARY KEY,
+    event_id TEXT,
+    observation_id TEXT,
+    logical_sheet_id TEXT NOT NULL REFERENCES sheet_registry(sheet_id),
+    row_binding_id TEXT,
+    reason TEXT NOT NULL,
+    before_row_json TEXT,
+    after_row_json TEXT,
+    fields_json TEXT NOT NULL,
+    repair_fields_json TEXT NOT NULL DEFAULT '[]',
+    repair_state TEXT,
+    candidate_payload_json TEXT,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS quarantine_command (
+    command_id TEXT PRIMARY KEY,
+    request_key TEXT NOT NULL UNIQUE,
+    action TEXT NOT NULL,
+    actor_id TEXT NOT NULL,
+    role TEXT NOT NULL,
+    target_quarantine_id TEXT NOT NULL REFERENCES quarantine_record(quarantine_id),
+    evidence_hash TEXT NOT NULL,
+    expected_revision INTEGER NOT NULL,
+    payload_hash TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    issued_at INTEGER NOT NULL,
+    applied_at INTEGER,
+    result_hash TEXT
+  );
+
+  CREATE TABLE IF NOT EXISTS resolution_command (
+    command_id TEXT PRIMARY KEY,
+    request_key TEXT NOT NULL UNIQUE,
+    action TEXT NOT NULL,
+    actor_id TEXT NOT NULL,
+    role TEXT NOT NULL,
+    target_conflict_id TEXT NOT NULL REFERENCES sync_conflict(conflict_id),
+    expected_revision INTEGER NOT NULL,
+    active_candidate_hash TEXT NOT NULL,
+    expected_candidate_epoch INTEGER NOT NULL DEFAULT 0,
+    payload_hash TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'processing', 'applied', 'stale', 'rejected', 'failed')),
+    issued_at INTEGER NOT NULL,
+    applied_commit_id TEXT
+  );
+`;
+
+const BUSINESS_KEY_INDEX_DDL = `
+  CREATE TABLE IF NOT EXISTS business_key_index (
+    logical_sheet_id TEXT NOT NULL REFERENCES sheet_registry(sheet_id),
+    field_name TEXT NOT NULL,
+    normalized_key TEXT NOT NULL,
+    entity_id TEXT NOT NULL,
+    state TEXT NOT NULL DEFAULT 'active'
+  );
+
+  CREATE UNIQUE INDEX IF NOT EXISTS business_key_active_uq
+    ON business_key_index(logical_sheet_id, field_name, normalized_key)
+    WHERE state = 'active';
+`;
+
+const EFFECT_OUTBOX_DDL = `
+  CREATE TABLE IF NOT EXISTS sheet_effect_outbox (
+    effect_id TEXT PRIMARY KEY,
+    effect_kind TEXT NOT NULL,
+    commit_id TEXT NOT NULL,
+    logical_sheet_id TEXT NOT NULL REFERENCES sheet_registry(sheet_id),
+    physical_sheet_id TEXT NOT NULL REFERENCES physical_sheet_registry(physical_sheet_id),
+    projection TEXT NOT NULL,
+    row_binding_id TEXT,
+    conflict_id TEXT,
+    target_kind TEXT NOT NULL CHECK (target_kind IN ('entity', 'row_binding', 'projection_row', 'conflict')),
+    target_id TEXT NOT NULL,
+    target_entity_revision INTEGER,
+    target_field_revision_hash TEXT,
+    target_canonical_commit_id TEXT,
+    expected_visible_revision INTEGER NOT NULL,
+    expected_visible_hash TEXT NOT NULL,
+    repair_guard_hash TEXT,
+    source_quarantine_id TEXT,
+    payload_json TEXT NOT NULL,
+    payload_hash TEXT NOT NULL,
+    effect_dedupe_key TEXT NOT NULL UNIQUE,
+    stream_sequence INTEGER NOT NULL,
+    predecessor_effect_id TEXT,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'processing', 'applied', 'blocked_candidate', 'superseded', 'conflict', 'failed')),
+    attempts INTEGER NOT NULL DEFAULT 0,
+    lease_until INTEGER,
+    next_attempt_at INTEGER,
+    claim_token TEXT,
+    writer_epoch INTEGER,
+    supersedes_effect_id TEXT,
+    last_error_code TEXT,
+    last_error_message TEXT,
+    created_at INTEGER NOT NULL DEFAULT 0,
+    UNIQUE(logical_sheet_id, target_kind, target_id, stream_sequence)
+  );
+
+  CREATE INDEX IF NOT EXISTS effect_outbox_stream_idx
+    ON sheet_effect_outbox(logical_sheet_id, target_kind, target_id, stream_sequence)
+    WHERE status IN ('pending', 'processing');
+`;
+
+const GATEWAY_REQUEST_RECEIPT_DDL = `
+  CREATE TABLE IF NOT EXISTS gateway_request_receipt (
+    request_id TEXT PRIMARY KEY,
+    operation TEXT NOT NULL,
+    key_id TEXT NOT NULL,
+    body_hash TEXT NOT NULL,
+    issued_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL,
+    ingress_actor_id TEXT NOT NULL,
+    editor_actor_id TEXT,
+    editor_actor_source TEXT NOT NULL DEFAULT 'unavailable',
+    status TEXT,
+    result_hash TEXT,
+    received_at INTEGER NOT NULL,
+    redacted_at INTEGER
+  );
+`;
+
+const WRITER_LEASE_DDL = `
+  CREATE TABLE IF NOT EXISTS writer_lease (
+    role TEXT PRIMARY KEY,
+    writer_id TEXT NOT NULL,
+    writer_epoch INTEGER NOT NULL,
+    fencing_token TEXT NOT NULL,
+    lease_until INTEGER NOT NULL
+  );
+`;
+
+const CUTOVER_STATE_DDL = `
+  CREATE TABLE IF NOT EXISTS cutover_state (
+    cutover_id TEXT PRIMARY KEY,
+    phase TEXT NOT NULL,
+    source_snapshot_hash TEXT,
+    marker TEXT,
+    status TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+  );
+`;
+
 /** Returns table DDL only, so migration transactions never change connection pragmas. */
 function latestSchemaDdl(): string {
-  return `
-    -- -----------------------------------------------------------------------
-    -- Registry tables
-    -- -----------------------------------------------------------------------
-
-    CREATE TABLE IF NOT EXISTS sheet_registry (
-      sheet_id TEXT PRIMARY KEY,
-      schema_version INTEGER NOT NULL,
-      ownership_manifest_json TEXT NOT NULL,
-      business_key_field TEXT NOT NULL,
-      locale TEXT,
-      timezone TEXT,
-      anchor_mode TEXT NOT NULL DEFAULT 'developer_metadata',
-      stable_encode_version TEXT NOT NULL DEFAULT 'stable_encode_v1',
-      enabled INTEGER NOT NULL DEFAULT 1
-    );
-
-    CREATE TABLE IF NOT EXISTS physical_sheet_registry (
-      physical_sheet_id TEXT PRIMARY KEY,
-      logical_sheet_id TEXT NOT NULL REFERENCES sheet_registry(sheet_id),
-      spreadsheet_id TEXT NOT NULL,
-      tab_name TEXT NOT NULL,
-      registered_range TEXT NOT NULL,
-      projection TEXT NOT NULL,
-      schema_version INTEGER NOT NULL,
-      anchor_mode TEXT NOT NULL DEFAULT 'developer_metadata',
-      enabled INTEGER NOT NULL DEFAULT 1,
-      UNIQUE(spreadsheet_id, tab_name, registered_range, projection)
-    );
-
-    -- -----------------------------------------------------------------------
-    -- Identity tables
-    -- -----------------------------------------------------------------------
-
-    CREATE TABLE IF NOT EXISTS row_binding (
-      row_binding_id TEXT PRIMARY KEY,
-      logical_sheet_id TEXT NOT NULL REFERENCES sheet_registry(sheet_id),
-      anchor_reference TEXT NOT NULL,
-      entity_id TEXT,
-      last_business_id TEXT,
-      state TEXT NOT NULL CHECK (state IN ('candidate', 'active', 'tombstoned', 'ambiguous')),
-      candidate_epoch INTEGER NOT NULL DEFAULT 0,
-      UNIQUE(logical_sheet_id, anchor_reference)
-    );
-
-    CREATE TABLE IF NOT EXISTS projection_row_binding (
-      projection_row_id TEXT PRIMARY KEY,
-      physical_sheet_id TEXT NOT NULL REFERENCES physical_sheet_registry(physical_sheet_id),
-      row_binding_id TEXT REFERENCES row_binding(row_binding_id),
-      conflict_id TEXT,
-      anchor_reference TEXT NOT NULL,
-      physical_row_locator INTEGER NOT NULL,
-      state TEXT NOT NULL DEFAULT 'active',
-      CHECK ((row_binding_id IS NOT NULL) != (conflict_id IS NOT NULL)),
-      UNIQUE(physical_sheet_id, anchor_reference)
-    );
-
-    CREATE UNIQUE INDEX IF NOT EXISTS projection_row_binding_entity_uq
-      ON projection_row_binding(physical_sheet_id, row_binding_id)
-      WHERE row_binding_id IS NOT NULL;
-
-    CREATE UNIQUE INDEX IF NOT EXISTS projection_row_binding_conflict_uq
-      ON projection_row_binding(physical_sheet_id, conflict_id)
-      WHERE conflict_id IS NOT NULL;
-
-    -- -----------------------------------------------------------------------
-    -- Canonical state tables
-    -- -----------------------------------------------------------------------
-
-    CREATE TABLE IF NOT EXISTS entity_state (
-      entity_id TEXT PRIMARY KEY,
-      entity_revision INTEGER NOT NULL,
-      accepted_snapshot_hash TEXT,
-      status TEXT NOT NULL DEFAULT 'active'
-    );
-
-    CREATE TABLE IF NOT EXISTS entity_field_state (
-      entity_id TEXT NOT NULL REFERENCES entity_state(entity_id),
-      field_name TEXT NOT NULL,
-      normalized_value TEXT NOT NULL,
-      field_revision INTEGER NOT NULL,
-      ownership TEXT NOT NULL CHECK (ownership IN ('user', 'system')),
-      PRIMARY KEY(entity_id, field_name)
-    );
-
-    -- -----------------------------------------------------------------------
-    -- Visible/projection state tables
-    -- -----------------------------------------------------------------------
-
-    CREATE TABLE IF NOT EXISTS sheet_visible_state (
-      physical_sheet_id TEXT NOT NULL,
-      projection TEXT NOT NULL,
-      row_binding_id TEXT NOT NULL,
-      confirmed_snapshot_hash TEXT NOT NULL,
-      confirmed_visible_revision INTEGER NOT NULL,
-      confirmed_entity_revision INTEGER,
-      last_observed_hash TEXT,
-      PRIMARY KEY(physical_sheet_id, projection, row_binding_id),
-      FOREIGN KEY(physical_sheet_id) REFERENCES physical_sheet_registry(physical_sheet_id)
-    );
-
-    CREATE TABLE IF NOT EXISTS sheet_visible_field_state (
-      physical_sheet_id TEXT NOT NULL,
-      projection TEXT NOT NULL,
-      row_binding_id TEXT NOT NULL,
-      field_name TEXT NOT NULL,
-      confirmed_field_hash TEXT NOT NULL,
-      confirmed_visible_revision INTEGER NOT NULL,
-      active_candidate_conflict_id TEXT,
-      active_candidate_hash TEXT,
-      candidate_epoch INTEGER NOT NULL DEFAULT 0,
-      last_observed_field_hash TEXT,
-      PRIMARY KEY(physical_sheet_id, projection, row_binding_id, field_name),
-      FOREIGN KEY(physical_sheet_id) REFERENCES physical_sheet_registry(physical_sheet_id)
-    );
-
-    -- -----------------------------------------------------------------------
-    -- Event ledger tables
-    -- -----------------------------------------------------------------------
-
-    CREATE TABLE IF NOT EXISTS event_batch (
-      batch_id TEXT PRIMARY KEY,
-      logical_sheet_id TEXT NOT NULL REFERENCES sheet_registry(sheet_id),
-      physical_sheet_id TEXT NOT NULL REFERENCES physical_sheet_registry(physical_sheet_id),
-      source TEXT NOT NULL,
-      projection TEXT NOT NULL,
-      atomicity TEXT NOT NULL DEFAULT 'row_independent',
-      base_snapshot_hash TEXT NOT NULL
-    );
-
-    CREATE TABLE IF NOT EXISTS event_log (
-      event_id TEXT PRIMARY KEY,
-      logical_sheet_id TEXT NOT NULL,
-      physical_sheet_id TEXT NOT NULL,
-      event_key TEXT NOT NULL,
-      payload_hash TEXT NOT NULL,
-      event_sequence INTEGER NOT NULL,
-      batch_id TEXT NOT NULL REFERENCES event_batch(batch_id),
-      row_binding_id TEXT NOT NULL,
-      operation TEXT NOT NULL,
-      status TEXT NOT NULL CHECK (status IN ('accepted', 'conflict', 'quarantined')),
-      received_at INTEGER NOT NULL,
-      UNIQUE(logical_sheet_id, event_key)
-    );
-
-    CREATE TABLE IF NOT EXISTS event_observation (
-      observation_id TEXT PRIMARY KEY,
-      logical_sheet_id TEXT NOT NULL,
-      physical_sheet_id TEXT NOT NULL,
-      observation_key TEXT NOT NULL,
-      event_id TEXT,
-      source TEXT NOT NULL,
-      payload_json TEXT NOT NULL,
-      payload_hash TEXT NOT NULL,
-      detected_at INTEGER NOT NULL,
-      received_at INTEGER NOT NULL,
-      redacted_at INTEGER,
-      ingress_actor_id TEXT NOT NULL,
-      editor_actor_id TEXT,
-      editor_actor_source TEXT NOT NULL DEFAULT 'unavailable'
-    );
-
-    CREATE TABLE IF NOT EXISTS observation_receipt (
-      logical_sheet_id TEXT NOT NULL,
-      observation_key TEXT NOT NULL,
-      representative_payload_hash TEXT NOT NULL,
-      first_observation_id TEXT NOT NULL,
-      last_observation_id TEXT NOT NULL,
-      event_id TEXT,
-      state TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending', 'evaluated', 'duplicate', 'quarantined')),
-      first_seen_at INTEGER NOT NULL,
-      last_seen_at INTEGER NOT NULL,
-      redacted_at INTEGER,
-      PRIMARY KEY(logical_sheet_id, observation_key)
-    );
-
-    CREATE TABLE IF NOT EXISTS event_row (
-      event_id TEXT PRIMARY KEY REFERENCES event_log(event_id),
-      before_row_json TEXT,
-      after_row_json TEXT,
-      before_hash TEXT,
-      after_hash TEXT
-    );
-
-    CREATE TABLE IF NOT EXISTS event_field (
-      event_id TEXT NOT NULL REFERENCES event_log(event_id),
-      field_name TEXT NOT NULL,
-      previous_value TEXT,
-      next_value TEXT,
-      base_field_revision INTEGER,
-      PRIMARY KEY(event_id, field_name)
-    );
-
-    -- -----------------------------------------------------------------------
-    -- Conflict and quarantine tables
-    -- -----------------------------------------------------------------------
-
-    CREATE TABLE IF NOT EXISTS sync_conflict (
-      conflict_id TEXT PRIMARY KEY,
-      conflict_group_id TEXT,
-      event_id TEXT NOT NULL REFERENCES event_log(event_id),
-      logical_sheet_id TEXT NOT NULL REFERENCES sheet_registry(sheet_id),
-      entity_id TEXT NOT NULL,
-      row_binding_id TEXT NOT NULL REFERENCES row_binding(row_binding_id),
-      field_name TEXT NOT NULL,
-      user_value TEXT NOT NULL,
-      user_base_revision INTEGER NOT NULL,
-      canonical_value_at_detection TEXT NOT NULL,
-      canonical_revision_at_detection INTEGER NOT NULL,
-      current_canonical_value TEXT NOT NULL,
-      current_canonical_revision INTEGER NOT NULL,
-      candidate_epoch INTEGER NOT NULL DEFAULT 0,
-      status TEXT NOT NULL DEFAULT 'OPEN' CHECK (status IN ('OPEN', 'NEEDS_REBASE', 'RESOLVED')),
-      last_rebased_commit_id TEXT,
-      resolution_command_id TEXT,
-      created_at INTEGER NOT NULL,
-      updated_at INTEGER NOT NULL
-    );
-
-    CREATE TABLE IF NOT EXISTS quarantine_record (
-      quarantine_id TEXT PRIMARY KEY,
-      event_id TEXT,
-      observation_id TEXT,
-      logical_sheet_id TEXT NOT NULL REFERENCES sheet_registry(sheet_id),
-      row_binding_id TEXT,
-      reason TEXT NOT NULL,
-      before_row_json TEXT,
-      after_row_json TEXT,
-      fields_json TEXT NOT NULL,
-      repair_fields_json TEXT NOT NULL DEFAULT '[]',
-      repair_state TEXT,
-      candidate_payload_json TEXT,
-      created_at INTEGER NOT NULL,
-      updated_at INTEGER NOT NULL
-    );
-
-    CREATE TABLE IF NOT EXISTS quarantine_command (
-      command_id TEXT PRIMARY KEY,
-      request_key TEXT NOT NULL UNIQUE,
-      action TEXT NOT NULL,
-      actor_id TEXT NOT NULL,
-      role TEXT NOT NULL,
-      target_quarantine_id TEXT NOT NULL REFERENCES quarantine_record(quarantine_id),
-      evidence_hash TEXT NOT NULL,
-      expected_revision INTEGER NOT NULL,
-      payload_hash TEXT NOT NULL,
-      status TEXT NOT NULL DEFAULT 'pending',
-      issued_at INTEGER NOT NULL,
-      applied_at INTEGER,
-      result_hash TEXT
-    );
-
-    CREATE TABLE IF NOT EXISTS resolution_command (
-      command_id TEXT PRIMARY KEY,
-      request_key TEXT NOT NULL UNIQUE,
-      action TEXT NOT NULL,
-      actor_id TEXT NOT NULL,
-      role TEXT NOT NULL,
-      target_conflict_id TEXT NOT NULL REFERENCES sync_conflict(conflict_id),
-      expected_revision INTEGER NOT NULL,
-      active_candidate_hash TEXT NOT NULL,
-      expected_candidate_epoch INTEGER NOT NULL DEFAULT 0,
-      payload_hash TEXT NOT NULL,
-      status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'processing', 'applied', 'stale', 'rejected', 'failed')),
-      issued_at INTEGER NOT NULL,
-      applied_commit_id TEXT
-    );
-
-    -- -----------------------------------------------------------------------
-    -- Business key index
-    -- -----------------------------------------------------------------------
-
-    CREATE TABLE IF NOT EXISTS business_key_index (
-      logical_sheet_id TEXT NOT NULL REFERENCES sheet_registry(sheet_id),
-      field_name TEXT NOT NULL,
-      normalized_key TEXT NOT NULL,
-      entity_id TEXT NOT NULL,
-      state TEXT NOT NULL DEFAULT 'active'
-    );
-
-    CREATE UNIQUE INDEX IF NOT EXISTS business_key_active_uq
-      ON business_key_index(logical_sheet_id, field_name, normalized_key)
-      WHERE state = 'active';
-
-    -- -----------------------------------------------------------------------
-    -- Effect outbox
-    -- -----------------------------------------------------------------------
-
-    CREATE TABLE IF NOT EXISTS sheet_effect_outbox (
-      effect_id TEXT PRIMARY KEY,
-      effect_kind TEXT NOT NULL,
-      commit_id TEXT NOT NULL,
-      logical_sheet_id TEXT NOT NULL REFERENCES sheet_registry(sheet_id),
-      physical_sheet_id TEXT NOT NULL REFERENCES physical_sheet_registry(physical_sheet_id),
-      projection TEXT NOT NULL,
-      row_binding_id TEXT,
-      conflict_id TEXT,
-      target_kind TEXT NOT NULL CHECK (target_kind IN ('entity', 'row_binding', 'projection_row', 'conflict')),
-      target_id TEXT NOT NULL,
-      target_entity_revision INTEGER,
-      target_field_revision_hash TEXT,
-      target_canonical_commit_id TEXT,
-      expected_visible_revision INTEGER NOT NULL,
-      expected_visible_hash TEXT NOT NULL,
-      repair_guard_hash TEXT,
-      source_quarantine_id TEXT,
-      payload_json TEXT NOT NULL,
-      payload_hash TEXT NOT NULL,
-      effect_dedupe_key TEXT NOT NULL UNIQUE,
-      stream_sequence INTEGER NOT NULL,
-      predecessor_effect_id TEXT,
-      status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'processing', 'applied', 'blocked_candidate', 'superseded', 'conflict', 'failed')),
-      attempts INTEGER NOT NULL DEFAULT 0,
-      lease_until INTEGER,
-      next_attempt_at INTEGER,
-      claim_token TEXT,
-      writer_epoch INTEGER,
-      supersedes_effect_id TEXT,
-      last_error_code TEXT,
-      last_error_message TEXT,
-      created_at INTEGER NOT NULL DEFAULT 0,
-      UNIQUE(logical_sheet_id, target_kind, target_id, stream_sequence)
-    );
-
-    CREATE INDEX IF NOT EXISTS effect_outbox_stream_idx
-      ON sheet_effect_outbox(logical_sheet_id, target_kind, target_id, stream_sequence)
-      WHERE status IN ('pending', 'processing');
-
-    -- -----------------------------------------------------------------------
-    -- Gateway request receipt
-    -- -----------------------------------------------------------------------
-
-    CREATE TABLE IF NOT EXISTS gateway_request_receipt (
-      request_id TEXT PRIMARY KEY,
-      operation TEXT NOT NULL,
-      key_id TEXT NOT NULL,
-      body_hash TEXT NOT NULL,
-      issued_at INTEGER NOT NULL,
-      expires_at INTEGER NOT NULL,
-      ingress_actor_id TEXT NOT NULL,
-      editor_actor_id TEXT,
-      editor_actor_source TEXT NOT NULL DEFAULT 'unavailable',
-      status TEXT,
-      result_hash TEXT,
-      received_at INTEGER NOT NULL,
-      redacted_at INTEGER
-    );
-
-    -- -----------------------------------------------------------------------
-    -- Writer lease
-    -- -----------------------------------------------------------------------
-
-    CREATE TABLE IF NOT EXISTS writer_lease (
-      role TEXT PRIMARY KEY,
-      writer_id TEXT NOT NULL,
-      writer_epoch INTEGER NOT NULL,
-      fencing_token TEXT NOT NULL,
-      lease_until INTEGER NOT NULL
-    );
-
-    -- -----------------------------------------------------------------------
-    -- Cutover state
-    -- -----------------------------------------------------------------------
-
-    CREATE TABLE IF NOT EXISTS cutover_state (
-      cutover_id TEXT PRIMARY KEY,
-      phase TEXT NOT NULL,
-      source_snapshot_hash TEXT,
-      marker TEXT,
-      status TEXT NOT NULL,
-      created_at INTEGER NOT NULL
-    );
-  `;
+  return [
+    REGISTRY_TABLES_DDL,
+    IDENTITY_TABLES_DDL,
+    CANONICAL_STATE_TABLES_DDL,
+    VISIBLE_STATE_TABLES_DDL,
+    EVENT_LEDGER_TABLES_DDL,
+    CONFLICT_AND_QUARANTINE_TABLES_DDL,
+    BUSINESS_KEY_INDEX_DDL,
+    EFFECT_OUTBOX_DDL,
+    GATEWAY_REQUEST_RECEIPT_DDL,
+    WRITER_LEASE_DDL,
+    CUTOVER_STATE_DDL,
+  ].join("\n");
 }
 
 /**
@@ -550,7 +549,10 @@ function applyVersion3EffectTimestampMigration(db: DatabaseSyncLike): void {
 function verifyCurrentSchema(db: DatabaseSyncLike): void {
   verifyRequiredColumns(db);
   if (!indexExists(db, "sync_conflict_candidate_attempt_uq")) {
-    throw new Error("SQLite schema is missing sync_conflict_candidate_attempt_uq.");
+    throw new StorageError(
+      STORAGE_ERROR_CODES.SCHEMA_INDEX_MISSING,
+      "SQLite schema is missing sync_conflict_candidate_attempt_uq.",
+    );
   }
 }
 
@@ -560,11 +562,15 @@ function verifyRequiredColumns(db: DatabaseSyncLike): void {
     ["sync_conflict" | "resolution_command", readonly string[]]
   >) {
     if (!tableExists(db, tableName)) {
-      throw new Error(`SQLite schema is missing ${tableName}; refusing an unsafe migration marker.`);
+      throw new StorageError(
+        STORAGE_ERROR_CODES.SCHEMA_TABLE_MISSING,
+        `SQLite schema is missing ${tableName}; refusing an unsafe migration marker.`,
+      );
     }
     for (const columnName of requiredColumns) {
       if (!columnExists(db, tableName, columnName)) {
-        throw new Error(
+        throw new StorageError(
+          STORAGE_ERROR_CODES.SCHEMA_COLUMN_MISSING,
           `SQLite schema is missing ${tableName}.${columnName}; refusing an unsafe migration marker.`,
         );
       }
@@ -574,11 +580,15 @@ function verifyRequiredColumns(db: DatabaseSyncLike): void {
     ["sheet_effect_outbox", readonly string[]]
   >) {
     if (!tableExists(db, tableName)) {
-      throw new Error(`SQLite schema is missing ${tableName}; refusing an unsafe migration marker.`);
+      throw new StorageError(
+        STORAGE_ERROR_CODES.SCHEMA_TABLE_MISSING,
+        `SQLite schema is missing ${tableName}; refusing an unsafe migration marker.`,
+      );
     }
     for (const columnName of requiredColumns) {
       if (!columnExists(db, tableName, columnName)) {
-        throw new Error(
+        throw new StorageError(
+          STORAGE_ERROR_CODES.SCHEMA_COLUMN_MISSING,
           `SQLite schema is missing ${tableName}.${columnName}; refusing an unsafe migration marker.`,
         );
       }
@@ -589,8 +599,8 @@ function verifyRequiredColumns(db: DatabaseSyncLike): void {
 /** Adds one known additive column exactly once. Table and column names are internal constants. */
 function addColumnIfMissing(
   db: DatabaseSyncLike,
-  tableName: "sync_conflict" | "resolution_command" | "sheet_effect_outbox",
-  columnName: "candidate_epoch" | "expected_candidate_epoch" | "created_at",
+  tableName: SchemaMigrationTableName,
+  columnName: SchemaMigrationColumnName,
   definition: string,
 ): void {
   if (columnExists(db, tableName, columnName)) return;
@@ -602,7 +612,10 @@ function readSchemaVersion(db: DatabaseSyncLike): number {
   const row = db.prepare("PRAGMA user_version").get() as { user_version?: unknown } | undefined;
   const version = row?.user_version;
   if (typeof version !== "number" || !Number.isSafeInteger(version) || version < 0) {
-    throw new Error("SQLite user_version must be a non-negative safe integer.");
+    throw new StorageError(
+      STORAGE_ERROR_CODES.SCHEMA_VERSION_INVALID,
+      "SQLite user_version must be a non-negative safe integer.",
+    );
   }
   return version;
 }
