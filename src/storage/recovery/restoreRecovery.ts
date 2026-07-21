@@ -6,6 +6,7 @@
  * Sheet effects until the caller records completed reconciliation.
  */
 
+import { STORAGE_ERROR_CODES, StorageError } from "../errors.js";
 import type { DatabaseSyncLike } from "../sqlite/sqliteBridge.js";
 import { withImmediateTransaction } from "../sqlite/sqliteBridge.js";
 
@@ -112,7 +113,10 @@ export function inspectRestoredBackup(
     const table = readOnlyDb.prepare(CHECK_REQUIRED_TABLE_SQL)
       .get(tableName) as { name: string } | undefined;
     if (table === undefined) {
-      throw new Error("restored backup is missing required table: " + tableName);
+      throw new StorageError(
+        STORAGE_ERROR_CODES.INVALID_RESTORE_BACKUP,
+        "restored backup is missing required table: " + tableName,
+      );
     }
   }
 
@@ -124,7 +128,10 @@ export function inspectRestoredBackup(
     marker.source_snapshot_hash === null ||
     marker.marker === null
   ) {
-    throw new Error("restored backup is missing the required cutover marker and source snapshot hash");
+    throw new StorageError(
+      STORAGE_ERROR_CODES.INVALID_RESTORE_BACKUP,
+      "restored backup is missing the required cutover marker and source snapshot hash",
+    );
   }
 
   const leaseRows = readOnlyDb.prepare(READ_WRITER_LEASE_ROLES_SQL)
@@ -162,12 +169,18 @@ export function beginRestoreReconciliation(
       sourceMarker.source_snapshot_hash !== inspection.sourceSnapshotHash ||
       sourceMarker.marker !== inspection.marker
     ) {
-      throw new Error("restore inspection does not match the restored cutover marker");
+      throw new StorageError(
+        STORAGE_ERROR_CODES.RESTORE_INSPECTION_MISMATCH,
+        "restore inspection does not match the restored cutover marker",
+      );
     }
 
     const existing = db.prepare(CHECK_RESTORE_ID_SQL).get(options.restoreId);
     if (existing !== undefined) {
-      throw new Error("restore ID already exists: " + options.restoreId);
+      throw new StorageError(
+        STORAGE_ERROR_CODES.RESTORE_ID_CONFLICT,
+        "restore ID already exists: " + options.restoreId,
+      );
     }
 
     const invalidated = db.prepare(INVALIDATE_WRITER_LEASES_SQL).run(options.now);
@@ -203,7 +216,10 @@ export function completeRestoreReconciliation(
   withImmediateTransaction(db, () => {
     const result = db.prepare(COMPLETE_RESTORE_RECONCILIATION_SQL).run(restore.restoreId);
     if (result.changes !== 1) {
-      throw new Error("restore reconciliation is not pending: " + restore.restoreId);
+      throw new StorageError(
+        STORAGE_ERROR_CODES.RESTORE_RECONCILIATION_STATE_INVALID,
+        "restore reconciliation is not pending: " + restore.restoreId,
+      );
     }
   });
 
@@ -216,7 +232,10 @@ export function requireRestoreAllowsSheetWrites(db: DatabaseSyncLike, restoreId:
   const row = db.prepare(READ_RESTORE_RECONCILIATION_STATUS_SQL)
     .get(restoreId) as { status: string } | undefined;
   if (row === undefined || row.status !== "reconciled") {
-    throw new Error("restore reconciliation has not completed: " + restoreId);
+    throw new StorageError(
+      STORAGE_ERROR_CODES.RESTORE_RECONCILIATION_STATE_INVALID,
+      "restore reconciliation has not completed: " + restoreId,
+    );
   }
 }
 
@@ -225,18 +244,29 @@ function validateEffectReconciliation(effects: readonly RestoreEffectReconciliat
   for (const effect of effects) {
     requireNonEmptyText(effect.effectId, "reconciled effect ID");
     if (effectIds.has(effect.effectId)) {
-      throw new Error("duplicate reconciled effect ID: " + effect.effectId);
+      throw new StorageError(
+        STORAGE_ERROR_CODES.INVALID_RESTORE_RECONCILIATION,
+        "duplicate reconciled effect ID: " + effect.effectId,
+      );
     }
     effectIds.add(effect.effectId);
   }
 }
 
 function requireNonEmptyText(value: string, label: string): void {
-  if (value.length === 0) throw new Error(label + " is required");
+  if (value.length === 0) {
+    throw new StorageError(
+      STORAGE_ERROR_CODES.INVALID_RESTORE_OPTIONS,
+      label + " is required",
+    );
+  }
 }
 
 function requireNonNegativeSafeInteger(value: number, label: string): void {
   if (!Number.isSafeInteger(value) || value < 0) {
-    throw new Error(label + " must be a non-negative safe integer");
+    throw new StorageError(
+      STORAGE_ERROR_CODES.INVALID_RESTORE_OPTIONS,
+      label + " must be a non-negative safe integer",
+    );
   }
 }

@@ -6,6 +6,7 @@
  * row-level commit, so a partially accepted event cannot leak a partial state.
  */
 
+import { STORAGE_ERROR_CODES, StorageError } from "../errors.js";
 import type { FieldOwnership, NormalizedCell } from "../../core/index.js";
 import type { DatabaseSyncLike } from "../sqlite/sqliteBridge.js";
 import { isFencingValid } from "../sync/writerLease.js";
@@ -287,7 +288,10 @@ function insertPendingEffect(
   );
   if (result.changes !== 1) throwFenceIfLost(db, fence);
   if (result.changes !== 1) {
-    throw new Error(`could not insert effect ${effect.effectId}`);
+    throw new StorageError(
+      STORAGE_ERROR_CODES.EFFECT_WRITE_FAILED,
+      `could not insert effect ${effect.effectId}`,
+    );
   }
 }
 
