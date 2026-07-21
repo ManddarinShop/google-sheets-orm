@@ -18,6 +18,115 @@ import { appendPendingEffects, type NewEffect } from "../sync/effectOutbox.js";
 import { withImmediateTransaction, type DatabaseSyncLike } from "../sqlite/sqliteBridge.js";
 import { isFencingValid, type FencingContext } from "../sync/writerLease.js";
 
+const FENCE_EXISTS_SQL = `
+  SELECT 1 FROM writer_lease
+  WHERE role = ? AND writer_epoch = ? AND fencing_token = ? AND lease_until > ?
+`;
+
+const FIND_EXISTING_COMMAND_SQL = `
+  SELECT command_id, request_key, action, actor_id, role, target_conflict_id,
+         expected_revision, active_candidate_hash, expected_candidate_epoch,
+         payload_hash, status
+  FROM resolution_command
+  WHERE command_id = ? OR request_key = ?
+`;
+
+const READ_CONFLICT_SQL = `
+  SELECT conflict_id, conflict_group_id, event_id, row_binding_id, entity_id, field_name,
+         user_value, user_base_revision, canonical_value_at_detection,
+         canonical_revision_at_detection, current_canonical_value,
+         current_canonical_revision, candidate_epoch, status, resolution_command_id
+  FROM sync_conflict
+  WHERE logical_sheet_id = ? AND conflict_id = ?
+`;
+
+const READ_ACTIVE_CANDIDATE_POINTER_SQL = `
+  SELECT physical_sheet_id, projection, candidate_epoch, active_candidate_hash
+  FROM sheet_visible_field_state
+  WHERE row_binding_id = ? AND field_name = ?
+    AND active_candidate_conflict_id = ?
+    AND active_candidate_hash IS NOT NULL
+`;
+
+const INSERT_PROCESSING_COMMAND_SQL = `
+  INSERT INTO resolution_command (
+    command_id, request_key, action, actor_id, role, target_conflict_id,
+    expected_revision, active_candidate_hash, expected_candidate_epoch,
+    payload_hash, status, issued_at
+  )
+  SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'processing', ?
+  WHERE EXISTS (${FENCE_EXISTS_SQL})
+`;
+
+const MARK_CONFLICT_RESOLVED_SQL = `
+  UPDATE sync_conflict
+  SET status = 'RESOLVED', resolution_command_id = ?, updated_at = ?
+  WHERE conflict_id = ? AND status IN ('OPEN', 'NEEDS_REBASE')
+    AND current_canonical_revision = ? AND candidate_epoch = ?
+    AND EXISTS (${FENCE_EXISTS_SQL})
+`;
+
+const CLEAR_ACTIVE_CANDIDATE_POINTER_SQL = `
+  UPDATE sheet_visible_field_state
+  SET active_candidate_conflict_id = NULL, active_candidate_hash = NULL,
+      candidate_epoch = candidate_epoch + 1
+  WHERE physical_sheet_id = ? AND projection = ?
+    AND row_binding_id = ? AND field_name = ?
+    AND active_candidate_conflict_id = ? AND candidate_epoch = ?
+    AND EXISTS (${FENCE_EXISTS_SQL})
+`;
+
+const ADVANCE_ROW_BINDING_CANDIDATE_EPOCH_SQL = `
+  UPDATE row_binding
+  SET candidate_epoch = CASE
+    WHEN candidate_epoch <= ? THEN ?
+    ELSE candidate_epoch
+  END
+  WHERE row_binding_id = ? AND logical_sheet_id = ?
+    AND EXISTS (${FENCE_EXISTS_SQL})
+`;
+
+const MARK_COMMAND_APPLIED_SQL = `
+  UPDATE resolution_command
+  SET status = 'applied', applied_commit_id = ?
+  WHERE command_id = ? AND status = 'processing'
+    AND EXISTS (${FENCE_EXISTS_SQL})
+`;
+
+const MARK_CONFLICT_STALE_SQL = `
+  UPDATE sync_conflict
+  SET status = ?, updated_at = ?
+  WHERE conflict_id = ? AND status IN ('OPEN', 'NEEDS_REBASE')
+    AND EXISTS (${FENCE_EXISTS_SQL})
+`;
+
+const MARK_COMMAND_STALE_SQL = `
+  UPDATE resolution_command
+  SET status = 'stale'
+  WHERE command_id = ? AND status = 'processing'
+    AND EXISTS (${FENCE_EXISTS_SQL})
+`;
+
+const MARK_COMMAND_REJECTED_SQL = `
+  UPDATE resolution_command
+  SET status = 'rejected'
+  WHERE command_id = ? AND status = 'processing'
+    AND EXISTS (${FENCE_EXISTS_SQL})
+`;
+
+const READ_EFFECT_DEDUPE_SQL = `
+  SELECT effect_kind, commit_id, logical_sheet_id, physical_sheet_id,
+         projection, target_kind, target_id, payload_hash
+  FROM sheet_effect_outbox
+  WHERE effect_dedupe_key = ?
+`;
+
+const READ_REGISTERED_PROJECTION_SQL = `
+  SELECT logical_sheet_id, projection, enabled
+  FROM physical_sheet_registry
+  WHERE physical_sheet_id = ?
+`;
+
 /** Input required to durably process one trusted `acknowledge_system` request. */
 export interface PersistResolutionCommandInput {
   readonly logicalSheetId: string;
@@ -91,6 +200,23 @@ interface ActiveCandidatePointer {
   readonly projection: string;
   readonly candidate_epoch: number;
   readonly active_candidate_hash: string;
+}
+
+interface EffectDedupeRow {
+  readonly effect_kind: string;
+  readonly commit_id: string;
+  readonly logical_sheet_id: string;
+  readonly physical_sheet_id: string;
+  readonly projection: string;
+  readonly target_kind: string;
+  readonly target_id: string;
+  readonly payload_hash: string;
+}
+
+interface RegisteredProjectionRow {
+  readonly logical_sheet_id: string;
+  readonly projection: string;
+  readonly enabled: number;
 }
 
 /**
@@ -202,13 +328,8 @@ function findExistingCommand(
   db: DatabaseSyncLike,
   command: ResolutionCommand,
 ): Extract<PersistResolutionCommandResult, { readonly kind: "duplicate" }> | null {
-  const rows = db.prepare(`
-    SELECT command_id, request_key, action, actor_id, role, target_conflict_id,
-           expected_revision, active_candidate_hash, expected_candidate_epoch,
-           payload_hash, status
-    FROM resolution_command
-    WHERE command_id = ? OR request_key = ?
-  `).all(command.commandId, command.requestKey) as CommandRow[];
+  const rows = db.prepare(FIND_EXISTING_COMMAND_SQL)
+    .all<CommandRow>(command.commandId, command.requestKey);
   if (rows.length === 0) return null;
   if (rows.length !== 1) throw new Error("resolution command identity is internally inconsistent");
   const existing = rows[0];
@@ -237,14 +358,8 @@ function readConflict(
   logicalSheetId: string,
   conflictId: string,
 ): SyncConflict | null {
-  const row = db.prepare(`
-    SELECT conflict_id, conflict_group_id, event_id, row_binding_id, entity_id, field_name,
-           user_value, user_base_revision, canonical_value_at_detection,
-           canonical_revision_at_detection, current_canonical_value,
-           current_canonical_revision, candidate_epoch, status, resolution_command_id
-    FROM sync_conflict
-    WHERE logical_sheet_id = ? AND conflict_id = ?
-  `).get(logicalSheetId, conflictId) as ConflictRow | undefined;
+  const row = db.prepare(READ_CONFLICT_SQL)
+    .get<ConflictRow>(logicalSheetId, conflictId);
   if (row === undefined) return null;
   return {
     conflictId: row.conflict_id,
@@ -272,13 +387,8 @@ function readActiveCandidatePointer(
   db: DatabaseSyncLike,
   conflict: SyncConflict,
 ): ActiveCandidatePointer | null {
-  const rows = db.prepare(`
-    SELECT physical_sheet_id, projection, candidate_epoch, active_candidate_hash
-    FROM sheet_visible_field_state
-    WHERE row_binding_id = ? AND field_name = ?
-      AND active_candidate_conflict_id = ?
-      AND active_candidate_hash IS NOT NULL
-  `).all(conflict.rowBindingId, conflict.fieldName, conflict.conflictId) as ActiveCandidatePointer[];
+  const rows = db.prepare(READ_ACTIVE_CANDIDATE_POINTER_SQL)
+    .all(conflict.rowBindingId, conflict.fieldName, conflict.conflictId) as ActiveCandidatePointer[];
   if (rows.length === 0) return null;
   if (rows.length !== 1) {
     throw new Error("a conflict cannot be active in more than one physical projection");
@@ -292,15 +402,7 @@ function insertProcessingCommand(
   input: PersistResolutionCommandInput,
 ): void {
   const command = input.command;
-  const result = db.prepare(`
-    INSERT INTO resolution_command (
-      command_id, request_key, action, actor_id, role, target_conflict_id,
-      expected_revision, active_candidate_hash, expected_candidate_epoch,
-      payload_hash, status, issued_at
-    )
-    SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'processing', ?
-    WHERE EXISTS (${fenceExistsSql()})
-  `).run(
+  const result = db.prepare(INSERT_PROCESSING_COMMAND_SQL).run(
     command.commandId,
     command.requestKey,
     command.action,
@@ -326,13 +428,7 @@ function applyResolvedCommand(
 ): void {
   if (pointer === null) throw new Error("resolved command lost its active candidate pointer");
   const command = input.command;
-  const conflictResult = db.prepare(`
-    UPDATE sync_conflict
-    SET status = 'RESOLVED', resolution_command_id = ?, updated_at = ?
-    WHERE conflict_id = ? AND status IN ('OPEN', 'NEEDS_REBASE')
-      AND current_canonical_revision = ? AND candidate_epoch = ?
-      AND EXISTS (${fenceExistsSql()})
-  `).run(
+  const conflictResult = db.prepare(MARK_CONFLICT_RESOLVED_SQL).run(
     command.commandId,
     fence.now,
     conflict.conflictId,
@@ -342,15 +438,7 @@ function applyResolvedCommand(
   );
   if (conflictResult.changes !== 1) throw new FenceLostError();
 
-  const clearedPointer = db.prepare(`
-    UPDATE sheet_visible_field_state
-    SET active_candidate_conflict_id = NULL, active_candidate_hash = NULL,
-        candidate_epoch = candidate_epoch + 1
-    WHERE physical_sheet_id = ? AND projection = ?
-      AND row_binding_id = ? AND field_name = ?
-      AND active_candidate_conflict_id = ? AND candidate_epoch = ?
-      AND EXISTS (${fenceExistsSql()})
-  `).run(
+  const clearedPointer = db.prepare(CLEAR_ACTIVE_CANDIDATE_POINTER_SQL).run(
     pointer.physical_sheet_id,
     pointer.projection,
     conflict.rowBindingId,
@@ -361,15 +449,7 @@ function applyResolvedCommand(
   );
   if (clearedPointer.changes !== 1) throw new FenceLostError();
 
-  const binding = db.prepare(`
-    UPDATE row_binding
-    SET candidate_epoch = CASE
-      WHEN candidate_epoch <= ? THEN ?
-      ELSE candidate_epoch
-    END
-    WHERE row_binding_id = ? AND logical_sheet_id = ?
-      AND EXISTS (${fenceExistsSql()})
-  `).run(
+  const binding = db.prepare(ADVANCE_ROW_BINDING_CANDIDATE_EPOCH_SQL).run(
     command.expectedCandidateEpoch,
     command.expectedCandidateEpoch + 1,
     conflict.rowBindingId,
@@ -379,12 +459,8 @@ function applyResolvedCommand(
   if (binding.changes !== 1) throw new FenceLostError();
 
   appendResolutionEffects(db, fence, input, input.effects);
-  const commandResult = db.prepare(`
-    UPDATE resolution_command
-    SET status = 'applied', applied_commit_id = ?
-    WHERE command_id = ? AND status = 'processing'
-      AND EXISTS (${fenceExistsSql()})
-  `).run(input.commitId, command.commandId, ...fenceParameters(fence));
+  const commandResult = db.prepare(MARK_COMMAND_APPLIED_SQL)
+    .run(input.commitId, command.commandId, ...fenceParameters(fence));
   if (commandResult.changes !== 1) throw new FenceLostError();
 }
 
@@ -394,23 +470,14 @@ function markStaleCommand(
   input: PersistResolutionCommandInput,
   nextConflictStatus: ConflictStatus,
 ): void {
-  db.prepare(`
-    UPDATE sync_conflict
-    SET status = ?, updated_at = ?
-    WHERE conflict_id = ? AND status IN ('OPEN', 'NEEDS_REBASE')
-      AND EXISTS (${fenceExistsSql()})
-  `).run(
+  db.prepare(MARK_CONFLICT_STALE_SQL).run(
     nextConflictStatus,
     fence.now,
     input.command.targetConflictId,
     ...fenceParameters(fence),
   );
-  const command = db.prepare(`
-    UPDATE resolution_command
-    SET status = 'stale'
-    WHERE command_id = ? AND status = 'processing'
-      AND EXISTS (${fenceExistsSql()})
-  `).run(input.command.commandId, ...fenceParameters(fence));
+  const command = db.prepare(MARK_COMMAND_STALE_SQL)
+    .run(input.command.commandId, ...fenceParameters(fence));
   if (command.changes !== 1) throw new FenceLostError();
   appendResolutionEffects(db, fence, input, input.staleEffects ?? []);
 }
@@ -420,12 +487,8 @@ function markRejectedCommand(
   fence: FencingContext,
   input: PersistResolutionCommandInput,
 ): void {
-  const result = db.prepare(`
-    UPDATE resolution_command
-    SET status = 'rejected'
-    WHERE command_id = ? AND status = 'processing'
-      AND EXISTS (${fenceExistsSql()})
-  `).run(input.command.commandId, ...fenceParameters(fence));
+  const result = db.prepare(MARK_COMMAND_REJECTED_SQL)
+    .run(input.command.commandId, ...fenceParameters(fence));
   if (result.changes !== 1) throw new FenceLostError();
   appendResolutionEffects(db, fence, input, input.rejectedEffects ?? []);
 }
@@ -440,23 +503,8 @@ function appendResolutionEffects(
   if (effects.length === 0) return;
   ensureResolutionEffectsRegistered(db, input, effects);
   const unseen = effects.filter((effect) => {
-    const existing = db.prepare(`
-      SELECT effect_kind, commit_id, logical_sheet_id, physical_sheet_id,
-             projection, target_kind, target_id, payload_hash
-      FROM sheet_effect_outbox
-      WHERE effect_dedupe_key = ?
-    `).get(effect.effectDedupeKey) as
-      | {
-        effect_kind: string;
-        commit_id: string;
-        logical_sheet_id: string;
-        physical_sheet_id: string;
-        projection: string;
-        target_kind: string;
-        target_id: string;
-        payload_hash: string;
-      }
-      | undefined;
+    const existing = db.prepare(READ_EFFECT_DEDUPE_SQL)
+      .get<EffectDedupeRow>(effect.effectDedupeKey);
     if (existing === undefined) return true;
     if (
       existing.effect_kind !== effect.effectKind ||
@@ -482,13 +530,8 @@ function ensureResolutionEffectsRegistered(
   effects: readonly NewEffect[],
 ): void {
   for (const effect of effects) {
-    const target = db.prepare(`
-      SELECT logical_sheet_id, projection, enabled
-      FROM physical_sheet_registry
-      WHERE physical_sheet_id = ?
-    `).get(effect.physicalSheetId) as
-      | { logical_sheet_id: string; projection: string; enabled: number }
-      | undefined;
+    const target = db.prepare(READ_REGISTERED_PROJECTION_SQL)
+      .get<RegisteredProjectionRow>(effect.physicalSheetId);
     if (
       target === undefined ||
       target.logical_sheet_id !== effect.logicalSheetId ||
@@ -550,13 +593,6 @@ function requireConflictStatus(value: string): ConflictStatus {
 
 function assertCurrentFence(db: DatabaseSyncLike, fence: FencingContext): void {
   if (!isFencingValid(db, fence)) throw new FenceLostError();
-}
-
-function fenceExistsSql(): string {
-  return `
-    SELECT 1 FROM writer_lease
-    WHERE role = ? AND writer_epoch = ? AND fencing_token = ? AND lease_until > ?
-  `;
 }
 
 function fenceParameters(fence: FencingContext): readonly [string, number, string, number] {
