@@ -12,6 +12,64 @@ import { isFencingValid } from "../sync/writerLease.js";
 import type { FencingContext } from "../sync/writerLease.js";
 import type { NewEffect } from "../sync/effectOutbox.js";
 
+const FENCE_EXISTS_SQL = `
+  SELECT 1 FROM writer_lease
+  WHERE role = ? AND writer_epoch = ? AND fencing_token = ? AND lease_until > ?
+`;
+
+const INSERT_CANONICAL_ENTITY_SQL = `
+  INSERT INTO entity_state (entity_id, entity_revision, accepted_snapshot_hash, status)
+  SELECT ?, 1, ?, 'active'
+  WHERE EXISTS (${FENCE_EXISTS_SQL})
+`;
+
+const INSERT_CANONICAL_FIELD_SQL = `
+  INSERT INTO entity_field_state (
+    entity_id, field_name, normalized_value, field_revision, ownership
+  )
+  SELECT ?, ?, ?, 1, ?
+  WHERE EXISTS (${FENCE_EXISTS_SQL})
+`;
+
+const READ_CANONICAL_ENTITY_SQL = `
+  SELECT entity_revision FROM entity_state
+  WHERE entity_id = ? AND status = 'active'
+`;
+
+const UPDATE_CANONICAL_FIELD_SQL = `
+  UPDATE entity_field_state
+  SET normalized_value = ?, field_revision = field_revision + 1
+  WHERE entity_id = ? AND field_name = ? AND field_revision = ? AND ownership = ?
+    AND EXISTS (${FENCE_EXISTS_SQL})
+`;
+
+const UPDATE_CANONICAL_ENTITY_SQL = `
+  UPDATE entity_state
+  SET entity_revision = ?, accepted_snapshot_hash = ?
+  WHERE entity_id = ? AND entity_revision = ? AND status = 'active'
+    AND EXISTS (${FENCE_EXISTS_SQL})
+`;
+
+const DELETE_CANONICAL_ENTITY_SQL = `
+  UPDATE entity_state
+  SET entity_revision = ?, accepted_snapshot_hash = ?, status = 'tombstoned'
+  WHERE entity_id = ? AND entity_revision = ? AND status = 'active'
+    AND EXISTS (${FENCE_EXISTS_SQL})
+`;
+
+const INSERT_PENDING_EFFECT_SQL = `
+  INSERT INTO sheet_effect_outbox (
+    effect_id, effect_kind, commit_id, logical_sheet_id, physical_sheet_id,
+    projection, row_binding_id, conflict_id, target_kind, target_id,
+    target_entity_revision, target_field_revision_hash, target_canonical_commit_id,
+    expected_visible_revision, expected_visible_hash, repair_guard_hash,
+    source_quarantine_id, payload_json, payload_hash, effect_dedupe_key,
+    stream_sequence, created_at, status
+  )
+  SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending'
+  WHERE EXISTS (${FENCE_EXISTS_SQL})
+`;
+
 /** A field value the writer should insert or compare-and-set. */
 export interface CanonicalFieldWrite {
   readonly fieldName: string;
@@ -111,11 +169,7 @@ function applyInsert(
   fence: FencingContext,
   input: CanonicalInsertCommitInput,
 ): CanonicalCommitResult {
-  const entityResult = db.prepare(`
-    INSERT INTO entity_state (entity_id, entity_revision, accepted_snapshot_hash, status)
-    SELECT ?, 1, ?, 'active'
-    WHERE EXISTS (${fenceExistsSql()})
-  `).run(
+  const entityResult = db.prepare(INSERT_CANONICAL_ENTITY_SQL).run(
     input.entityId,
     input.acceptedSnapshotHash,
     ...fenceParameters(fence),
@@ -124,13 +178,7 @@ function applyInsert(
 
   const fieldRevisions = new Map<string, number>();
   for (const field of input.fields) {
-    const result = db.prepare(`
-      INSERT INTO entity_field_state (
-        entity_id, field_name, normalized_value, field_revision, ownership
-      )
-      SELECT ?, ?, ?, 1, ?
-      WHERE EXISTS (${fenceExistsSql()})
-    `).run(
+    const result = db.prepare(INSERT_CANONICAL_FIELD_SQL).run(
       input.entityId,
       field.fieldName,
       serializeCell(field.value),
@@ -150,20 +198,13 @@ function applyUpdate(
   fence: FencingContext,
   input: CanonicalUpdateCommitInput,
 ): CanonicalCommitResult {
-  const entity = db.prepare(`
-    SELECT entity_revision FROM entity_state
-    WHERE entity_id = ? AND status = 'active'
-  `).get(input.entityId) as { entity_revision: number } | undefined;
+  const entity = db.prepare(READ_CANONICAL_ENTITY_SQL)
+    .get(input.entityId) as { entity_revision: number } | undefined;
   if (entity === undefined) return { kind: "stale", target: "entity", fieldName: null };
 
   const fieldRevisions = new Map<string, number>();
   for (const field of input.fields) {
-    const result = db.prepare(`
-      UPDATE entity_field_state
-      SET normalized_value = ?, field_revision = field_revision + 1
-      WHERE entity_id = ? AND field_name = ? AND field_revision = ? AND ownership = ?
-        AND EXISTS (${fenceExistsSql()})
-    `).run(
+    const result = db.prepare(UPDATE_CANONICAL_FIELD_SQL).run(
       serializeCell(field.value),
       input.entityId,
       field.fieldName,
@@ -179,12 +220,7 @@ function applyUpdate(
   }
 
   const nextEntityRevision = entity.entity_revision + 1;
-  const entityResult = db.prepare(`
-    UPDATE entity_state
-    SET entity_revision = ?, accepted_snapshot_hash = ?
-    WHERE entity_id = ? AND entity_revision = ? AND status = 'active'
-      AND EXISTS (${fenceExistsSql()})
-  `).run(
+  const entityResult = db.prepare(UPDATE_CANONICAL_ENTITY_SQL).run(
     nextEntityRevision,
     input.acceptedSnapshotHash,
     input.entityId,
@@ -203,12 +239,7 @@ function applyDelete(
   input: CanonicalDeleteCommitInput,
 ): CanonicalCommitResult {
   const nextEntityRevision = input.expectedEntityRevision + 1;
-  const result = db.prepare(`
-    UPDATE entity_state
-    SET entity_revision = ?, accepted_snapshot_hash = ?, status = 'tombstoned'
-    WHERE entity_id = ? AND entity_revision = ? AND status = 'active'
-      AND EXISTS (${fenceExistsSql()})
-  `).run(
+  const result = db.prepare(DELETE_CANONICAL_ENTITY_SQL).run(
     nextEntityRevision,
     input.acceptedSnapshotHash,
     input.entityId,
@@ -229,18 +260,7 @@ function insertPendingEffect(
   fence: FencingContext,
   effect: NewEffect,
 ): void {
-  const result = db.prepare(`
-    INSERT INTO sheet_effect_outbox (
-      effect_id, effect_kind, commit_id, logical_sheet_id, physical_sheet_id,
-      projection, row_binding_id, conflict_id, target_kind, target_id,
-      target_entity_revision, target_field_revision_hash, target_canonical_commit_id,
-      expected_visible_revision, expected_visible_hash, repair_guard_hash,
-      source_quarantine_id, payload_json, payload_hash, effect_dedupe_key,
-      stream_sequence, created_at, status
-    )
-    SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending'
-    WHERE EXISTS (${fenceExistsSql()})
-  `).run(
+  const result = db.prepare(INSERT_PENDING_EFFECT_SQL).run(
     effect.effectId,
     effect.effectKind,
     effect.commitId,
@@ -300,13 +320,6 @@ function validateInput(input: CanonicalCommitInput): string | null {
     }
   }
   return null;
-}
-
-function fenceExistsSql(): string {
-  return `
-    SELECT 1 FROM writer_lease
-    WHERE role = ? AND writer_epoch = ? AND fencing_token = ? AND lease_until > ?
-  `;
 }
 
 function fenceParameters(fence: FencingContext): readonly [string, number, string, number] {
