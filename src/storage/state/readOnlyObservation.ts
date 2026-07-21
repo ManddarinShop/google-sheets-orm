@@ -10,6 +10,41 @@
 import { withImmediateTransaction, type DatabaseSyncLike } from "../sqlite/sqliteBridge.js";
 import { isFencingValid, type FencingContext } from "../sync/writerLease.js";
 
+const READ_OBSERVATION_RECEIPT_SQL = `
+  SELECT representative_payload_hash, event_id
+  FROM observation_receipt
+  WHERE logical_sheet_id = ? AND observation_key = ?
+`;
+
+const INSERT_EVENT_OBSERVATION_SQL = `
+  INSERT INTO event_observation (
+    observation_id, logical_sheet_id, physical_sheet_id, observation_key, event_id,
+    source, payload_json, payload_hash, detected_at, received_at, ingress_actor_id,
+    editor_actor_id, editor_actor_source
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+`;
+
+const INSERT_OBSERVATION_RECEIPT_SQL = `
+  INSERT INTO observation_receipt (
+    logical_sheet_id, observation_key, representative_payload_hash,
+    first_observation_id, last_observation_id, event_id, state,
+    first_seen_at, last_seen_at
+  ) VALUES (?, ?, ?, ?, ?, NULL, 'pending', ?, ?)
+`;
+
+const UPDATE_OBSERVATION_RECEIPT_SQL = `
+  UPDATE observation_receipt SET last_observation_id = ?, last_seen_at = ?
+  WHERE logical_sheet_id = ? AND observation_key = ?
+`;
+
+const READ_REGISTERED_OBSERVATION_TARGET_SQL = `
+  SELECT physical.enabled AS physical_enabled, physical.logical_sheet_id,
+         logical.enabled AS logical_enabled
+  FROM physical_sheet_registry AS physical
+  JOIN sheet_registry AS logical ON logical.sheet_id = physical.logical_sheet_id
+  WHERE physical.physical_sheet_id = ?
+`;
+
 /** One normalized snapshot evidence record captured from a registered projection. */
 export interface ReadOnlySnapshotObservationInput {
   readonly observationId: string;
@@ -49,23 +84,14 @@ export function persistReadOnlySnapshotObservation(
   return withImmediateTransaction(db, () => {
     if (!isFencingValid(db, fence)) return { kind: "fenced_out" };
     ensureRegisteredTarget(db, input);
-    const receipt = db.prepare(`
-      SELECT representative_payload_hash, event_id
-      FROM observation_receipt
-      WHERE logical_sheet_id = ? AND observation_key = ?
-    `).get(input.logicalSheetId, input.observationKey) as ReceiptRow | undefined;
+    const receipt = db.prepare(READ_OBSERVATION_RECEIPT_SQL)
+      .get(input.logicalSheetId, input.observationKey) as ReceiptRow | undefined;
     const kind = receipt === undefined
       ? "captured"
       : receipt.representative_payload_hash === input.payloadHash
         ? "duplicate"
         : "integrity_collision";
-    db.prepare(`
-      INSERT INTO event_observation (
-        observation_id, logical_sheet_id, physical_sheet_id, observation_key, event_id,
-        source, payload_json, payload_hash, detected_at, received_at, ingress_actor_id,
-        editor_actor_id, editor_actor_source
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
+    db.prepare(INSERT_EVENT_OBSERVATION_SQL).run(
       input.observationId,
       input.logicalSheetId,
       input.physicalSheetId,
@@ -81,13 +107,7 @@ export function persistReadOnlySnapshotObservation(
       input.editorActorSource,
     );
     if (receipt === undefined) {
-      db.prepare(`
-        INSERT INTO observation_receipt (
-          logical_sheet_id, observation_key, representative_payload_hash,
-          first_observation_id, last_observation_id, event_id, state,
-          first_seen_at, last_seen_at
-        ) VALUES (?, ?, ?, ?, ?, NULL, 'pending', ?, ?)
-      `).run(
+      db.prepare(INSERT_OBSERVATION_RECEIPT_SQL).run(
         input.logicalSheetId,
         input.observationKey,
         input.payloadHash,
@@ -97,10 +117,8 @@ export function persistReadOnlySnapshotObservation(
         input.receivedAt,
       );
     } else {
-      db.prepare(`
-        UPDATE observation_receipt SET last_observation_id = ?, last_seen_at = ?
-        WHERE logical_sheet_id = ? AND observation_key = ?
-      `).run(input.observationId, input.receivedAt, input.logicalSheetId, input.observationKey);
+      db.prepare(UPDATE_OBSERVATION_RECEIPT_SQL)
+        .run(input.observationId, input.receivedAt, input.logicalSheetId, input.observationKey);
     }
     return { kind, observationId: input.observationId };
   });
@@ -112,13 +130,8 @@ interface ReceiptRow {
 }
 
 function ensureRegisteredTarget(db: DatabaseSyncLike, input: ReadOnlySnapshotObservationInput): void {
-  const row = db.prepare(`
-    SELECT physical.enabled AS physical_enabled, physical.logical_sheet_id,
-           logical.enabled AS logical_enabled
-    FROM physical_sheet_registry AS physical
-    JOIN sheet_registry AS logical ON logical.sheet_id = physical.logical_sheet_id
-    WHERE physical.physical_sheet_id = ?
-  `).get(input.physicalSheetId) as {
+  const row = db.prepare(READ_REGISTERED_OBSERVATION_TARGET_SQL)
+    .get(input.physicalSheetId) as {
     physical_enabled: number;
     logical_sheet_id: string;
     logical_enabled: number;
