@@ -5,10 +5,10 @@
  * identical normalized input must always produce the same identity.
  */
 
-import type { NormalizedCell } from "../encoding/types.js";
+import type { NormalizedCell, StableValue } from "../encoding/types.js";
 import { stableHash } from "../encoding/stableEncode.js";
 import { DuplicateChangedFieldError } from "../errors/identity.js";
-import type { EventKeyInput } from "./contracts.js";
+import type { EventKeyField, EventKeyInput } from "./contracts.js";
 
 /**
  * Computes the source-independent event key for a normalized row change.
@@ -33,15 +33,22 @@ export function computeEventKey(input: EventKeyInput): string {
     operation: input.operation,
     beforeRowHash: input.beforeRowHash,
     afterRowHash: input.afterRowHash,
-    changedFields: changedFields.map((field) => ({
-      fieldName: field.fieldName,
-      baseFieldRevision: field.baseFieldRevision,
-      candidateEpoch: field.candidateEpoch,
-      beforeHash: field.beforeHash,
-      afterHash: field.afterHash,
-      nextValue: field.nextValue,
-    })),
+    changedFields: changedFields.map(makeEventKeyFieldIdentity),
   });
+}
+
+/** Omits the absent revision marker so event identity has no undefined state. */
+function makeEventKeyFieldIdentity(field: EventKeyField): StableValue {
+  const base = {
+    fieldName: field.fieldName,
+    candidateEpoch: field.candidateEpoch,
+    beforeHash: field.beforeHash,
+    afterHash: field.afterHash,
+    nextValue: field.nextValue,
+  };
+  return field.baseFieldRevision === undefined
+    ? base
+    : { ...base, baseFieldRevision: field.baseFieldRevision };
 }
 
 /** Computes a stable hash for a normalized row's field values. */
