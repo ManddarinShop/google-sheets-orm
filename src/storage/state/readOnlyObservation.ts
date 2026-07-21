@@ -8,7 +8,43 @@
  */
 
 import { withImmediateTransaction, type DatabaseSyncLike } from "../sqlite/sqliteBridge.js";
+import { STORAGE_ERROR_CODES, StorageError } from "../errors.js";
 import { isFencingValid, type FencingContext } from "../sync/writerLease.js";
+
+const READ_OBSERVATION_RECEIPT_SQL = `
+  SELECT representative_payload_hash, event_id
+  FROM observation_receipt
+  WHERE logical_sheet_id = ? AND observation_key = ?
+`;
+
+const INSERT_EVENT_OBSERVATION_SQL = `
+  INSERT INTO event_observation (
+    observation_id, logical_sheet_id, physical_sheet_id, observation_key, event_id,
+    source, payload_json, payload_hash, detected_at, received_at, ingress_actor_id,
+    editor_actor_id, editor_actor_source
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+`;
+
+const INSERT_OBSERVATION_RECEIPT_SQL = `
+  INSERT INTO observation_receipt (
+    logical_sheet_id, observation_key, representative_payload_hash,
+    first_observation_id, last_observation_id, event_id, state,
+    first_seen_at, last_seen_at
+  ) VALUES (?, ?, ?, ?, ?, NULL, 'pending', ?, ?)
+`;
+
+const UPDATE_OBSERVATION_RECEIPT_SQL = `
+  UPDATE observation_receipt SET last_observation_id = ?, last_seen_at = ?
+  WHERE logical_sheet_id = ? AND observation_key = ?
+`;
+
+const READ_REGISTERED_OBSERVATION_TARGET_SQL = `
+  SELECT physical.enabled AS physical_enabled, physical.logical_sheet_id,
+         logical.enabled AS logical_enabled
+  FROM physical_sheet_registry AS physical
+  JOIN sheet_registry AS logical ON logical.sheet_id = physical.logical_sheet_id
+  WHERE physical.physical_sheet_id = ?
+`;
 
 /** One normalized snapshot evidence record captured from a registered projection. */
 export interface ReadOnlySnapshotObservationInput {
@@ -49,23 +85,14 @@ export function persistReadOnlySnapshotObservation(
   return withImmediateTransaction(db, () => {
     if (!isFencingValid(db, fence)) return { kind: "fenced_out" };
     ensureRegisteredTarget(db, input);
-    const receipt = db.prepare(`
-      SELECT representative_payload_hash, event_id
-      FROM observation_receipt
-      WHERE logical_sheet_id = ? AND observation_key = ?
-    `).get(input.logicalSheetId, input.observationKey) as ReceiptRow | undefined;
+    const receipt = db.prepare(READ_OBSERVATION_RECEIPT_SQL)
+      .get(input.logicalSheetId, input.observationKey) as ReceiptRow | undefined;
     const kind = receipt === undefined
       ? "captured"
       : receipt.representative_payload_hash === input.payloadHash
         ? "duplicate"
         : "integrity_collision";
-    db.prepare(`
-      INSERT INTO event_observation (
-        observation_id, logical_sheet_id, physical_sheet_id, observation_key, event_id,
-        source, payload_json, payload_hash, detected_at, received_at, ingress_actor_id,
-        editor_actor_id, editor_actor_source
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
+    db.prepare(INSERT_EVENT_OBSERVATION_SQL).run(
       input.observationId,
       input.logicalSheetId,
       input.physicalSheetId,
@@ -81,13 +108,7 @@ export function persistReadOnlySnapshotObservation(
       input.editorActorSource,
     );
     if (receipt === undefined) {
-      db.prepare(`
-        INSERT INTO observation_receipt (
-          logical_sheet_id, observation_key, representative_payload_hash,
-          first_observation_id, last_observation_id, event_id, state,
-          first_seen_at, last_seen_at
-        ) VALUES (?, ?, ?, ?, ?, NULL, 'pending', ?, ?)
-      `).run(
+      db.prepare(INSERT_OBSERVATION_RECEIPT_SQL).run(
         input.logicalSheetId,
         input.observationKey,
         input.payloadHash,
@@ -97,10 +118,8 @@ export function persistReadOnlySnapshotObservation(
         input.receivedAt,
       );
     } else {
-      db.prepare(`
-        UPDATE observation_receipt SET last_observation_id = ?, last_seen_at = ?
-        WHERE logical_sheet_id = ? AND observation_key = ?
-      `).run(input.observationId, input.receivedAt, input.logicalSheetId, input.observationKey);
+      db.prepare(UPDATE_OBSERVATION_RECEIPT_SQL)
+        .run(input.observationId, input.receivedAt, input.logicalSheetId, input.observationKey);
     }
     return { kind, observationId: input.observationId };
   });
@@ -112,20 +131,18 @@ interface ReceiptRow {
 }
 
 function ensureRegisteredTarget(db: DatabaseSyncLike, input: ReadOnlySnapshotObservationInput): void {
-  const row = db.prepare(`
-    SELECT physical.enabled AS physical_enabled, physical.logical_sheet_id,
-           logical.enabled AS logical_enabled
-    FROM physical_sheet_registry AS physical
-    JOIN sheet_registry AS logical ON logical.sheet_id = physical.logical_sheet_id
-    WHERE physical.physical_sheet_id = ?
-  `).get(input.physicalSheetId) as {
+  const row = db.prepare(READ_REGISTERED_OBSERVATION_TARGET_SQL)
+    .get(input.physicalSheetId) as {
     physical_enabled: number;
     logical_sheet_id: string;
     logical_enabled: number;
   } | undefined;
   if (row === undefined || row.physical_enabled !== 1 || row.logical_enabled !== 1 ||
     row.logical_sheet_id !== input.logicalSheetId) {
-    throw new Error("read-only snapshot target is not an enabled registered projection");
+    throw new StorageError(
+      STORAGE_ERROR_CODES.SYNC_REGISTRY_TARGET_UNAVAILABLE,
+      "read-only snapshot target is not an enabled registered projection",
+    );
   }
 }
 
@@ -139,17 +156,38 @@ function validateInput(input: ReadOnlySnapshotObservationInput): void {
     ["payload hash", input.payloadHash],
     ["ingress actor ID", input.ingressActorId],
   ] as const) {
-    if (value.length === 0) throw new Error(label + " is required");
+    if (value.length === 0) {
+      throw new StorageError(
+        STORAGE_ERROR_CODES.INVALID_READ_ONLY_OBSERVATION,
+        label + " is required",
+      );
+    }
   }
-  if (input.source !== "polling" && input.source !== "onEdit") throw new Error("invalid observation source");
+  if (input.source !== "polling" && input.source !== "onEdit") {
+    throw new StorageError(
+      STORAGE_ERROR_CODES.INVALID_READ_ONLY_OBSERVATION,
+      "invalid observation source",
+    );
+  }
   for (const [label, value] of [["detectedAt", input.detectedAt], ["receivedAt", input.receivedAt]] as const) {
-    if (!Number.isSafeInteger(value) || value < 0) throw new Error(label + " must be a non-negative safe integer");
+    if (!Number.isSafeInteger(value) || value < 0) {
+      throw new StorageError(
+        STORAGE_ERROR_CODES.INVALID_READ_ONLY_OBSERVATION,
+        label + " must be a non-negative safe integer",
+      );
+    }
   }
   if (input.editorActorSource === "google_active_user" &&
     (typeof input.editorActorId !== "string" || input.editorActorId.length === 0)) {
-    throw new Error("verified editor source requires an editor actor ID");
+    throw new StorageError(
+      STORAGE_ERROR_CODES.INVALID_READ_ONLY_OBSERVATION,
+      "verified editor source requires an editor actor ID",
+    );
   }
   if (input.editorActorSource === "unavailable" && input.editorActorId !== null) {
-    throw new Error("unavailable editor source cannot include an editor actor ID");
+    throw new StorageError(
+      STORAGE_ERROR_CODES.INVALID_READ_ONLY_OBSERVATION,
+      "unavailable editor source cannot include an editor actor ID",
+    );
   }
 }
