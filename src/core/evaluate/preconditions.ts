@@ -366,7 +366,7 @@ function promoteVersionedFields(
 ): VersionedFieldsPromotionResult {
   const versionedFields: ObservedVersionedFieldChange[] = [];
   for (const field of fields) {
-    if (!("baseFieldRevision" in field)) {
+    if (field.baseFieldRevision === undefined) {
       return {
         status: PRECONDITION_RESULTS.INVALID,
         reason: QUARANTINE_REASONS.UNKNOWN_BASE_REVISION,
