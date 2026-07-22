@@ -87,7 +87,7 @@ export interface DatabaseSyncLike {
 
 export interface StatementLike {
   run(...params: unknown[]): { changes: number; lastInsertRowid: number | bigint };
-  get(...params: unknown[]): unknown;
+  get<T = unknown>(...params: unknown[]): T | undefined;
   all(...params: unknown[]): unknown[];
 }
 
