@@ -15,6 +15,7 @@ import { QUARANTINE_REASONS, ROW_OPERATIONS } from "../../core/model/constants.j
 import type { DatabaseSyncLike } from "../sqlite/sqliteBridge.js";
 import { toSqlNullable } from "../sqlite/sqlState.js";
 import { auditJson } from "./observationAudit.js";
+import type { ObservationIntegrityDiscriminator } from "./observationConstants.js";
 import type { PersistObservedRowInput } from "./observationTypes.js";
 
 const INSERT_QUARANTINE_RECORD_SQL = `
@@ -32,7 +33,7 @@ export function persistIntegrityQuarantine(
   input: PersistObservedRowInput,
   row: ObservedRowChange,
   eventId: Presence<string>,
-  discriminator: "observation_key_payload_mismatch" | "event_key_payload_mismatch",
+  discriminator: ObservationIntegrityDiscriminator,
 ): string {
   const quarantine = makeIntegrityQuarantine(input, row, discriminator);
   return persistQuarantine(db, input, quarantine, eventId);
@@ -78,7 +79,7 @@ export function persistQuarantine(
 function makeIntegrityQuarantine(
   input: PersistObservedRowInput,
   row: ObservedRowChange,
-  discriminator: "observation_key_payload_mismatch" | "event_key_payload_mismatch",
+  discriminator: ObservationIntegrityDiscriminator,
 ): QuarantinePlan {
   const common = {
     quarantineId: `${QUARANTINE_ID_PREFIX}${stableHash({
