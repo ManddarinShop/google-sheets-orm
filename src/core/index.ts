@@ -1,5 +1,11 @@
 // Core domain layer — pure evaluator and model types.
 
+export {
+  EMPTY_ARRAY_LENGTH_ZERO,
+  EMPTY_STRING_LENGTH_ZERO,
+  POSITIVE_SAFE_INTEGER_MINIMUM,
+} from "./constants.js";
+
 // Encoding
 export { stableEncode, stableHash } from "./encoding/index.js";
 export type {
