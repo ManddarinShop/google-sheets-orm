@@ -8,6 +8,13 @@
  */
 
 import { applyResolution } from "../../core/index.js";
+import { CONFLICT_TRANSITION_KINDS } from "../../core/conflict/transitions.js";
+import {
+  JAVASCRIPT_TYPE_NAMES,
+  NORMALIZED_CELL_KINDS,
+} from "../../core/encoding/constants.js";
+import { isJavaScriptType } from "../../core/encoding/typeGuards.js";
+import { CONFLICT_STATUSES } from "../../core/model/constants.js";
 import type {
   ConflictStatus,
   NormalizedCell,
@@ -128,6 +135,32 @@ const READ_REGISTERED_PROJECTION_SQL = `
   WHERE physical_sheet_id = ?
 `;
 
+/** Runtime values for the durable resolution-command lifecycle. */
+const RESOLUTION_COMMAND_STATUSES = {
+  PROCESSING: "processing",
+  APPLIED: "applied",
+  STALE: "stale",
+  REJECTED: "rejected",
+  FAILED: "failed",
+} as const;
+
+/** Closed set of statuses stored for a resolution command. */
+export type ResolutionCommandStatus =
+  (typeof RESOLUTION_COMMAND_STATUSES)[keyof typeof RESOLUTION_COMMAND_STATUSES];
+
+/** Runtime values for results returned by the resolution writer. */
+const PERSIST_RESOLUTION_RESULT_KINDS = {
+  FENCED_OUT: "fenced_out",
+  APPLIED: "applied",
+  STALE: "stale",
+  REJECTED: "rejected",
+  DUPLICATE: "duplicate",
+} as const;
+
+/** Closed set of resolution-writer result kinds. */
+export type PersistResolutionCommandResultKind =
+  (typeof PERSIST_RESOLUTION_RESULT_KINDS)[keyof typeof PERSIST_RESOLUTION_RESULT_KINDS];
+
 /** Input required to durably process one trusted `acknowledge_system` request. */
 export interface PersistResolutionCommandInput {
   readonly logicalSheetId: string;
@@ -154,14 +187,26 @@ export interface PersistResolutionCommandInput {
 
 /** Terminal or replay-visible result of a resolution command transaction. */
 export type PersistResolutionCommandResult =
-  | { readonly kind: "fenced_out" }
-  | { readonly kind: "applied"; readonly commandId: string; readonly conflictId: string }
-  | { readonly kind: "stale"; readonly commandId: string; readonly conflictId: string }
-  | { readonly kind: "rejected"; readonly commandId: string; readonly reason: string }
+  | { readonly kind: typeof PERSIST_RESOLUTION_RESULT_KINDS.FENCED_OUT }
   | {
-      readonly kind: "duplicate";
+      readonly kind: typeof PERSIST_RESOLUTION_RESULT_KINDS.APPLIED;
       readonly commandId: string;
-      readonly status: "processing" | "applied" | "stale" | "rejected" | "failed";
+      readonly conflictId: string;
+    }
+  | {
+      readonly kind: typeof PERSIST_RESOLUTION_RESULT_KINDS.STALE;
+      readonly commandId: string;
+      readonly conflictId: string;
+    }
+  | {
+      readonly kind: typeof PERSIST_RESOLUTION_RESULT_KINDS.REJECTED;
+      readonly commandId: string;
+      readonly reason: string;
+    }
+  | {
+      readonly kind: typeof PERSIST_RESOLUTION_RESULT_KINDS.DUPLICATE;
+      readonly commandId: string;
+      readonly status: ResolutionCommandStatus;
     };
 
 interface ConflictRow {
@@ -193,7 +238,7 @@ interface CommandRow {
   readonly active_candidate_hash: string;
   readonly expected_candidate_epoch: number;
   readonly payload_hash: string;
-  readonly status: "processing" | "applied" | "stale" | "rejected" | "failed";
+  readonly status: ResolutionCommandStatus;
 }
 
 interface ActiveCandidatePointer {
@@ -233,7 +278,9 @@ export function persistResolutionCommand(
   input: PersistResolutionCommandInput,
 ): PersistResolutionCommandResult {
   validateInput(input);
-  if (!isFencingValid(db, fence)) return { kind: "fenced_out" };
+  if (!isFencingValid(db, fence)) {
+    return { kind: PERSIST_RESOLUTION_RESULT_KINDS.FENCED_OUT };
+  }
 
   try {
     return withImmediateTransaction(db, () => {
@@ -242,7 +289,7 @@ export function persistResolutionCommand(
       if (duplicate !== null) {
         // A durable processing receipt already owns the request. Only a terminal
         // replay may consume a still-checked control with a reset projection.
-        if (duplicate.status !== "processing") {
+        if (duplicate.status !== RESOLUTION_COMMAND_STATUSES.PROCESSING) {
           appendResolutionEffects(db, fence, input, input.duplicateEffects ?? []);
         }
         return duplicate;
@@ -251,7 +298,7 @@ export function persistResolutionCommand(
       const conflict = readConflict(db, input.logicalSheetId, input.command.targetConflictId);
       if (conflict === null) {
         return {
-          kind: "rejected",
+          kind: PERSIST_RESOLUTION_RESULT_KINDS.REJECTED,
           commandId: input.command.commandId,
           reason: "target conflict does not exist in the logical sheet",
         };
@@ -263,20 +310,20 @@ export function persistResolutionCommand(
         pointer.candidate_epoch === input.command.expectedCandidateEpoch &&
         pointer.active_candidate_hash === input.command.activeCandidateHash
         ? applyResolution(conflict, input.command)
-        : { kind: "stale" as const, conflict };
+        : { kind: CONFLICT_TRANSITION_KINDS.STALE, conflict };
 
-      if (transition.kind === "resolved") {
+      if (transition.kind === CONFLICT_TRANSITION_KINDS.RESOLVED) {
         applyResolvedCommand(db, fence, input, conflict, pointer);
         return {
-          kind: "applied",
+          kind: PERSIST_RESOLUTION_RESULT_KINDS.APPLIED,
           commandId: input.command.commandId,
           conflictId: conflict.conflictId,
         };
       }
-      if (transition.kind === "stale") {
+      if (transition.kind === CONFLICT_TRANSITION_KINDS.STALE) {
         markStaleCommand(db, fence, input, transition.conflict.status);
         return {
-          kind: "stale",
+          kind: PERSIST_RESOLUTION_RESULT_KINDS.STALE,
           commandId: input.command.commandId,
           conflictId: conflict.conflictId,
         };
@@ -284,13 +331,15 @@ export function persistResolutionCommand(
 
       markRejectedCommand(db, fence, input);
       return {
-        kind: "rejected",
+        kind: PERSIST_RESOLUTION_RESULT_KINDS.REJECTED,
         commandId: input.command.commandId,
         reason: transition.reason,
       };
     });
   } catch (error: unknown) {
-    if (error instanceof FenceLostError) return { kind: "fenced_out" };
+    if (error instanceof FenceLostError) {
+      return { kind: PERSIST_RESOLUTION_RESULT_KINDS.FENCED_OUT };
+    }
     throw error;
   }
 }
@@ -337,7 +386,10 @@ function validateInput(input: PersistResolutionCommandInput): void {
 function findExistingCommand(
   db: DatabaseSyncLike,
   command: ResolutionCommand,
-): Extract<PersistResolutionCommandResult, { readonly kind: "duplicate" }> | null {
+): Extract<
+  PersistResolutionCommandResult,
+  { readonly kind: typeof PERSIST_RESOLUTION_RESULT_KINDS.DUPLICATE }
+> | null {
   const rows = db.prepare(FIND_EXISTING_COMMAND_SQL)
     .all<CommandRow>(command.commandId, command.requestKey);
   if (rows.length === 0) return null;
@@ -360,7 +412,11 @@ function findExistingCommand(
       "resolution command ID or request key was replayed with a different payload",
     );
   }
-  return { kind: "duplicate", commandId: existing.command_id, status: existing.status };
+  return {
+    kind: PERSIST_RESOLUTION_RESULT_KINDS.DUPLICATE,
+    commandId: existing.command_id,
+    status: existing.status,
+  };
 }
 
 function sameCommandIdentity(existing: CommandRow, command: ResolutionCommand): boolean {
@@ -608,17 +664,25 @@ function parseNormalizedCell(serialized: string, fieldName: string): NormalizedC
     );
   }
   const cell = value as { readonly kind?: unknown; readonly value?: unknown };
-  if (cell.kind === "string" && typeof cell.value === "string") {
-    return { kind: "string", value: cell.value };
+  if (
+    cell.kind === NORMALIZED_CELL_KINDS.STRING &&
+    isJavaScriptType(cell.value, JAVASCRIPT_TYPE_NAMES.STRING)
+  ) {
+    return { kind: NORMALIZED_CELL_KINDS.STRING, value: cell.value };
   }
-  if (cell.kind === "number" && typeof cell.value === "number" && Number.isFinite(cell.value)) {
-    return { kind: "number", value: cell.value };
+  if (cell.kind === NORMALIZED_CELL_KINDS.NUMBER &&
+    isJavaScriptType(cell.value, JAVASCRIPT_TYPE_NAMES.NUMBER) && Number.isFinite(cell.value)) {
+    return { kind: NORMALIZED_CELL_KINDS.NUMBER, value: cell.value };
   }
-  if (cell.kind === "boolean" && typeof cell.value === "boolean") {
-    return { kind: "boolean", value: cell.value };
+  if (
+    cell.kind === NORMALIZED_CELL_KINDS.BOOLEAN &&
+    isJavaScriptType(cell.value, JAVASCRIPT_TYPE_NAMES.BOOLEAN)
+  ) {
+    return { kind: NORMALIZED_CELL_KINDS.BOOLEAN, value: cell.value };
   }
-  if (cell.kind === "date" && typeof cell.value === "string" && isCanonicalDate(cell.value)) {
-    return { kind: "date", value: cell.value };
+  if (cell.kind === NORMALIZED_CELL_KINDS.DATE &&
+    isJavaScriptType(cell.value, JAVASCRIPT_TYPE_NAMES.STRING) && isCanonicalDate(cell.value)) {
+    return { kind: NORMALIZED_CELL_KINDS.DATE, value: cell.value };
   }
   throw new StorageError(
     STORAGE_ERROR_CODES.INVALID_STORED_CONFLICT,
@@ -633,7 +697,13 @@ function isCanonicalDate(value: string): boolean {
 }
 
 function requireConflictStatus(value: string): ConflictStatus {
-  if (value === "OPEN" || value === "NEEDS_REBASE" || value === "RESOLVED") return value;
+  if (
+    value === CONFLICT_STATUSES.OPEN ||
+    value === CONFLICT_STATUSES.NEEDS_REBASE ||
+    value === CONFLICT_STATUSES.RESOLVED
+  ) {
+    return value;
+  }
   throw new StorageError(
     STORAGE_ERROR_CODES.INVALID_STORED_CONFLICT,
     `stored conflict has invalid status ${value}`,
