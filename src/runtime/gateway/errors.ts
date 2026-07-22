@@ -6,6 +6,7 @@ export const SYNC_GATEWAY_ERROR_CODES = {
   INVALID_PROVISIONING_DEFINITIONS: "invalid_sync_gateway_provisioning",
   INVALID_CLIENT_OPTIONS: "invalid_sync_gateway_client_options",
   INVALID_GATEWAY_RESPONSE: "invalid_sync_gateway_response",
+  INVALID_FAKE_GATEWAY_INPUT: "invalid_fake_sync_gateway_input",
 } as const;
 
 export type SyncGatewayErrorCode =
