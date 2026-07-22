@@ -5,9 +5,17 @@
  * identity. They contain no Google SDK, SQLite, or platform-specific types.
  */
 
+import {
+  NORMALIZED_CELL_KINDS,
+} from "./constants.js";
+import type { CellObservationKind, NormalizedCellKind } from "./constants.js";
+import type { Presence } from "../state/types.js";
+
+export type { CellObservationKind, NormalizedCellKind } from "./constants.js";
+
 /** A date encoded as a fixed-width UTC ISO-8601 string. */
 export interface DateValue {
-  readonly kind: "date";
+  readonly kind: typeof NORMALIZED_CELL_KINDS.DATE;
   readonly value: string; // YYYY-MM-DDTHH:mm:ss.SSSZ
 }
 
@@ -19,9 +27,9 @@ export interface DateValue {
  */
 export type NormalizedCell =
   | null
-  | { readonly kind: "string"; readonly value: string }
-  | { readonly kind: "number"; readonly value: number }
-  | { readonly kind: "boolean"; readonly value: boolean }
+  | { readonly kind: typeof NORMALIZED_CELL_KINDS.STRING; readonly value: string }
+  | { readonly kind: typeof NORMALIZED_CELL_KINDS.NUMBER; readonly value: number }
+  | { readonly kind: typeof NORMALIZED_CELL_KINDS.BOOLEAN; readonly value: boolean }
   | DateValue;
 
 /**
@@ -30,11 +38,11 @@ export type NormalizedCell =
  * processed or must be quarantined.
  */
 export interface CellObservation {
-  readonly cellKind: "blank" | "literal" | "formula" | "merged" | "error";
+  readonly cellKind: CellObservationKind;
   readonly normalizedCell: NormalizedCell;
-  readonly formulaHash: string | null;
-  readonly mergeRange: string | null;
-  readonly errorCode: string | null;
+  readonly formulaHash: Presence<string>;
+  readonly mergeRange: Presence<string>;
+  readonly errorCode: Presence<string>;
 }
 
 /**
