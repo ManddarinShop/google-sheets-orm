@@ -34,3 +34,37 @@ export const OBSERVATION_COMPLETION_STATES = {
 /** Closed set of terminal observation completion states. */
 export type ObservationCompletionState =
   (typeof OBSERVATION_COMPLETION_STATES)[keyof typeof OBSERVATION_COMPLETION_STATES];
+
+/** Runtime kinds returned after one observed row is persisted. */
+export const OBSERVATION_WRITE_RESULT_KINDS = {
+  FENCED_OUT: "fenced_out",
+  STALE: "stale",
+  DUPLICATE: "duplicate",
+  QUARANTINED: "quarantined",
+  PERSISTED: "persisted",
+} as const;
+
+/** Closed set of one-row observation write result kinds. */
+export type ObservationWriteResultKind =
+  (typeof OBSERVATION_WRITE_RESULT_KINDS)[keyof typeof OBSERVATION_WRITE_RESULT_KINDS];
+
+/** Runtime reasons why one observation was identified as a duplicate. */
+export const OBSERVATION_DUPLICATE_REASONS = {
+  OBSERVATION: "observation",
+  EVENT: "event",
+  CANDIDATE: "candidate",
+} as const;
+
+/** Closed set of observation duplicate reasons. */
+export type ObservationDuplicateReason =
+  (typeof OBSERVATION_DUPLICATE_REASONS)[keyof typeof OBSERVATION_DUPLICATE_REASONS];
+
+/** Runtime discriminators for receipt/event identity quarantine records. */
+export const OBSERVATION_INTEGRITY_DISCRIMINATORS = {
+  OBSERVATION_KEY_PAYLOAD_MISMATCH: "observation_key_payload_mismatch",
+  EVENT_KEY_PAYLOAD_MISMATCH: "event_key_payload_mismatch",
+} as const;
+
+/** Closed set of identity mismatch quarantine discriminators. */
+export type ObservationIntegrityDiscriminator =
+  (typeof OBSERVATION_INTEGRITY_DISCRIMINATORS)[keyof typeof OBSERVATION_INTEGRITY_DISCRIMINATORS];

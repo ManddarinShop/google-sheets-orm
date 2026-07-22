@@ -16,11 +16,15 @@ import type {
   RowBindingState,
   RowEvaluationResult,
   ConflictStatus,
+  RowOutcome,
 } from "../../core/index.js";
+import { ROW_OUTCOMES } from "../../core/evaluate/constants.js";
 import { CANONICAL_COMMIT_RESULT_KINDS } from "./canonicalCommit.js";
 import type { CanonicalCommitInput, CanonicalCommitResult } from "./canonicalCommit.js";
 import type { NewEffect } from "../sync/effectOutbox.js";
+import { OBSERVATION_WRITE_RESULT_KINDS } from "./observationConstants.js";
 import type {
+  ObservationDuplicateReason,
   ObservationAppendResultKind,
   ObservationReceiptState,
 } from "./observationConstants.js";
@@ -73,26 +77,26 @@ export interface PersistObservedRowInput {
 
 /** Durable outcome for one row-independent observation submission. */
 export type PersistObservedRowResult =
-  | { readonly kind: "fenced_out" }
-  | { readonly kind: "stale" }
+  | { readonly kind: typeof OBSERVATION_WRITE_RESULT_KINDS.FENCED_OUT }
+  | { readonly kind: typeof OBSERVATION_WRITE_RESULT_KINDS.STALE }
   | {
-      readonly kind: "duplicate";
+      readonly kind: typeof OBSERVATION_WRITE_RESULT_KINDS.DUPLICATE;
       readonly observationId: string;
       readonly eventId: Presence<string>;
-      readonly reason: "observation" | "event" | "candidate";
+      readonly reason: ObservationDuplicateReason;
     }
   | {
-      readonly kind: "quarantined";
+      readonly kind: typeof OBSERVATION_WRITE_RESULT_KINDS.QUARANTINED;
       readonly observationId: string;
       readonly eventId: Presence<string>;
       readonly quarantineId: string;
     }
   | {
-      readonly kind: "persisted";
+      readonly kind: typeof OBSERVATION_WRITE_RESULT_KINDS.PERSISTED;
       readonly observationId: string;
       readonly eventId: string;
       readonly eventSequence: number;
-      readonly outcome: "accepted" | "partially_accepted" | "conflict";
+      readonly outcome: Exclude<RowOutcome, typeof ROW_OUTCOMES.QUARANTINE>;
       readonly entityRevision: Applicability<number>;
       readonly conflictIds: readonly string[];
     };

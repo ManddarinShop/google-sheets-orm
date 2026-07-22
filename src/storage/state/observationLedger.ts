@@ -204,7 +204,7 @@ export function findMatchingCandidateEventId(
   input: PersistObservedRowInput,
   row: ObservedRowChange,
   binding: RowBindingRow,
-): string | null {
+): LookupResult<string> {
   if (
     input.evaluation.outcome === ROW_OUTCOMES.QUARANTINE ||
     input.evaluation.acceptedFields.length > 0 ||
@@ -212,7 +212,7 @@ export function findMatchingCandidateEventId(
     binding.state !== ROW_BINDING_STATES.ACTIVE ||
     binding.entity_id.kind === PRESENCE_KINDS.ABSENT
   ) {
-    return null;
+    return { kind: LOOKUP_RESULT_KINDS.NOT_FOUND };
   }
 
   const eventIds = new Set<string>();
@@ -230,11 +230,15 @@ export function findMatchingCandidateEventId(
         active.value.status !== CONFLICT_STATUSES.NEEDS_REBASE) ||
       active.value.active_candidate_hash !== candidateHash(conflict)
     ) {
-      return null;
+      return { kind: LOOKUP_RESULT_KINDS.NOT_FOUND };
     }
     eventIds.add(active.value.event_id);
   }
-  return eventIds.size === 1 ? [...eventIds][0] ?? null : null;
+  if (eventIds.size !== 1) return { kind: LOOKUP_RESULT_KINDS.NOT_FOUND };
+  const eventId = [...eventIds][0];
+  return eventId === undefined
+    ? { kind: LOOKUP_RESULT_KINDS.NOT_FOUND }
+    : { kind: LOOKUP_RESULT_KINDS.FOUND, value: eventId };
 }
 
 /** Reads the currently visible unresolved candidate for one row field. */
@@ -257,10 +261,12 @@ export function findEventByKey(
   db: DatabaseSyncLike,
   logicalSheetId: string,
   eventKey: string,
-): EventRow | null {
+): LookupResult<EventRow> {
   const event = db.prepare(READ_EVENT_BY_KEY_SQL)
     .get<EventRow>(logicalSheetId, eventKey);
-  return event ?? null;
+  return event === undefined
+    ? { kind: LOOKUP_RESULT_KINDS.NOT_FOUND }
+    : { kind: LOOKUP_RESULT_KINDS.FOUND, value: event };
 }
 
 /** Creates the event log, row evidence, and field evidence for one new observation. */
