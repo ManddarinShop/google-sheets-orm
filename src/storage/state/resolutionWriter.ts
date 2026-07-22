@@ -8,15 +8,164 @@
  */
 
 import { applyResolution } from "../../core/index.js";
+import { CONFLICT_TRANSITION_KINDS } from "../../core/conflict/transitions.js";
+import {
+  JAVASCRIPT_TYPE_NAMES,
+  NORMALIZED_CELL_KINDS,
+} from "../../core/encoding/constants.js";
+import { isJavaScriptType } from "../../core/encoding/typeGuards.js";
+import { CONFLICT_STATUSES } from "../../core/model/constants.js";
+import {
+  LOOKUP_RESULT_KINDS,
+  PRESENCE_KINDS,
+} from "../../core/state/constants.js";
 import type {
   ConflictStatus,
+  LookupResult,
   NormalizedCell,
+  Presence,
   ResolutionCommand,
   SyncConflict,
 } from "../../core/index.js";
+import { STORAGE_ERROR_CODES, StorageError } from "../errors.js";
 import { appendPendingEffects, type NewEffect } from "../sync/effectOutbox.js";
 import { withImmediateTransaction, type DatabaseSyncLike } from "../sqlite/sqliteBridge.js";
 import { isFencingValid, type FencingContext } from "../sync/writerLease.js";
+
+const FENCE_EXISTS_SQL = `
+  SELECT 1 FROM writer_lease
+  WHERE role = ? AND writer_epoch = ? AND fencing_token = ? AND lease_until > ?
+`;
+
+const FIND_EXISTING_COMMAND_SQL = `
+  SELECT command_id, request_key, action, actor_id, role, target_conflict_id,
+         expected_revision, active_candidate_hash, expected_candidate_epoch,
+         payload_hash, status
+  FROM resolution_command
+  WHERE command_id = ? OR request_key = ?
+`;
+
+const READ_CONFLICT_SQL = `
+  SELECT conflict_id, conflict_group_id, event_id, row_binding_id, entity_id, field_name,
+         user_value, user_base_revision, canonical_value_at_detection,
+         canonical_revision_at_detection, current_canonical_value,
+         current_canonical_revision, candidate_epoch, status, resolution_command_id
+  FROM sync_conflict
+  WHERE logical_sheet_id = ? AND conflict_id = ?
+`;
+
+const READ_ACTIVE_CANDIDATE_POINTER_SQL = `
+  SELECT physical_sheet_id, projection, candidate_epoch, active_candidate_hash
+  FROM sheet_visible_field_state
+  WHERE row_binding_id = ? AND field_name = ?
+    AND active_candidate_conflict_id = ?
+    AND active_candidate_hash IS NOT NULL
+`;
+
+const INSERT_PROCESSING_COMMAND_SQL = `
+  INSERT INTO resolution_command (
+    command_id, request_key, action, actor_id, role, target_conflict_id,
+    expected_revision, active_candidate_hash, expected_candidate_epoch,
+    payload_hash, status, issued_at
+  )
+  SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'processing', ?
+  WHERE EXISTS (${FENCE_EXISTS_SQL})
+`;
+
+const MARK_CONFLICT_RESOLVED_SQL = `
+  UPDATE sync_conflict
+  SET status = 'RESOLVED', resolution_command_id = ?, updated_at = ?
+  WHERE conflict_id = ? AND status IN ('OPEN', 'NEEDS_REBASE')
+    AND current_canonical_revision = ? AND candidate_epoch = ?
+    AND EXISTS (${FENCE_EXISTS_SQL})
+`;
+
+const CLEAR_ACTIVE_CANDIDATE_POINTER_SQL = `
+  UPDATE sheet_visible_field_state
+  SET active_candidate_conflict_id = NULL, active_candidate_hash = NULL,
+      candidate_epoch = candidate_epoch + 1
+  WHERE physical_sheet_id = ? AND projection = ?
+    AND row_binding_id = ? AND field_name = ?
+    AND active_candidate_conflict_id = ? AND candidate_epoch = ?
+    AND EXISTS (${FENCE_EXISTS_SQL})
+`;
+
+const ADVANCE_ROW_BINDING_CANDIDATE_EPOCH_SQL = `
+  UPDATE row_binding
+  SET candidate_epoch = CASE
+    WHEN candidate_epoch <= ? THEN ?
+    ELSE candidate_epoch
+  END
+  WHERE row_binding_id = ? AND logical_sheet_id = ?
+    AND EXISTS (${FENCE_EXISTS_SQL})
+`;
+
+const MARK_COMMAND_APPLIED_SQL = `
+  UPDATE resolution_command
+  SET status = 'applied', applied_commit_id = ?
+  WHERE command_id = ? AND status = 'processing'
+    AND EXISTS (${FENCE_EXISTS_SQL})
+`;
+
+const MARK_CONFLICT_STALE_SQL = `
+  UPDATE sync_conflict
+  SET status = ?, updated_at = ?
+  WHERE conflict_id = ? AND status IN ('OPEN', 'NEEDS_REBASE')
+    AND EXISTS (${FENCE_EXISTS_SQL})
+`;
+
+const MARK_COMMAND_STALE_SQL = `
+  UPDATE resolution_command
+  SET status = 'stale'
+  WHERE command_id = ? AND status = 'processing'
+    AND EXISTS (${FENCE_EXISTS_SQL})
+`;
+
+const MARK_COMMAND_REJECTED_SQL = `
+  UPDATE resolution_command
+  SET status = 'rejected'
+  WHERE command_id = ? AND status = 'processing'
+    AND EXISTS (${FENCE_EXISTS_SQL})
+`;
+
+const READ_EFFECT_DEDUPE_SQL = `
+  SELECT effect_kind, commit_id, logical_sheet_id, physical_sheet_id,
+         projection, target_kind, target_id, payload_hash
+  FROM sheet_effect_outbox
+  WHERE effect_dedupe_key = ?
+`;
+
+const READ_REGISTERED_PROJECTION_SQL = `
+  SELECT logical_sheet_id, projection, enabled
+  FROM physical_sheet_registry
+  WHERE physical_sheet_id = ?
+`;
+
+/** Runtime values for the durable resolution-command lifecycle. */
+const RESOLUTION_COMMAND_STATUSES = {
+  PROCESSING: "processing",
+  APPLIED: "applied",
+  STALE: "stale",
+  REJECTED: "rejected",
+  FAILED: "failed",
+} as const;
+
+/** Closed set of statuses stored for a resolution command. */
+export type ResolutionCommandStatus =
+  (typeof RESOLUTION_COMMAND_STATUSES)[keyof typeof RESOLUTION_COMMAND_STATUSES];
+
+/** Runtime values for results returned by the resolution writer. */
+const PERSIST_RESOLUTION_RESULT_KINDS = {
+  FENCED_OUT: "fenced_out",
+  APPLIED: "applied",
+  STALE: "stale",
+  REJECTED: "rejected",
+  DUPLICATE: "duplicate",
+} as const;
+
+/** Closed set of resolution-writer result kinds. */
+export type PersistResolutionCommandResultKind =
+  (typeof PERSIST_RESOLUTION_RESULT_KINDS)[keyof typeof PERSIST_RESOLUTION_RESULT_KINDS];
 
 /** Input required to durably process one trusted `acknowledge_system` request. */
 export interface PersistResolutionCommandInput {
@@ -44,14 +193,26 @@ export interface PersistResolutionCommandInput {
 
 /** Terminal or replay-visible result of a resolution command transaction. */
 export type PersistResolutionCommandResult =
-  | { readonly kind: "fenced_out" }
-  | { readonly kind: "applied"; readonly commandId: string; readonly conflictId: string }
-  | { readonly kind: "stale"; readonly commandId: string; readonly conflictId: string }
-  | { readonly kind: "rejected"; readonly commandId: string; readonly reason: string }
+  | { readonly kind: typeof PERSIST_RESOLUTION_RESULT_KINDS.FENCED_OUT }
   | {
-      readonly kind: "duplicate";
+      readonly kind: typeof PERSIST_RESOLUTION_RESULT_KINDS.APPLIED;
       readonly commandId: string;
-      readonly status: "processing" | "applied" | "stale" | "rejected" | "failed";
+      readonly conflictId: string;
+    }
+  | {
+      readonly kind: typeof PERSIST_RESOLUTION_RESULT_KINDS.STALE;
+      readonly commandId: string;
+      readonly conflictId: string;
+    }
+  | {
+      readonly kind: typeof PERSIST_RESOLUTION_RESULT_KINDS.REJECTED;
+      readonly commandId: string;
+      readonly reason: string;
+    }
+  | {
+      readonly kind: typeof PERSIST_RESOLUTION_RESULT_KINDS.DUPLICATE;
+      readonly commandId: string;
+      readonly status: ResolutionCommandStatus;
     };
 
 interface ConflictRow {
@@ -83,7 +244,7 @@ interface CommandRow {
   readonly active_candidate_hash: string;
   readonly expected_candidate_epoch: number;
   readonly payload_hash: string;
-  readonly status: "processing" | "applied" | "stale" | "rejected" | "failed";
+  readonly status: ResolutionCommandStatus;
 }
 
 interface ActiveCandidatePointer {
@@ -91,6 +252,23 @@ interface ActiveCandidatePointer {
   readonly projection: string;
   readonly candidate_epoch: number;
   readonly active_candidate_hash: string;
+}
+
+interface EffectDedupeRow {
+  readonly effect_kind: string;
+  readonly commit_id: string;
+  readonly logical_sheet_id: string;
+  readonly physical_sheet_id: string;
+  readonly projection: string;
+  readonly target_kind: string;
+  readonly target_id: string;
+  readonly payload_hash: string;
+}
+
+interface RegisteredProjectionRow {
+  readonly logical_sheet_id: string;
+  readonly projection: string;
+  readonly enabled: number;
 }
 
 /**
@@ -106,50 +284,60 @@ export function persistResolutionCommand(
   input: PersistResolutionCommandInput,
 ): PersistResolutionCommandResult {
   validateInput(input);
-  if (!isFencingValid(db, fence)) return { kind: "fenced_out" };
+  if (!isFencingValid(db, fence)) {
+    return { kind: PERSIST_RESOLUTION_RESULT_KINDS.FENCED_OUT };
+  }
 
   try {
     return withImmediateTransaction(db, () => {
       assertCurrentFence(db, fence);
       const duplicate = findExistingCommand(db, input.command);
-      if (duplicate !== null) {
+      if (duplicate.kind === LOOKUP_RESULT_KINDS.FOUND) {
+        const duplicateResult = duplicate.value;
         // A durable processing receipt already owns the request. Only a terminal
         // replay may consume a still-checked control with a reset projection.
-        if (duplicate.status !== "processing") {
+        if (duplicateResult.status !== RESOLUTION_COMMAND_STATUSES.PROCESSING) {
           appendResolutionEffects(db, fence, input, input.duplicateEffects ?? []);
         }
-        return duplicate;
+        return duplicateResult;
       }
 
-      const conflict = readConflict(db, input.logicalSheetId, input.command.targetConflictId);
-      if (conflict === null) {
+      const conflictResult = readConflict(db, input.logicalSheetId, input.command.targetConflictId);
+      if (conflictResult.kind === LOOKUP_RESULT_KINDS.NOT_FOUND) {
         return {
-          kind: "rejected",
+          kind: PERSIST_RESOLUTION_RESULT_KINDS.REJECTED,
           commandId: input.command.commandId,
           reason: "target conflict does not exist in the logical sheet",
         };
       }
+      const conflict = conflictResult.value;
 
       insertProcessingCommand(db, fence, input);
-      const pointer = readActiveCandidatePointer(db, conflict);
-      const transition = pointer !== null &&
-        pointer.candidate_epoch === input.command.expectedCandidateEpoch &&
-        pointer.active_candidate_hash === input.command.activeCandidateHash
+      const pointerResult = readActiveCandidatePointer(db, conflict);
+      const transition = pointerResult.kind === LOOKUP_RESULT_KINDS.FOUND &&
+        pointerResult.value.candidate_epoch === input.command.expectedCandidateEpoch &&
+        pointerResult.value.active_candidate_hash === input.command.activeCandidateHash
         ? applyResolution(conflict, input.command)
-        : { kind: "stale" as const, conflict };
+        : { kind: CONFLICT_TRANSITION_KINDS.STALE, conflict };
 
-      if (transition.kind === "resolved") {
-        applyResolvedCommand(db, fence, input, conflict, pointer);
+      if (transition.kind === CONFLICT_TRANSITION_KINDS.RESOLVED) {
+        if (pointerResult.kind === LOOKUP_RESULT_KINDS.NOT_FOUND) {
+          throw new StorageError(
+            STORAGE_ERROR_CODES.RESOLUTION_STORAGE_INCONSISTENT,
+            "resolved command lost its active candidate pointer",
+          );
+        }
+        applyResolvedCommand(db, fence, input, conflict, pointerResult.value);
         return {
-          kind: "applied",
+          kind: PERSIST_RESOLUTION_RESULT_KINDS.APPLIED,
           commandId: input.command.commandId,
           conflictId: conflict.conflictId,
         };
       }
-      if (transition.kind === "stale") {
+      if (transition.kind === CONFLICT_TRANSITION_KINDS.STALE) {
         markStaleCommand(db, fence, input, transition.conflict.status);
         return {
-          kind: "stale",
+          kind: PERSIST_RESOLUTION_RESULT_KINDS.STALE,
           commandId: input.command.commandId,
           conflictId: conflict.conflictId,
         };
@@ -157,20 +345,25 @@ export function persistResolutionCommand(
 
       markRejectedCommand(db, fence, input);
       return {
-        kind: "rejected",
+        kind: PERSIST_RESOLUTION_RESULT_KINDS.REJECTED,
         commandId: input.command.commandId,
-        reason: transition.reason,
+        reason: transition.error.code,
       };
     });
   } catch (error: unknown) {
-    if (error instanceof FenceLostError) return { kind: "fenced_out" };
+    if (error instanceof FenceLostError) {
+      return { kind: PERSIST_RESOLUTION_RESULT_KINDS.FENCED_OUT };
+    }
     throw error;
   }
 }
 
 function validateInput(input: PersistResolutionCommandInput): void {
   if (input.logicalSheetId.length === 0 || input.commitId.length === 0) {
-    throw new Error("logical sheet ID and resolution commit ID are required");
+    throw new StorageError(
+      STORAGE_ERROR_CODES.INVALID_RESOLUTION_COMMAND,
+      "logical sheet ID and resolution commit ID are required",
+    );
   }
   const command = input.command;
   if (
@@ -185,15 +378,22 @@ function validateInput(input: PersistResolutionCommandInput): void {
     !Number.isSafeInteger(command.expectedCandidateEpoch) ||
     command.expectedCandidateEpoch < 0
   ) {
-    throw new Error("resolution command has an invalid durable identity or CAS input");
+    throw new StorageError(
+      STORAGE_ERROR_CODES.INVALID_RESOLUTION_COMMAND,
+      "resolution command has an invalid durable identity or CAS input",
+    );
   }
   for (const effect of allResolutionEffects(input)) {
     const isConflictControlProjection =
       effect.projection === "sync_conflicts" &&
       effect.targetKind === "conflict" &&
-      effect.conflictId === command.targetConflictId;
+      effect.conflictId.kind === PRESENCE_KINDS.PRESENT &&
+      effect.conflictId.value === command.targetConflictId;
     if (effect.logicalSheetId !== input.logicalSheetId && !isConflictControlProjection) {
-      throw new Error("resolution effect belongs to a different logical sheet");
+      throw new StorageError(
+        STORAGE_ERROR_CODES.INVALID_RESOLUTION_COMMAND,
+        "resolution effect belongs to a different logical sheet",
+      );
     }
   }
 }
@@ -201,22 +401,40 @@ function validateInput(input: PersistResolutionCommandInput): void {
 function findExistingCommand(
   db: DatabaseSyncLike,
   command: ResolutionCommand,
-): Extract<PersistResolutionCommandResult, { readonly kind: "duplicate" }> | null {
-  const rows = db.prepare(`
-    SELECT command_id, request_key, action, actor_id, role, target_conflict_id,
-           expected_revision, active_candidate_hash, expected_candidate_epoch,
-           payload_hash, status
-    FROM resolution_command
-    WHERE command_id = ? OR request_key = ?
-  `).all(command.commandId, command.requestKey) as CommandRow[];
-  if (rows.length === 0) return null;
-  if (rows.length !== 1) throw new Error("resolution command identity is internally inconsistent");
-  const existing = rows[0];
-  if (existing === undefined) throw new Error("resolution command lookup unexpectedly lost its row");
-  if (!sameCommandIdentity(existing, command)) {
-    throw new Error("resolution command ID or request key was replayed with a different payload");
+): LookupResult<Extract<
+  PersistResolutionCommandResult,
+  { readonly kind: typeof PERSIST_RESOLUTION_RESULT_KINDS.DUPLICATE }
+>> {
+  const rows = db.prepare(FIND_EXISTING_COMMAND_SQL)
+    .all<CommandRow>(command.commandId, command.requestKey);
+  if (rows.length === 0) return { kind: LOOKUP_RESULT_KINDS.NOT_FOUND };
+  if (rows.length !== 1) {
+    throw new StorageError(
+      STORAGE_ERROR_CODES.RESOLUTION_COMMAND_IDENTITY_CONFLICT,
+      "resolution command identity is internally inconsistent",
+    );
   }
-  return { kind: "duplicate", commandId: existing.command_id, status: existing.status };
+  const existing = rows[0];
+  if (existing === undefined) {
+    throw new StorageError(
+      STORAGE_ERROR_CODES.RESOLUTION_STORAGE_INCONSISTENT,
+      "resolution command lookup unexpectedly lost its row",
+    );
+  }
+  if (!sameCommandIdentity(existing, command)) {
+    throw new StorageError(
+      STORAGE_ERROR_CODES.RESOLUTION_COMMAND_IDENTITY_CONFLICT,
+      "resolution command ID or request key was replayed with a different payload",
+    );
+  }
+  return {
+    kind: LOOKUP_RESULT_KINDS.FOUND,
+    value: {
+      kind: PERSIST_RESOLUTION_RESULT_KINDS.DUPLICATE,
+      commandId: existing.command_id,
+      status: existing.status,
+    },
+  };
 }
 
 function sameCommandIdentity(existing: CommandRow, command: ResolutionCommand): boolean {
@@ -236,54 +454,56 @@ function readConflict(
   db: DatabaseSyncLike,
   logicalSheetId: string,
   conflictId: string,
-): SyncConflict | null {
-  const row = db.prepare(`
-    SELECT conflict_id, conflict_group_id, event_id, row_binding_id, entity_id, field_name,
-           user_value, user_base_revision, canonical_value_at_detection,
-           canonical_revision_at_detection, current_canonical_value,
-           current_canonical_revision, candidate_epoch, status, resolution_command_id
-    FROM sync_conflict
-    WHERE logical_sheet_id = ? AND conflict_id = ?
-  `).get(logicalSheetId, conflictId) as ConflictRow | undefined;
-  if (row === undefined) return null;
+): LookupResult<SyncConflict> {
+  const row = db.prepare(READ_CONFLICT_SQL)
+    .get<ConflictRow>(logicalSheetId, conflictId);
+  if (row === undefined) return { kind: LOOKUP_RESULT_KINDS.NOT_FOUND };
   return {
-    conflictId: row.conflict_id,
-    conflictGroupId: row.conflict_group_id,
-    eventId: row.event_id,
-    rowBindingId: row.row_binding_id,
-    entityId: row.entity_id,
-    fieldName: row.field_name,
-    userValue: parseNormalizedCell(row.user_value, "user_value"),
-    userBaseRevision: row.user_base_revision,
-    canonicalValueAtDetection: parseNormalizedCell(
-      row.canonical_value_at_detection,
-      "canonical_value_at_detection",
-    ),
-    canonicalRevisionAtDetection: row.canonical_revision_at_detection,
-    currentCanonicalValue: parseNormalizedCell(row.current_canonical_value, "current_canonical_value"),
-    currentCanonicalRevision: row.current_canonical_revision,
-    candidateEpoch: row.candidate_epoch,
-    status: requireConflictStatus(row.status),
-    resolutionCommandId: row.resolution_command_id,
+    kind: LOOKUP_RESULT_KINDS.FOUND,
+    value: {
+      conflictId: row.conflict_id,
+      conflictGroupId: fromSqlNullable(row.conflict_group_id),
+      eventId: row.event_id,
+      rowBindingId: row.row_binding_id,
+      entityId: row.entity_id,
+      fieldName: row.field_name,
+      userValue: parseNormalizedCell(row.user_value, "user_value"),
+      userBaseRevision: row.user_base_revision,
+      canonicalValueAtDetection: parseNormalizedCell(
+        row.canonical_value_at_detection,
+        "canonical_value_at_detection",
+      ),
+      canonicalRevisionAtDetection: row.canonical_revision_at_detection,
+      currentCanonicalValue: parseNormalizedCell(row.current_canonical_value, "current_canonical_value"),
+      currentCanonicalRevision: row.current_canonical_revision,
+      candidateEpoch: row.candidate_epoch,
+      status: requireConflictStatus(row.status),
+      resolutionCommandId: fromSqlNullable(row.resolution_command_id),
+    },
   };
 }
 
 function readActiveCandidatePointer(
   db: DatabaseSyncLike,
   conflict: SyncConflict,
-): ActiveCandidatePointer | null {
-  const rows = db.prepare(`
-    SELECT physical_sheet_id, projection, candidate_epoch, active_candidate_hash
-    FROM sheet_visible_field_state
-    WHERE row_binding_id = ? AND field_name = ?
-      AND active_candidate_conflict_id = ?
-      AND active_candidate_hash IS NOT NULL
-  `).all(conflict.rowBindingId, conflict.fieldName, conflict.conflictId) as ActiveCandidatePointer[];
-  if (rows.length === 0) return null;
+): LookupResult<ActiveCandidatePointer> {
+  const rows = db.prepare(READ_ACTIVE_CANDIDATE_POINTER_SQL)
+    .all(conflict.rowBindingId, conflict.fieldName, conflict.conflictId) as ActiveCandidatePointer[];
+  if (rows.length === 0) return { kind: LOOKUP_RESULT_KINDS.NOT_FOUND };
   if (rows.length !== 1) {
-    throw new Error("a conflict cannot be active in more than one physical projection");
+    throw new StorageError(
+      STORAGE_ERROR_CODES.RESOLUTION_STORAGE_INCONSISTENT,
+      "a conflict cannot be active in more than one physical projection",
+    );
   }
-  return rows[0] ?? null;
+  const pointer = rows[0];
+  if (pointer === undefined) {
+    throw new StorageError(
+      STORAGE_ERROR_CODES.RESOLUTION_STORAGE_INCONSISTENT,
+      "active candidate lookup returned an empty result after reporting a row",
+    );
+  }
+  return { kind: LOOKUP_RESULT_KINDS.FOUND, value: pointer };
 }
 
 function insertProcessingCommand(
@@ -292,15 +512,7 @@ function insertProcessingCommand(
   input: PersistResolutionCommandInput,
 ): void {
   const command = input.command;
-  const result = db.prepare(`
-    INSERT INTO resolution_command (
-      command_id, request_key, action, actor_id, role, target_conflict_id,
-      expected_revision, active_candidate_hash, expected_candidate_epoch,
-      payload_hash, status, issued_at
-    )
-    SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'processing', ?
-    WHERE EXISTS (${fenceExistsSql()})
-  `).run(
+  const result = db.prepare(INSERT_PROCESSING_COMMAND_SQL).run(
     command.commandId,
     command.requestKey,
     command.action,
@@ -322,17 +534,10 @@ function applyResolvedCommand(
   fence: FencingContext,
   input: PersistResolutionCommandInput,
   conflict: SyncConflict,
-  pointer: ActiveCandidatePointer | null,
+  pointer: ActiveCandidatePointer,
 ): void {
-  if (pointer === null) throw new Error("resolved command lost its active candidate pointer");
   const command = input.command;
-  const conflictResult = db.prepare(`
-    UPDATE sync_conflict
-    SET status = 'RESOLVED', resolution_command_id = ?, updated_at = ?
-    WHERE conflict_id = ? AND status IN ('OPEN', 'NEEDS_REBASE')
-      AND current_canonical_revision = ? AND candidate_epoch = ?
-      AND EXISTS (${fenceExistsSql()})
-  `).run(
+  const conflictResult = db.prepare(MARK_CONFLICT_RESOLVED_SQL).run(
     command.commandId,
     fence.now,
     conflict.conflictId,
@@ -342,15 +547,7 @@ function applyResolvedCommand(
   );
   if (conflictResult.changes !== 1) throw new FenceLostError();
 
-  const clearedPointer = db.prepare(`
-    UPDATE sheet_visible_field_state
-    SET active_candidate_conflict_id = NULL, active_candidate_hash = NULL,
-        candidate_epoch = candidate_epoch + 1
-    WHERE physical_sheet_id = ? AND projection = ?
-      AND row_binding_id = ? AND field_name = ?
-      AND active_candidate_conflict_id = ? AND candidate_epoch = ?
-      AND EXISTS (${fenceExistsSql()})
-  `).run(
+  const clearedPointer = db.prepare(CLEAR_ACTIVE_CANDIDATE_POINTER_SQL).run(
     pointer.physical_sheet_id,
     pointer.projection,
     conflict.rowBindingId,
@@ -361,15 +558,7 @@ function applyResolvedCommand(
   );
   if (clearedPointer.changes !== 1) throw new FenceLostError();
 
-  const binding = db.prepare(`
-    UPDATE row_binding
-    SET candidate_epoch = CASE
-      WHEN candidate_epoch <= ? THEN ?
-      ELSE candidate_epoch
-    END
-    WHERE row_binding_id = ? AND logical_sheet_id = ?
-      AND EXISTS (${fenceExistsSql()})
-  `).run(
+  const binding = db.prepare(ADVANCE_ROW_BINDING_CANDIDATE_EPOCH_SQL).run(
     command.expectedCandidateEpoch,
     command.expectedCandidateEpoch + 1,
     conflict.rowBindingId,
@@ -379,12 +568,8 @@ function applyResolvedCommand(
   if (binding.changes !== 1) throw new FenceLostError();
 
   appendResolutionEffects(db, fence, input, input.effects);
-  const commandResult = db.prepare(`
-    UPDATE resolution_command
-    SET status = 'applied', applied_commit_id = ?
-    WHERE command_id = ? AND status = 'processing'
-      AND EXISTS (${fenceExistsSql()})
-  `).run(input.commitId, command.commandId, ...fenceParameters(fence));
+  const commandResult = db.prepare(MARK_COMMAND_APPLIED_SQL)
+    .run(input.commitId, command.commandId, ...fenceParameters(fence));
   if (commandResult.changes !== 1) throw new FenceLostError();
 }
 
@@ -394,23 +579,14 @@ function markStaleCommand(
   input: PersistResolutionCommandInput,
   nextConflictStatus: ConflictStatus,
 ): void {
-  db.prepare(`
-    UPDATE sync_conflict
-    SET status = ?, updated_at = ?
-    WHERE conflict_id = ? AND status IN ('OPEN', 'NEEDS_REBASE')
-      AND EXISTS (${fenceExistsSql()})
-  `).run(
+  db.prepare(MARK_CONFLICT_STALE_SQL).run(
     nextConflictStatus,
     fence.now,
     input.command.targetConflictId,
     ...fenceParameters(fence),
   );
-  const command = db.prepare(`
-    UPDATE resolution_command
-    SET status = 'stale'
-    WHERE command_id = ? AND status = 'processing'
-      AND EXISTS (${fenceExistsSql()})
-  `).run(input.command.commandId, ...fenceParameters(fence));
+  const command = db.prepare(MARK_COMMAND_STALE_SQL)
+    .run(input.command.commandId, ...fenceParameters(fence));
   if (command.changes !== 1) throw new FenceLostError();
   appendResolutionEffects(db, fence, input, input.staleEffects ?? []);
 }
@@ -420,12 +596,8 @@ function markRejectedCommand(
   fence: FencingContext,
   input: PersistResolutionCommandInput,
 ): void {
-  const result = db.prepare(`
-    UPDATE resolution_command
-    SET status = 'rejected'
-    WHERE command_id = ? AND status = 'processing'
-      AND EXISTS (${fenceExistsSql()})
-  `).run(input.command.commandId, ...fenceParameters(fence));
+  const result = db.prepare(MARK_COMMAND_REJECTED_SQL)
+    .run(input.command.commandId, ...fenceParameters(fence));
   if (result.changes !== 1) throw new FenceLostError();
   appendResolutionEffects(db, fence, input, input.rejectedEffects ?? []);
 }
@@ -440,23 +612,8 @@ function appendResolutionEffects(
   if (effects.length === 0) return;
   ensureResolutionEffectsRegistered(db, input, effects);
   const unseen = effects.filter((effect) => {
-    const existing = db.prepare(`
-      SELECT effect_kind, commit_id, logical_sheet_id, physical_sheet_id,
-             projection, target_kind, target_id, payload_hash
-      FROM sheet_effect_outbox
-      WHERE effect_dedupe_key = ?
-    `).get(effect.effectDedupeKey) as
-      | {
-        effect_kind: string;
-        commit_id: string;
-        logical_sheet_id: string;
-        physical_sheet_id: string;
-        projection: string;
-        target_kind: string;
-        target_id: string;
-        payload_hash: string;
-      }
-      | undefined;
+    const existing = db.prepare(READ_EFFECT_DEDUPE_SQL)
+      .get<EffectDedupeRow>(effect.effectDedupeKey);
     if (existing === undefined) return true;
     if (
       existing.effect_kind !== effect.effectKind ||
@@ -468,7 +625,10 @@ function appendResolutionEffects(
       existing.target_id !== effect.targetId ||
       existing.payload_hash !== effect.payloadHash
     ) {
-      throw new Error("resolution effect dedupe key was reused with a different payload");
+      throw new StorageError(
+        STORAGE_ERROR_CODES.RESOLUTION_EFFECT_CONFLICT,
+        "resolution effect dedupe key was reused with a different payload",
+      );
     }
     return false;
   });
@@ -482,20 +642,18 @@ function ensureResolutionEffectsRegistered(
   effects: readonly NewEffect[],
 ): void {
   for (const effect of effects) {
-    const target = db.prepare(`
-      SELECT logical_sheet_id, projection, enabled
-      FROM physical_sheet_registry
-      WHERE physical_sheet_id = ?
-    `).get(effect.physicalSheetId) as
-      | { logical_sheet_id: string; projection: string; enabled: number }
-      | undefined;
+    const target = db.prepare(READ_REGISTERED_PROJECTION_SQL)
+      .get<RegisteredProjectionRow>(effect.physicalSheetId);
     if (
       target === undefined ||
       target.logical_sheet_id !== effect.logicalSheetId ||
       target.projection !== effect.projection ||
       target.enabled !== 1
     ) {
-      throw new Error("resolution effect targets an unregistered physical projection");
+      throw new StorageError(
+        STORAGE_ERROR_CODES.RESOLUTION_TARGET_UNAVAILABLE,
+        "resolution effect targets an unregistered physical projection",
+      );
     }
   }
 }
@@ -515,26 +673,43 @@ function parseNormalizedCell(serialized: string, fieldName: string): NormalizedC
   try {
     value = JSON.parse(serialized) as unknown;
   } catch {
-    throw new Error(`stored ${fieldName} is not valid JSON`);
+    throw new StorageError(
+      STORAGE_ERROR_CODES.INVALID_STORED_CONFLICT,
+      `stored ${fieldName} is not valid JSON`,
+    );
   }
   if (value === null) return null;
   if (typeof value !== "object" || Array.isArray(value)) {
-    throw new Error(`stored ${fieldName} is not a normalized cell`);
+    throw new StorageError(
+      STORAGE_ERROR_CODES.INVALID_STORED_CONFLICT,
+      `stored ${fieldName} is not a normalized cell`,
+    );
   }
   const cell = value as { readonly kind?: unknown; readonly value?: unknown };
-  if (cell.kind === "string" && typeof cell.value === "string") {
-    return { kind: "string", value: cell.value };
+  if (
+    cell.kind === NORMALIZED_CELL_KINDS.STRING &&
+    isJavaScriptType(cell.value, JAVASCRIPT_TYPE_NAMES.STRING)
+  ) {
+    return { kind: NORMALIZED_CELL_KINDS.STRING, value: cell.value };
   }
-  if (cell.kind === "number" && typeof cell.value === "number" && Number.isFinite(cell.value)) {
-    return { kind: "number", value: cell.value };
+  if (cell.kind === NORMALIZED_CELL_KINDS.NUMBER &&
+    isJavaScriptType(cell.value, JAVASCRIPT_TYPE_NAMES.NUMBER) && Number.isFinite(cell.value)) {
+    return { kind: NORMALIZED_CELL_KINDS.NUMBER, value: cell.value };
   }
-  if (cell.kind === "boolean" && typeof cell.value === "boolean") {
-    return { kind: "boolean", value: cell.value };
+  if (
+    cell.kind === NORMALIZED_CELL_KINDS.BOOLEAN &&
+    isJavaScriptType(cell.value, JAVASCRIPT_TYPE_NAMES.BOOLEAN)
+  ) {
+    return { kind: NORMALIZED_CELL_KINDS.BOOLEAN, value: cell.value };
   }
-  if (cell.kind === "date" && typeof cell.value === "string" && isCanonicalDate(cell.value)) {
-    return { kind: "date", value: cell.value };
+  if (cell.kind === NORMALIZED_CELL_KINDS.DATE &&
+    isJavaScriptType(cell.value, JAVASCRIPT_TYPE_NAMES.STRING) && isCanonicalDate(cell.value)) {
+    return { kind: NORMALIZED_CELL_KINDS.DATE, value: cell.value };
   }
-  throw new Error(`stored ${fieldName} is not a normalized cell`);
+  throw new StorageError(
+    STORAGE_ERROR_CODES.INVALID_STORED_CONFLICT,
+    `stored ${fieldName} is not a normalized cell`,
+  );
 }
 
 function isCanonicalDate(value: string): boolean {
@@ -544,23 +719,36 @@ function isCanonicalDate(value: string): boolean {
 }
 
 function requireConflictStatus(value: string): ConflictStatus {
-  if (value === "OPEN" || value === "NEEDS_REBASE" || value === "RESOLVED") return value;
-  throw new Error(`stored conflict has invalid status ${value}`);
+  if (
+    value === CONFLICT_STATUSES.OPEN ||
+    value === CONFLICT_STATUSES.NEEDS_REBASE ||
+    value === CONFLICT_STATUSES.RESOLVED
+  ) {
+    return value;
+  }
+  throw new StorageError(
+    STORAGE_ERROR_CODES.INVALID_STORED_CONFLICT,
+    `stored conflict has invalid status ${value}`,
+  );
+}
+
+/** Converts a nullable SQL column into the explicit internal presence contract. */
+function fromSqlNullable<T>(value: T | null): Presence<T> {
+  return value === null
+    ? { kind: PRESENCE_KINDS.ABSENT }
+    : { kind: PRESENCE_KINDS.PRESENT, value };
 }
 
 function assertCurrentFence(db: DatabaseSyncLike, fence: FencingContext): void {
   if (!isFencingValid(db, fence)) throw new FenceLostError();
 }
 
-function fenceExistsSql(): string {
-  return `
-    SELECT 1 FROM writer_lease
-    WHERE role = ? AND writer_epoch = ? AND fencing_token = ? AND lease_until > ?
-  `;
-}
-
 function fenceParameters(fence: FencingContext): readonly [string, number, string, number] {
   return [fence.role, fence.writerEpoch, fence.fencingToken, fence.now];
 }
 
-class FenceLostError extends Error {}
+class FenceLostError extends StorageError {
+  constructor() {
+    super(STORAGE_ERROR_CODES.STALE_WRITER_FENCE, "writer fencing is stale or expired");
+  }
+}

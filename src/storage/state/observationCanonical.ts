@@ -5,8 +5,32 @@
  * and is inside the observation writer's immediate transaction.
  */
 
-import { stableHash, type ObservedRowChange, type RowEvaluationResult } from "../../core/index.js";
-import { commitCanonicalChanges, type CanonicalCommitInput } from "./canonicalCommit.js";
+import {
+  LOOKUP_RESULT_KINDS,
+  PRESENCE_KINDS,
+  stableHash,
+  type ObservedRowChange,
+  type Presence,
+  type RowEvaluationResult,
+  type RowOutcome,
+} from "../../core/index.js";
+import { ROW_OUTCOMES } from "../../core/evaluate/constants.js";
+import {
+  CONFLICT_STATUSES,
+  ROW_BINDING_STATES,
+  ROW_OPERATIONS,
+} from "../../core/model/constants.js";
+import { STORAGE_ERROR_CODES, StorageError } from "../errors.js";
+import {
+  EMPTY_ARRAY_LENGTH_ZERO,
+  EXPECTED_SINGLE_ROW_CHANGE_COUNT,
+} from "../constants.js";
+import { fromSqlNullable, toSqlNullable } from "../sqlite/sqlState.js";
+import {
+  CANONICAL_COMMIT_RESULT_KINDS,
+  commitCanonicalChanges,
+  type CanonicalCommitInput,
+} from "./canonicalCommit.js";
 import type { DatabaseSyncLike } from "../sqlite/sqliteBridge.js";
 import type { FencingContext } from "../sync/writerLease.js";
 import { auditJson } from "./observationAudit.js";
@@ -19,6 +43,120 @@ import type {
 } from "./observationTypes.js";
 import { CanonicalStaleError, FenceLostError } from "./observationTypes.js";
 
+const INITIAL_CANDIDATE_EPOCH = 0;
+const CONFLICT_ID_PREFIX = "conflict:" as const;
+
+const INSERT_SYNC_CONFLICT_SQL = `
+  INSERT INTO sync_conflict (
+    conflict_id, conflict_group_id, event_id, logical_sheet_id, entity_id, row_binding_id,
+    field_name, user_value, user_base_revision, canonical_value_at_detection,
+    canonical_revision_at_detection, current_canonical_value, current_canonical_revision,
+    candidate_epoch, status, created_at, updated_at
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '${CONFLICT_STATUSES.OPEN}', ?, ?)
+`;
+
+const UPSERT_VISIBLE_FIELD_STATE_SQL = `
+  INSERT INTO sheet_visible_field_state (
+    physical_sheet_id, projection, row_binding_id, field_name,
+    confirmed_field_hash, confirmed_visible_revision,
+    active_candidate_conflict_id, active_candidate_hash, candidate_epoch,
+    last_observed_field_hash
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  ON CONFLICT(physical_sheet_id, projection, row_binding_id, field_name)
+  DO UPDATE SET
+    active_candidate_conflict_id = excluded.active_candidate_conflict_id,
+    active_candidate_hash = excluded.active_candidate_hash,
+    candidate_epoch = excluded.candidate_epoch,
+    last_observed_field_hash = excluded.last_observed_field_hash
+`;
+
+const ADVANCE_ROW_BINDING_CANDIDATE_EPOCH_SQL = `
+  UPDATE row_binding
+  SET candidate_epoch = CASE
+    WHEN candidate_epoch < ? THEN ?
+    ELSE candidate_epoch
+  END
+  WHERE row_binding_id = ? AND logical_sheet_id = ?
+`;
+
+const ACTIVATE_INSERTED_ROW_BINDING_SQL = `
+  UPDATE row_binding
+  SET entity_id = ?, state = '${ROW_BINDING_STATES.ACTIVE}'
+  WHERE row_binding_id = ? AND logical_sheet_id = ?
+    AND state = '${ROW_BINDING_STATES.CANDIDATE}' AND entity_id IS NULL
+`;
+
+const TOMBSTONE_DELETED_ROW_BINDING_SQL = `
+  UPDATE row_binding
+  SET state = '${ROW_BINDING_STATES.TOMBSTONED}'
+  WHERE row_binding_id = ? AND logical_sheet_id = ?
+    AND state = '${ROW_BINDING_STATES.ACTIVE}' AND entity_id = ?
+`;
+
+const DEACTIVATE_ENTITY_BUSINESS_KEYS_SQL = `
+  UPDATE business_key_index
+  SET state = 'inactive'
+  WHERE logical_sheet_id = ? AND entity_id = ? AND state = 'active'
+`;
+
+const RETIRE_BUSINESS_KEY_SQL = `
+  UPDATE business_key_index
+  SET state = 'inactive'
+  WHERE logical_sheet_id = ? AND field_name = ? AND normalized_key = ?
+    AND entity_id = ? AND state = 'active'
+`;
+
+const READ_ACTIVE_BUSINESS_KEY_SQL = `
+  SELECT entity_id
+  FROM business_key_index
+  WHERE logical_sheet_id = ? AND field_name = ? AND normalized_key = ? AND state = 'active'
+`;
+
+const INSERT_ACTIVE_BUSINESS_KEY_SQL = `
+  INSERT INTO business_key_index (
+    logical_sheet_id, field_name, normalized_key, entity_id, state
+  ) VALUES (?, ?, ?, ?, 'active')
+`;
+
+const REBASE_ACTIVE_CONFLICT_SQL = `
+  UPDATE sync_conflict
+  SET current_canonical_value = ?, current_canonical_revision = ?,
+      status = '${CONFLICT_STATUSES.NEEDS_REBASE}', last_rebased_commit_id = ?, updated_at = ?
+  WHERE conflict_id = ?
+    AND status IN ('${CONFLICT_STATUSES.OPEN}', '${CONFLICT_STATUSES.NEEDS_REBASE}')
+`;
+
+const READ_MAX_CANDIDATE_EPOCH_SQL = `
+  SELECT MAX(candidate_epoch) AS max_epoch
+  FROM sync_conflict
+  WHERE row_binding_id = ? AND field_name = ?
+`;
+
+interface ActiveBusinessKeyRow {
+  readonly entity_id: string;
+}
+
+interface MaxCandidateEpochRow {
+  readonly max_epoch: number | null;
+}
+
+type PersistedRowOutcome = Exclude<RowOutcome, typeof ROW_OUTCOMES.QUARANTINE>;
+
+/** Creates a deterministic conflict ID from its event, field, and candidate epoch. */
+function makeConflictId(
+  eventId: string,
+  rowBindingId: string,
+  fieldName: string,
+  candidateEpoch: number,
+): string {
+  return `${CONFLICT_ID_PREFIX}${stableHash({
+    eventId,
+    rowBindingId,
+    fieldName,
+    candidateEpoch,
+  })}`;
+}
+
 /**
  * Applies a validated canonical change, then updates bindings, key ownership,
  * and any unresolved conflicts rebased by that change.
@@ -29,25 +167,34 @@ export function applyCanonicalMutation(
   input: PersistObservedRowInput,
   row: ObservedRowChange,
   binding: RowBindingRow,
-): AppliedCanonicalCommit | null {
+): Presence<AppliedCanonicalCommit> {
   const needsCanonical = input.evaluation.acceptedFields.length > 0 ||
-    (row.operation === "delete" && input.evaluation.outcome === "accepted");
-  if (!needsCanonical) return null;
+    (row.operation === ROW_OPERATIONS.DELETE &&
+      input.evaluation.outcome === ROW_OUTCOMES.ACCEPTED);
+  if (!needsCanonical) return { kind: PRESENCE_KINDS.ABSENT };
 
-  const mutation = input.canonical;
-  if (mutation === null) throw new Error("canonical mutation disappeared after validation");
+  if (input.canonical.kind === PRESENCE_KINDS.ABSENT) {
+    throw new StorageError(
+      STORAGE_ERROR_CODES.INVALID_OBSERVATION_INPUT,
+      "canonical mutation disappeared after validation",
+    );
+  }
+  const mutation = input.canonical.value;
   assertCanonicalBinding(binding, mutation.commit);
   const result = commitCanonicalChanges(db, fence, mutation.commit);
-  if (result.kind === "fenced_out") throw new FenceLostError();
-  if (result.kind === "stale") throw new CanonicalStaleError();
-  if (result.kind === "invalid") {
-    throw new Error(`canonical mutation was invalid: ${result.reason}`);
+  if (result.kind === CANONICAL_COMMIT_RESULT_KINDS.FENCED_OUT) throw new FenceLostError();
+  if (result.kind === CANONICAL_COMMIT_RESULT_KINDS.STALE) throw new CanonicalStaleError();
+  if (result.kind === CANONICAL_COMMIT_RESULT_KINDS.INVALID) {
+    throw new StorageError(
+      STORAGE_ERROR_CODES.INVALID_OBSERVATION_INPUT,
+      `canonical mutation was invalid: ${result.reason}`,
+    );
   }
 
   transitionBindingAfterCanonicalCommit(db, input.batch.sheetId, row.rowBindingId, mutation.commit);
   applyBusinessKeyChanges(db, input.batch.sheetId, mutation);
   rebaseActiveConflicts(db, input, row, mutation, result);
-  return result;
+  return { kind: PRESENCE_KINDS.PRESENT, value: result };
 }
 
 /** Writes new field candidates unless an equivalent unresolved candidate is active. */
@@ -58,13 +205,21 @@ export function persistConflictAttempts(
   binding: RowBindingRow,
   eventId: string,
 ): readonly string[] {
-  if (input.evaluation.conflicts.length === 0) return [];
-  if (binding.state !== "active" || binding.entity_id === null) {
-    throw new Error("a conflict requires an active entity binding");
+  if (input.evaluation.conflicts.length === EMPTY_ARRAY_LENGTH_ZERO) return [];
+  if (
+    binding.state !== ROW_BINDING_STATES.ACTIVE ||
+    binding.entity_id.kind !== PRESENCE_KINDS.PRESENT
+  ) {
+    throw new StorageError(
+      STORAGE_ERROR_CODES.OBSERVATION_STORAGE_INCONSISTENT,
+      "a conflict requires an active entity binding",
+    );
   }
 
   const conflictIds: string[] = [];
-  const conflictGroupId = input.evaluation.conflicts.length > 1 ? `conflict-group:${eventId}` : null;
+  const conflictGroupId: Presence<string> = input.evaluation.conflicts.length > 1
+    ? { kind: PRESENCE_KINDS.PRESENT, value: `conflict-group:${eventId}` }
+    : { kind: PRESENCE_KINDS.ABSENT };
   for (const conflict of input.evaluation.conflicts) {
     const active = readActiveCandidate(
       db,
@@ -75,37 +230,33 @@ export function persistConflictAttempts(
     );
     const hash = candidateHash(conflict);
     if (
-      active !== null &&
-      (active.status === "OPEN" || active.status === "NEEDS_REBASE") &&
-      active.active_candidate_hash === hash
+      active.kind === LOOKUP_RESULT_KINDS.FOUND &&
+      (active.value.status === CONFLICT_STATUSES.OPEN ||
+        active.value.status === CONFLICT_STATUSES.NEEDS_REBASE) &&
+      active.value.active_candidate_hash === hash
     ) {
       continue;
     }
 
     const previousEpoch = Math.max(
-      active?.candidate_epoch ?? 0,
+      active.kind === LOOKUP_RESULT_KINDS.FOUND
+        ? active.value.candidate_epoch
+        : INITIAL_CANDIDATE_EPOCH,
       maxCandidateEpoch(db, row.rowBindingId, conflict.fieldName),
     );
     const candidateEpoch = previousEpoch + 1;
-    const conflictId = `conflict:${stableHash({
+    const conflictId = makeConflictId(
       eventId,
-      rowBindingId: row.rowBindingId,
-      fieldName: conflict.fieldName,
+      row.rowBindingId,
+      conflict.fieldName,
       candidateEpoch,
-    })}`;
-    db.prepare(`
-      INSERT INTO sync_conflict (
-        conflict_id, conflict_group_id, event_id, logical_sheet_id, entity_id, row_binding_id,
-        field_name, user_value, user_base_revision, canonical_value_at_detection,
-        canonical_revision_at_detection, current_canonical_value, current_canonical_revision,
-        candidate_epoch, status, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?, ?)
-    `).run(
+    );
+    db.prepare(INSERT_SYNC_CONFLICT_SQL).run(
       conflictId,
-      conflictGroupId,
+      toSqlNullable(conflictGroupId),
       eventId,
       input.batch.sheetId,
-      binding.entity_id,
+      binding.entity_id.value,
       row.rowBindingId,
       conflict.fieldName,
       auditJson(conflict.userValue),
@@ -118,20 +269,7 @@ export function persistConflictAttempts(
       input.observation.receivedAt,
       input.observation.receivedAt,
     );
-    db.prepare(`
-      INSERT INTO sheet_visible_field_state (
-        physical_sheet_id, projection, row_binding_id, field_name,
-        confirmed_field_hash, confirmed_visible_revision,
-        active_candidate_conflict_id, active_candidate_hash, candidate_epoch,
-        last_observed_field_hash
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(physical_sheet_id, projection, row_binding_id, field_name)
-      DO UPDATE SET
-        active_candidate_conflict_id = excluded.active_candidate_conflict_id,
-        active_candidate_hash = excluded.active_candidate_hash,
-        candidate_epoch = excluded.candidate_epoch,
-        last_observed_field_hash = excluded.last_observed_field_hash
-    `).run(
+    db.prepare(UPSERT_VISIBLE_FIELD_STATE_SQL).run(
       input.physicalSheetId,
       input.batch.projection,
       row.rowBindingId,
@@ -143,14 +281,8 @@ export function persistConflictAttempts(
       candidateEpoch,
       stableHash(conflict.userValue),
     );
-    db.prepare(`
-      UPDATE row_binding
-      SET candidate_epoch = CASE
-        WHEN candidate_epoch < ? THEN ?
-        ELSE candidate_epoch
-      END
-      WHERE row_binding_id = ? AND logical_sheet_id = ?
-    `).run(candidateEpoch, candidateEpoch, row.rowBindingId, input.batch.sheetId);
+    db.prepare(ADVANCE_ROW_BINDING_CANDIDATE_EPOCH_SQL)
+      .run(candidateEpoch, candidateEpoch, row.rowBindingId, input.batch.sheetId);
     conflictIds.push(conflictId);
   }
   return conflictIds;
@@ -159,21 +291,31 @@ export function persistConflictAttempts(
 /** Rejects an impossible persistence result before it becomes public output. */
 export function requirePersistedOutcome(
   evaluation: RowEvaluationResult,
-): "accepted" | "partially_accepted" | "conflict" {
-  if (evaluation.outcome === "quarantine") {
-    throw new Error("a quarantined row cannot be reported as a persisted event outcome");
+): PersistedRowOutcome {
+  if (evaluation.outcome === ROW_OUTCOMES.QUARANTINE) {
+    throw new StorageError(
+      STORAGE_ERROR_CODES.INVALID_OBSERVATION_INPUT,
+      "a quarantined row cannot be reported as a persisted event outcome",
+    );
   }
   return evaluation.outcome;
 }
 
 function assertCanonicalBinding(binding: RowBindingRow, commit: CanonicalCommitInput): void {
-  if (commit.kind === "insert") {
-    if (binding.state !== "candidate" || binding.entity_id !== null) {
+  if (commit.kind === ROW_OPERATIONS.INSERT) {
+    if (
+      binding.state !== ROW_BINDING_STATES.CANDIDATE ||
+      binding.entity_id.kind !== PRESENCE_KINDS.ABSENT
+    ) {
       throw new CanonicalStaleError();
     }
     return;
   }
-  if (binding.state !== "active" || binding.entity_id !== commit.entityId) {
+  if (
+    binding.state !== ROW_BINDING_STATES.ACTIVE ||
+    binding.entity_id.kind !== PRESENCE_KINDS.PRESENT ||
+    binding.entity_id.value !== commit.entityId
+  ) {
     throw new CanonicalStaleError();
   }
 }
@@ -184,21 +326,15 @@ function transitionBindingAfterCanonicalCommit(
   rowBindingId: string,
   commit: CanonicalCommitInput,
 ): void {
-  if (commit.kind === "update") return;
-  const result = commit.kind === "insert"
-    ? db.prepare(`
-      UPDATE row_binding
-      SET entity_id = ?, state = 'active'
-      WHERE row_binding_id = ? AND logical_sheet_id = ?
-        AND state = 'candidate' AND entity_id IS NULL
-    `).run(commit.entityId, rowBindingId, logicalSheetId)
-    : db.prepare(`
-      UPDATE row_binding
-      SET state = 'tombstoned'
-      WHERE row_binding_id = ? AND logical_sheet_id = ?
-        AND state = 'active' AND entity_id = ?
-    `).run(rowBindingId, logicalSheetId, commit.entityId);
-  if (result.changes !== 1) throw new CanonicalStaleError();
+  if (commit.kind === ROW_OPERATIONS.UPDATE) return;
+  const result = commit.kind === ROW_OPERATIONS.INSERT
+    ? db.prepare(ACTIVATE_INSERTED_ROW_BINDING_SQL)
+      .run(commit.entityId, rowBindingId, logicalSheetId)
+    : db.prepare(TOMBSTONE_DELETED_ROW_BINDING_SQL)
+      .run(rowBindingId, logicalSheetId, commit.entityId);
+  if (result.changes !== EXPECTED_SINGLE_ROW_CHANGE_COUNT) {
+    throw new CanonicalStaleError();
+  }
 }
 
 function applyBusinessKeyChanges(
@@ -207,40 +343,34 @@ function applyBusinessKeyChanges(
   mutation: CanonicalRowMutation,
 ): void {
   const commit = mutation.commit;
-  if (commit.kind === "delete") {
-    db.prepare(`
-      UPDATE business_key_index
-      SET state = 'inactive'
-      WHERE logical_sheet_id = ? AND entity_id = ? AND state = 'active'
-    `).run(logicalSheetId, commit.entityId);
+  if (commit.kind === ROW_OPERATIONS.DELETE) {
+    db.prepare(DEACTIVATE_ENTITY_BUSINESS_KEYS_SQL).run(logicalSheetId, commit.entityId);
     return;
   }
 
   for (const change of mutation.businessKeyChanges) {
     if (
-      change.previousNormalizedKey !== null &&
-      change.previousNormalizedKey !== change.nextNormalizedKey
+      change.previousNormalizedKey.kind === PRESENCE_KINDS.PRESENT &&
+      (change.nextNormalizedKey.kind === PRESENCE_KINDS.ABSENT ||
+        change.previousNormalizedKey.value !== change.nextNormalizedKey.value)
     ) {
-      const retired = db.prepare(`
-        UPDATE business_key_index
-        SET state = 'inactive'
-        WHERE logical_sheet_id = ? AND field_name = ? AND normalized_key = ?
-          AND entity_id = ? AND state = 'active'
-      `).run(
+      const retired = db.prepare(RETIRE_BUSINESS_KEY_SQL).run(
         logicalSheetId,
         change.fieldName,
-        change.previousNormalizedKey,
+        change.previousNormalizedKey.value,
         commit.entityId,
       );
-      if (retired.changes !== 1) throw new CanonicalStaleError();
+      if (retired.changes !== EXPECTED_SINGLE_ROW_CHANGE_COUNT) {
+        throw new CanonicalStaleError();
+      }
     }
 
-    if (change.nextNormalizedKey !== null) {
+    if (change.nextNormalizedKey.kind === PRESENCE_KINDS.PRESENT) {
       ensureActiveBusinessKey(
         db,
         logicalSheetId,
         change.fieldName,
-        change.nextNormalizedKey,
+        change.nextNormalizedKey.value,
         commit.entityId,
       );
     }
@@ -254,20 +384,14 @@ function ensureActiveBusinessKey(
   normalizedKey: string,
   entityId: string,
 ): void {
-  const existing = db.prepare(`
-    SELECT entity_id
-    FROM business_key_index
-    WHERE logical_sheet_id = ? AND field_name = ? AND normalized_key = ? AND state = 'active'
-  `).get(logicalSheetId, fieldName, normalizedKey) as { entity_id: string } | undefined;
+  const existing = db.prepare(READ_ACTIVE_BUSINESS_KEY_SQL)
+    .get<ActiveBusinessKeyRow>(logicalSheetId, fieldName, normalizedKey);
   if (existing !== undefined) {
     if (existing.entity_id !== entityId) throw new CanonicalStaleError();
     return;
   }
-  db.prepare(`
-    INSERT INTO business_key_index (
-      logical_sheet_id, field_name, normalized_key, entity_id, state
-    ) VALUES (?, ?, ?, ?, 'active')
-  `).run(logicalSheetId, fieldName, normalizedKey, entityId);
+  db.prepare(INSERT_ACTIVE_BUSINESS_KEY_SQL)
+    .run(logicalSheetId, fieldName, normalizedKey, entityId);
 }
 
 function rebaseActiveConflicts(
@@ -277,7 +401,7 @@ function rebaseActiveConflicts(
   mutation: CanonicalRowMutation,
   result: AppliedCanonicalCommit,
 ): void {
-  if (mutation.commit.kind === "delete") return;
+  if (mutation.commit.kind === ROW_OPERATIONS.DELETE) return;
   for (const field of mutation.commit.fields) {
     const nextRevision = result.fieldRevisions.get(field.fieldName);
     if (nextRevision === undefined) continue;
@@ -288,18 +412,16 @@ function rebaseActiveConflicts(
       row.rowBindingId,
       field.fieldName,
     );
-    if (active === null || active.status === "RESOLVED") continue;
-    db.prepare(`
-      UPDATE sync_conflict
-      SET current_canonical_value = ?, current_canonical_revision = ?,
-          status = 'NEEDS_REBASE', last_rebased_commit_id = ?, updated_at = ?
-      WHERE conflict_id = ? AND status IN ('OPEN', 'NEEDS_REBASE')
-    `).run(
+    if (
+      active.kind === LOOKUP_RESULT_KINDS.NOT_FOUND ||
+      active.value.status === CONFLICT_STATUSES.RESOLVED
+    ) continue;
+    db.prepare(REBASE_ACTIVE_CONFLICT_SQL).run(
       auditJson(field.value),
       nextRevision,
       mutation.commitId,
       input.observation.receivedAt,
-      active.active_candidate_conflict_id,
+      active.value.active_candidate_conflict_id,
     );
   }
 }
@@ -309,10 +431,16 @@ function maxCandidateEpoch(
   rowBindingId: string,
   fieldName: string,
 ): number {
-  const row = db.prepare(`
-    SELECT MAX(candidate_epoch) AS max_epoch
-    FROM sync_conflict
-    WHERE row_binding_id = ? AND field_name = ?
-  `).get(rowBindingId, fieldName) as { max_epoch: number | null } | undefined;
-  return row?.max_epoch ?? 0;
+  const row = db.prepare(READ_MAX_CANDIDATE_EPOCH_SQL)
+    .get<MaxCandidateEpochRow>(rowBindingId, fieldName);
+  if (row === undefined) {
+    throw new StorageError(
+      STORAGE_ERROR_CODES.OBSERVATION_STORAGE_INCONSISTENT,
+      "candidate epoch aggregate query returned no row",
+    );
+  }
+  const maxEpoch = fromSqlNullable(row.max_epoch);
+  return maxEpoch.kind === PRESENCE_KINDS.PRESENT
+    ? maxEpoch.value
+    : INITIAL_CANDIDATE_EPOCH;
 }

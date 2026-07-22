@@ -8,7 +8,19 @@
  * before atomically replacing its remote allowlist.
  */
 
-import type { RegisteredSyncSheet } from "../../storage/sync/syncRegistry.js";
+import type {
+  RegisteredProjection,
+  RegisteredSyncSheet,
+} from "../../storage/sync/syncRegistry.js";
+import {
+  SYNC_GATEWAY_ERROR_CODES,
+  SyncGatewayContractError,
+} from "./errors.js";
+import {
+  requireSyncGatewayNonEmptyList,
+  requireSyncGatewayPositiveSafeInteger,
+  requireSyncGatewayText,
+} from "./validation.js";
 
 /** Exact projection schema that setup must materialize in the bound spreadsheet. */
 export interface RegisteredSyncProjectionDefinition {
@@ -22,7 +34,7 @@ export interface RegisteredSyncProjectionDefinition {
 export interface SyncGatewayProvisionRoute {
   readonly sheetName: string;
   readonly registeredRange: string;
-  readonly projection: RegisteredSyncSheet["projection"];
+  readonly projection: RegisteredProjection;
   readonly schemaVersion: number;
   readonly headers: readonly string[];
   readonly checkboxHeaders?: readonly string[];
@@ -49,37 +61,136 @@ export async function provisionRegisteredSyncSheets(
   gateway: SyncGatewayProvisioner,
   definitions: readonly RegisteredSyncProjectionDefinition[],
 ): Promise<Awaited<ReturnType<SyncGatewayProvisioner["provisionRegistry"]>>> {
-  if (definitions.length === 0) {
-    throw new Error("sync gateway provisioning requires at least one SQLite projection");
+  requireSyncGatewayNonEmptyList(
+    definitions,
+    "sync gateway provisioning definitions",
+    SYNC_GATEWAY_ERROR_CODES.INVALID_PROVISIONING_DEFINITIONS,
+  );
+
+  const firstDefinition = definitions[0];
+  if (firstDefinition === undefined) {
+    throw new SyncGatewayContractError(
+      SYNC_GATEWAY_ERROR_CODES.INVALID_PROVISIONING_DEFINITIONS,
+      "sync gateway provisioning requires a first projection",
+    );
   }
 
-  const spreadsheetId = definitions[0]?.sheet.spreadsheetId;
+  const spreadsheetId = requireSyncGatewayText(
+    firstDefinition.sheet.spreadsheetId,
+    "sync gateway provisioning spreadsheetId",
+    SYNC_GATEWAY_ERROR_CODES.INVALID_PROVISIONING_DEFINITIONS,
+  );
   const physicalSheetIds = new Set<string>();
   const tabNames = new Set<string>();
   const registrations = definitions.map((definition) => {
-    if (spreadsheetId === undefined || definition.sheet.spreadsheetId !== spreadsheetId) {
-      throw new Error("sync gateway provisioning definitions must target one spreadsheet");
+    const physicalSheetId = requireSyncGatewayText(
+      definition.sheet.physicalSheetId,
+      "sync gateway provisioning physicalSheetId",
+      SYNC_GATEWAY_ERROR_CODES.INVALID_PROVISIONING_DEFINITIONS,
+    );
+    const sheetName = requireSyncGatewayText(
+      definition.sheet.tabName,
+      "sync gateway provisioning tabName",
+      SYNC_GATEWAY_ERROR_CODES.INVALID_PROVISIONING_DEFINITIONS,
+    );
+    const registeredRange = requireSyncGatewayText(
+      definition.sheet.registeredRange,
+      "sync gateway provisioning registeredRange",
+      SYNC_GATEWAY_ERROR_CODES.INVALID_PROVISIONING_DEFINITIONS,
+    );
+    const definitionSpreadsheetId = requireSyncGatewayText(
+      definition.sheet.spreadsheetId,
+      "sync gateway provisioning spreadsheetId",
+      SYNC_GATEWAY_ERROR_CODES.INVALID_PROVISIONING_DEFINITIONS,
+    );
+    if (definitionSpreadsheetId !== spreadsheetId) {
+      throw new SyncGatewayContractError(
+        SYNC_GATEWAY_ERROR_CODES.INVALID_PROVISIONING_DEFINITIONS,
+        "sync gateway provisioning definitions must target one spreadsheet",
+      );
     }
-    if (physicalSheetIds.has(definition.sheet.physicalSheetId)) {
-      throw new Error("sync gateway provisioning cannot repeat a physical sheet ID");
+    if (physicalSheetIds.has(physicalSheetId)) {
+      throw new SyncGatewayContractError(
+        SYNC_GATEWAY_ERROR_CODES.INVALID_PROVISIONING_DEFINITIONS,
+        "sync gateway provisioning cannot repeat a physical sheet ID",
+      );
     }
-    if (tabNames.has(definition.sheet.tabName)) {
-      throw new Error("sync gateway provisioning cannot repeat a tab name");
+    if (tabNames.has(sheetName)) {
+      throw new SyncGatewayContractError(
+        SYNC_GATEWAY_ERROR_CODES.INVALID_PROVISIONING_DEFINITIONS,
+        "sync gateway provisioning cannot repeat a tab name",
+      );
     }
-    physicalSheetIds.add(definition.sheet.physicalSheetId);
-    tabNames.add(definition.sheet.tabName);
-    if (definition.headers.length === 0) {
-      throw new Error("sync gateway provisioning requires declared headers");
-    }
+    physicalSheetIds.add(physicalSheetId);
+    tabNames.add(sheetName);
+    validateHeaders(definition.headers, "sync gateway provisioning headers");
+    validateCheckboxHeaders(definition.headers, definition.checkboxHeaders);
+    const schemaVersion = requireSyncGatewayPositiveSafeInteger(
+      definition.sheet.schemaVersion,
+      "sync gateway provisioning schemaVersion",
+      SYNC_GATEWAY_ERROR_CODES.INVALID_PROVISIONING_DEFINITIONS,
+    );
     return {
-      sheetName: definition.sheet.tabName,
-      registeredRange: definition.sheet.registeredRange,
+      sheetName,
+      registeredRange,
       projection: definition.sheet.projection,
-      schemaVersion: definition.sheet.schemaVersion,
+      schemaVersion,
       headers: definition.headers,
       ...(definition.checkboxHeaders === undefined ? {} : { checkboxHeaders: definition.checkboxHeaders }),
     };
   });
 
   return gateway.provisionRegistry(registrations);
+}
+
+function validateHeaders(headers: readonly string[], label: string): void {
+  requireSyncGatewayNonEmptyList(
+    headers,
+    label,
+    SYNC_GATEWAY_ERROR_CODES.INVALID_PROVISIONING_DEFINITIONS,
+  );
+  const seen = new Set<string>();
+  headers.forEach((header, index) => {
+    const normalizedHeader = requireSyncGatewayText(
+      header,
+      `${label}[${index}]`,
+      SYNC_GATEWAY_ERROR_CODES.INVALID_PROVISIONING_DEFINITIONS,
+    );
+    if (seen.has(normalizedHeader)) {
+      throw new SyncGatewayContractError(
+        SYNC_GATEWAY_ERROR_CODES.INVALID_PROVISIONING_DEFINITIONS,
+        `${label} cannot contain duplicate headers: ${normalizedHeader}`,
+      );
+    }
+    seen.add(normalizedHeader);
+  });
+}
+
+function validateCheckboxHeaders(
+  headers: readonly string[],
+  checkboxHeaders: readonly string[] | undefined,
+): void {
+  if (checkboxHeaders === undefined) return;
+  const headerSet = new Set(headers);
+  const seen = new Set<string>();
+  checkboxHeaders.forEach((header, index) => {
+    const normalizedHeader = requireSyncGatewayText(
+      header,
+      `sync gateway provisioning checkboxHeaders[${index}]`,
+      SYNC_GATEWAY_ERROR_CODES.INVALID_PROVISIONING_DEFINITIONS,
+    );
+    if (!headerSet.has(normalizedHeader)) {
+      throw new SyncGatewayContractError(
+        SYNC_GATEWAY_ERROR_CODES.INVALID_PROVISIONING_DEFINITIONS,
+        `sync gateway provisioning checkbox header is not declared: ${normalizedHeader}`,
+      );
+    }
+    if (seen.has(normalizedHeader)) {
+      throw new SyncGatewayContractError(
+        SYNC_GATEWAY_ERROR_CODES.INVALID_PROVISIONING_DEFINITIONS,
+        `sync gateway provisioning cannot repeat a checkbox header: ${normalizedHeader}`,
+      );
+    }
+    seen.add(normalizedHeader);
+  });
 }
