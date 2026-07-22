@@ -18,6 +18,10 @@ import type {
 import { CANONICAL_COMMIT_RESULT_KINDS } from "./canonicalCommit.js";
 import type { CanonicalCommitInput, CanonicalCommitResult } from "./canonicalCommit.js";
 import type { NewEffect } from "../sync/effectOutbox.js";
+import type {
+  ObservationAppendResultKind,
+  ObservationReceiptState,
+} from "./observationConstants.js";
 
 /** One append-only occurrence captured by a gateway or polling adapter. */
 export interface ObservationAttemptInput {
@@ -94,7 +98,7 @@ export type PersistObservedRowResult =
 export interface ReceiptRow {
   readonly representative_payload_hash: string;
   readonly event_id: string | null;
-  readonly state: "pending" | "evaluated" | "duplicate" | "quarantined";
+  readonly state: ObservationReceiptState;
 }
 
 export interface EventRow {
@@ -122,7 +126,7 @@ export interface CreatedEvent {
 }
 
 export interface ObservationAppendResult {
-  readonly kind: "new" | "pending_replay" | "duplicate" | "integrity_collision";
+  readonly kind: ObservationAppendResultKind;
   readonly eventId: Presence<string>;
 }
 

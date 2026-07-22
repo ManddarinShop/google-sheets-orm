@@ -10,3 +10,10 @@ export function toSqlNullable<T>(value: Presence<T> | Applicability<T>): T | nul
     ? value.value
     : null;
 }
+
+/** Converts a nullable SQLite column back into an explicit internal presence state. */
+export function fromSqlNullable<T>(value: T | null): Presence<T> {
+  return value === null
+    ? { kind: PRESENCE_KINDS.ABSENT }
+    : { kind: PRESENCE_KINDS.PRESENT, value };
+}

@@ -6,6 +6,8 @@ export const STORAGE_ERROR_CODES = {
   SYNC_REGISTRATION_CONFLICT: "sync_registration_conflict",
   SYNC_REGISTRY_TARGET_UNAVAILABLE: "sync_registry_target_unavailable",
   INVALID_OBSERVATION_INPUT: "invalid_observation_input",
+  OBSERVATION_STORAGE_INCONSISTENT: "observation_storage_inconsistent",
+  OBSERVATION_AUDIT_SERIALIZATION_FAILED: "observation_audit_serialization_failed",
   INVALID_READ_ONLY_OBSERVATION: "invalid_read_only_observation",
   INVALID_EFFECT_OPTIONS: "invalid_effect_options",
   EFFECT_WRITE_FAILED: "effect_write_failed",
