@@ -12,6 +12,8 @@ import { STORAGE_ERROR_CODES, StorageError } from "../errors.js";
 import type { DatabaseSyncLike } from "../sqlite/sqliteBridge.js";
 import { isFencingValid } from "./writerLease.js";
 import type { FencingContext } from "./writerLease.js";
+import type { Applicability, Presence } from "../../core/state/types.js";
+import { toSqlNullable } from "../sqlite/sqlState.js";
 
 const FENCE_EXISTS_SQL = `
   SELECT 1 FROM writer_lease
@@ -235,8 +237,8 @@ export interface ApplyResultOptions extends FencingContext {
   readonly effectId: string;
   readonly claimToken: string;
   readonly status: "applied" | "blocked_candidate" | "superseded" | "conflict" | "failed";
-  readonly lastErrorCode?: string | null;
-  readonly lastErrorMessage?: string | null;
+  readonly lastErrorCode: Presence<string>;
+  readonly lastErrorMessage: Presence<string>;
   /**
    * Gateway read-back evidence that advances confirmed projection state in the
    * same savepoint as an applied outbox result.  It is intentionally optional
@@ -252,7 +254,7 @@ export interface EffectProjectionConfirmation {
   readonly rowBindingId: string;
   readonly visibleRevision: number;
   readonly visibleHash: string;
-  readonly entityRevision: number | null;
+  readonly entityRevision: Applicability<number>;
   readonly fieldHashes: Readonly<Record<string, string>>;
 }
 
@@ -264,17 +266,17 @@ export interface NewEffect {
   readonly logicalSheetId: string;
   readonly physicalSheetId: string;
   readonly projection: string;
-  readonly rowBindingId: string | null;
-  readonly conflictId: string | null;
+  readonly rowBindingId: Presence<string>;
+  readonly conflictId: Presence<string>;
   readonly targetKind: string;
   readonly targetId: string;
-  readonly targetEntityRevision: number | null;
-  readonly targetFieldRevisionHash: string | null;
-  readonly targetCanonicalCommitId: string | null;
+  readonly targetEntityRevision: Applicability<number>;
+  readonly targetFieldRevisionHash: Applicability<string>;
+  readonly targetCanonicalCommitId: Applicability<string>;
   readonly expectedVisibleRevision: number;
   readonly expectedVisibleHash: string;
-  readonly repairGuardHash: string | null;
-  readonly sourceQuarantineId: string | null;
+  readonly repairGuardHash: Presence<string>;
+  readonly sourceQuarantineId: Presence<string>;
   readonly payloadJson: string;
   readonly payloadHash: string;
   readonly effectDedupeKey: string;
@@ -306,17 +308,17 @@ export function appendPendingEffects(
         effect.logicalSheetId,
         effect.physicalSheetId,
         effect.projection,
-        effect.rowBindingId,
-        effect.conflictId,
+        toSqlNullable(effect.rowBindingId),
+        toSqlNullable(effect.conflictId),
         effect.targetKind,
         effect.targetId,
-        effect.targetEntityRevision,
-        effect.targetFieldRevisionHash,
-        effect.targetCanonicalCommitId,
+        toSqlNullable(effect.targetEntityRevision),
+        toSqlNullable(effect.targetFieldRevisionHash),
+        toSqlNullable(effect.targetCanonicalCommitId),
         effect.expectedVisibleRevision,
         effect.expectedVisibleHash,
-        effect.repairGuardHash,
-        effect.sourceQuarantineId,
+        toSqlNullable(effect.repairGuardHash),
+        toSqlNullable(effect.sourceQuarantineId),
         effect.payloadJson,
         effect.payloadHash,
         effect.effectDedupeKey,
@@ -370,8 +372,8 @@ export function applyEffectResult(db: DatabaseSyncLike, options: ApplyResultOpti
       .prepare(APPLY_EFFECT_RESULT_SQL)
       .run(
         options.status,
-        options.lastErrorCode ?? null,
-        options.lastErrorMessage ?? null,
+        toSqlNullable(options.lastErrorCode),
+        toSqlNullable(options.lastErrorMessage),
         options.effectId,
         options.claimToken,
         options.writerEpoch,
@@ -434,17 +436,17 @@ export function supersedeAndReplan(
       newEffect.logicalSheetId,
       newEffect.physicalSheetId,
       newEffect.projection,
-      newEffect.rowBindingId,
-      newEffect.conflictId,
+      toSqlNullable(newEffect.rowBindingId),
+      toSqlNullable(newEffect.conflictId),
       newEffect.targetKind,
       newEffect.targetId,
-      newEffect.targetEntityRevision,
-      newEffect.targetFieldRevisionHash,
-      newEffect.targetCanonicalCommitId,
+      toSqlNullable(newEffect.targetEntityRevision),
+      toSqlNullable(newEffect.targetFieldRevisionHash),
+      toSqlNullable(newEffect.targetCanonicalCommitId),
       newEffect.expectedVisibleRevision,
       newEffect.expectedVisibleHash,
-      newEffect.repairGuardHash,
-      newEffect.sourceQuarantineId,
+      toSqlNullable(newEffect.repairGuardHash),
+      toSqlNullable(newEffect.sourceQuarantineId),
       newEffect.payloadJson,
       newEffect.payloadHash,
       newEffect.effectDedupeKey,
@@ -606,7 +608,7 @@ function writeProjectionConfirmation(
     confirmation.rowBindingId,
     confirmation.visibleHash,
     confirmation.visibleRevision,
-    confirmation.entityRevision,
+    toSqlNullable(confirmation.entityRevision),
     confirmation.visibleHash,
   );
   if (row.changes !== 1) {

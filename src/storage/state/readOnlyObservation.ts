@@ -10,6 +10,8 @@
 import { withImmediateTransaction, type DatabaseSyncLike } from "../sqlite/sqliteBridge.js";
 import { STORAGE_ERROR_CODES, StorageError } from "../errors.js";
 import { isFencingValid, type FencingContext } from "../sync/writerLease.js";
+import { PRESENCE_KINDS } from "../../core/state/constants.js";
+import type { Presence } from "../../core/state/types.js";
 
 const READ_OBSERVATION_RECEIPT_SQL = `
   SELECT representative_payload_hash, event_id
@@ -58,7 +60,7 @@ export interface ReadOnlySnapshotObservationInput {
   readonly detectedAt: number;
   readonly receivedAt: number;
   readonly ingressActorId: string;
-  readonly editorActorId: string | null;
+  readonly editorActorId: Presence<string>;
   readonly editorActorSource: "google_active_user" | "unavailable";
 }
 
@@ -104,7 +106,9 @@ export function persistReadOnlySnapshotObservation(
       input.detectedAt,
       input.receivedAt,
       input.ingressActorId,
-      input.editorActorId,
+      input.editorActorId.kind === PRESENCE_KINDS.PRESENT
+        ? input.editorActorId.value
+        : null,
       input.editorActorSource,
     );
     if (receipt === undefined) {
@@ -178,13 +182,15 @@ function validateInput(input: ReadOnlySnapshotObservationInput): void {
     }
   }
   if (input.editorActorSource === "google_active_user" &&
-    (typeof input.editorActorId !== "string" || input.editorActorId.length === 0)) {
+    (input.editorActorId.kind !== PRESENCE_KINDS.PRESENT ||
+      input.editorActorId.value.length === 0)) {
     throw new StorageError(
       STORAGE_ERROR_CODES.INVALID_READ_ONLY_OBSERVATION,
       "verified editor source requires an editor actor ID",
     );
   }
-  if (input.editorActorSource === "unavailable" && input.editorActorId !== null) {
+  if (input.editorActorSource === "unavailable" &&
+    input.editorActorId.kind === PRESENCE_KINDS.PRESENT) {
     throw new StorageError(
       STORAGE_ERROR_CODES.INVALID_READ_ONLY_OBSERVATION,
       "unavailable editor source cannot include an editor actor ID",

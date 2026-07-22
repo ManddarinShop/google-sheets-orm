@@ -67,3 +67,15 @@ export {
   applyResolution,
 } from "./conflict/index.js";
 export type { ConflictTransitionResult } from "./conflict/index.js";
+
+// Shared state contracts
+export {
+  APPLICABILITY_KINDS,
+  LOOKUP_RESULT_KINDS,
+  PRESENCE_KINDS,
+} from "./state/index.js";
+export type {
+  Applicability,
+  LookupResult,
+  Presence,
+} from "./state/index.js";

@@ -10,6 +10,8 @@
 
 import type { DatabaseSyncLike } from "../sqlite/sqliteBridge.js";
 import { STORAGE_ERROR_CODES, StorageError } from "../errors.js";
+import { LOOKUP_RESULT_KINDS } from "../../core/state/constants.js";
+import type { LookupResult } from "../../core/state/types.js";
 
 const READ_WRITER_LEASE_SQL =
   "SELECT role, writer_id, writer_epoch, fencing_token, lease_until FROM writer_lease WHERE role = ?";
@@ -151,17 +153,20 @@ export function claimWriterLease(
   });
 }
 
-/** Reads the current lease for a role, or null if none exists. */
-export function readWriterLease(db: DatabaseSyncLike, role: string): WriterLease | null {
+/** Reads the current lease for a role with an explicit not-found state. */
+export function readWriterLease(db: DatabaseSyncLike, role: string): LookupResult<WriterLease> {
   const row = readLeaseRow(db, role);
   return row === undefined
-    ? null
+    ? { kind: LOOKUP_RESULT_KINDS.NOT_FOUND }
     : {
-        role: row.role,
-        writerId: row.writer_id,
-        writerEpoch: row.writer_epoch,
-        fencingToken: row.fencing_token,
-        leaseUntil: row.lease_until,
+        kind: LOOKUP_RESULT_KINDS.FOUND,
+        value: {
+          role: row.role,
+          writerId: row.writer_id,
+          writerEpoch: row.writer_epoch,
+          fencingToken: row.fencing_token,
+          leaseUntil: row.lease_until,
+        },
       };
 }
 
@@ -171,11 +176,11 @@ export function readWriterLease(db: DatabaseSyncLike, role: string): WriterLease
  */
 export function isFencingValid(db: DatabaseSyncLike, fence: FencingContext): boolean {
   const lease = readWriterLease(db, fence.role);
-  if (lease === null) return false;
+  if (lease.kind === LOOKUP_RESULT_KINDS.NOT_FOUND) return false;
   return (
-    lease.writerEpoch === fence.writerEpoch &&
-    lease.fencingToken === fence.fencingToken &&
-    lease.leaseUntil > fence.now
+    lease.value.writerEpoch === fence.writerEpoch &&
+    lease.value.fencingToken === fence.fencingToken &&
+    lease.value.leaseUntil > fence.now
   );
 }
 

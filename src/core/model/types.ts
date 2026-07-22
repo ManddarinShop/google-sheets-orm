@@ -8,6 +8,7 @@
 import type { NormalizedCell } from "../encoding/types.js";
 import type { ConflictStatus } from "./constants.js";
 import type { NormalizedCellKind } from "../encoding/types.js";
+import type { Applicability, Presence } from "../state/types.js";
 import type {
   CANONICAL_RESOLUTION_STATUSES,
   CanonicalResolutionStatus,
@@ -72,7 +73,7 @@ export type Projection = "user_input" | "system_state" | "legacy_combined";
 export interface NormalizedRowField {
   readonly fieldName: string;
   readonly cell: NormalizedCell;
-  readonly baseFieldRevision: number | null;
+  readonly baseFieldRevision: Applicability<number>;
 }
 
 /** A row read from a Sheet snapshot, identified by row binding. */
@@ -222,7 +223,7 @@ export interface ObservedEditBatch {
   /** Authenticated service principal; audit metadata, never a merge input. */
   readonly ingressActorId: string;
   /** Verified editor identity when the gateway can provide one. */
-  readonly editorActorId: string | null;
+  readonly editorActorId: Presence<string>;
   readonly editorActorSource: EditorActorSource;
   readonly rows: readonly ObservedRowChange[];
 }
@@ -280,7 +281,7 @@ export type SheetChangeEvent =
 /** Field-level conflict record preserving both candidate and canonical state. */
 export interface SyncConflict {
   readonly conflictId: string;
-  readonly conflictGroupId: string | null;
+  readonly conflictGroupId: Presence<string>;
   readonly eventId: string;
   readonly rowBindingId: string;
   readonly entityId: string;
@@ -294,7 +295,7 @@ export interface SyncConflict {
   /** Monotonic attempt generation for this field's active candidate. */
   readonly candidateEpoch: number;
   readonly status: ConflictStatus;
-  readonly resolutionCommandId: string | null;
+  readonly resolutionCommandId: Presence<string>;
 }
 
 // ---------------------------------------------------------------------------
@@ -472,8 +473,8 @@ export interface SheetEffect {
   readonly targetCanonicalCommitId: string;
   readonly expectedVisibleRevision: number;
   readonly expectedVisibleHash: string;
-  readonly repairGuardHash: string | null;
-  readonly sourceQuarantineId: string | null;
+  readonly repairGuardHash: Presence<string>;
+  readonly sourceQuarantineId: Presence<string>;
   readonly payloadHash: string;
   readonly effectDedupeKey: string;
   readonly streamSequence: number;

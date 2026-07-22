@@ -8,6 +8,7 @@ import {
   ROW_OPERATIONS,
 } from "../src/core/model/constants.js";
 import { NORMALIZED_CELL_KINDS } from "../src/core/encoding/constants.js";
+import { PRESENCE_KINDS } from "../src/core/state/constants.js";
 import type {
   ActiveRowBindingContext,
   CanonicalEntityState,
@@ -221,7 +222,7 @@ describe("field evaluation", () => {
               "name",
               {
                 conflictId: "conflict-1",
-                conflictGroupId: null,
+                conflictGroupId: { kind: PRESENCE_KINDS.ABSENT },
                 eventId: "event-1",
                 rowBindingId,
                 entityId,
@@ -234,7 +235,7 @@ describe("field evaluation", () => {
                 currentCanonicalRevision: 2,
                 candidateEpoch: 1,
                 status: CONFLICT_STATUSES.OPEN,
-                resolutionCommandId: null,
+                resolutionCommandId: { kind: PRESENCE_KINDS.ABSENT },
               },
             ],
           ]),
@@ -295,7 +296,7 @@ describe("field evaluation", () => {
       atomicity: "row_independent",
       baseSnapshotHash: "snapshot-1",
       ingressActorId: "service-1",
-      editorActorId: null,
+      editorActorId: { kind: PRESENCE_KINDS.ABSENT },
       editorActorSource: "unavailable",
       rows: [
         existingRow([

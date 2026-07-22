@@ -3,6 +3,7 @@ import { CoreErrorException } from "./types.js";
 /** Stable error codes for evaluator contract violations. */
 export const EVALUATION_ERROR_CODES = {
   CANONICAL_STATE_REQUIRED: "canonical_state_required",
+  CANONICAL_FIELD_REQUIRED: "canonical_field_required",
   BASE_FIELD_REVISION_REQUIRED: "base_field_revision_required",
 } as const;
 

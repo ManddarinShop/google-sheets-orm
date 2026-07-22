@@ -148,14 +148,20 @@ function conflictResult(
   canonical: CanonicalEntityState,
 ): FieldEvaluationResult {
   const currentField = canonical.fields.get(fieldChange.fieldName);
+  if (currentField === undefined) {
+    throw new EvaluationContractError(
+      EVALUATION_ERROR_CODES.CANONICAL_FIELD_REQUIRED,
+      `existing row evaluation requires canonical field ${fieldChange.fieldName}`,
+    );
+  }
   return {
     kind: ROW_OUTCOMES.CONFLICT,
     conflict: {
       fieldName: fieldChange.fieldName,
       userValue: fieldChange.nextValue,
       userBaseRevision: fieldChange.baseFieldRevision,
-      canonicalValue: currentField?.value ?? null,
-      canonicalRevision: currentField?.fieldRevision ?? 0,
+      canonicalValue: currentField.value,
+      canonicalRevision: currentField.fieldRevision,
     },
   };
 }
