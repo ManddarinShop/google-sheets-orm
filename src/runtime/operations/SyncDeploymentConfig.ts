@@ -1,3 +1,16 @@
+import {
+  EMPTY_ARRAY_LENGTH_ZERO,
+  EMPTY_STRING_LENGTH_ZERO,
+  POSITIVE_SAFE_INTEGER_MINIMUM,
+  type ActorRole,
+} from "../../core/index.js";
+import { STORAGE_ERROR_CODES, StorageError } from "../../storage/errors.js";
+
+const PRIVILEGED_OPERATOR_ROLES = {
+  SYNC_OPERATOR: "sync_operator",
+  SYNC_ADMIN: "sync_admin",
+} as const satisfies Record<string, PrivilegedOperatorRole>;
+
 /**
  * Startup validation for deployment-specific retention and privileged actors.
  *
@@ -7,7 +20,7 @@
  */
 
 /** Roles that can perform backend-only quarantine recovery actions. */
-export type PrivilegedOperatorRole = "sync_operator" | "sync_admin";
+export type PrivilegedOperatorRole = Exclude<ActorRole, "sheet_editor">;
 
 /** Validated deployment values required by the SQLite sync runtime. */
 export interface SyncDeploymentConfig {
@@ -73,18 +86,18 @@ export function requireValidSyncDeploymentConfig(input: unknown): SyncDeployment
   };
 
   if (result.dedupeReceiptRetentionMs < result.sourceReplayWindowMs) {
-    throw new Error("dedupeReceiptRetentionMs must cover sourceReplayWindowMs");
+    throwInvalidConfig("dedupeReceiptRetentionMs must cover sourceReplayWindowMs");
   }
   if (
     result.gatewayReceiptRetentionMs <
     result.maxRetryWindowMs + result.restoreReconciliationWindowMs
   ) {
-    throw new Error(
+    throwInvalidConfig(
       "gatewayReceiptRetentionMs must cover maxRetryWindowMs plus restoreReconciliationWindowMs",
     );
   }
   if (result.eventAuditRetentionMs < result.operatorAuditWindowMs) {
-    throw new Error("eventAuditRetentionMs must cover operatorAuditWindowMs");
+    throwInvalidConfig("eventAuditRetentionMs must cover operatorAuditWindowMs");
   }
 
   return result;
@@ -96,19 +109,23 @@ export function isPrivilegedOperatorAllowed(
   role: PrivilegedOperatorRole,
   actorId: string,
 ): boolean {
-  return actorId.length > 0 && config.operatorRoleAllowlist[role].includes(actorId);
+  return actorId.length > EMPTY_STRING_LENGTH_ZERO && config.operatorRoleAllowlist[role].includes(actorId);
 }
 
 function requireRecord(value: unknown, label: string): Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    throw new Error(label + " must be an object");
+    throwInvalidConfig(label + " must be an object");
   }
   return value as Record<string, unknown>;
 }
 
 function requirePositiveDuration(value: unknown, label: string): number {
-  if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0) {
-    throw new Error(label + " must be a positive safe integer");
+  if (
+    typeof value !== "number" ||
+    !Number.isSafeInteger(value) ||
+    value < POSITIVE_SAFE_INTEGER_MINIMUM
+  ) {
+    throwInvalidConfig(label + " must be a positive safe integer");
   }
   return value;
 }
@@ -118,25 +135,35 @@ function requireOperatorRoleAllowlist(
 ): Readonly<Record<PrivilegedOperatorRole, readonly string[]>> {
   const allowlist = requireRecord(value, "operatorRoleAllowlist");
   return {
-    sync_operator: requireActorIds(allowlist.sync_operator, "sync_operator"),
-    sync_admin: requireActorIds(allowlist.sync_admin, "sync_admin"),
+    [PRIVILEGED_OPERATOR_ROLES.SYNC_OPERATOR]: requireActorIds(
+      allowlist[PRIVILEGED_OPERATOR_ROLES.SYNC_OPERATOR],
+      PRIVILEGED_OPERATOR_ROLES.SYNC_OPERATOR,
+    ),
+    [PRIVILEGED_OPERATOR_ROLES.SYNC_ADMIN]: requireActorIds(
+      allowlist[PRIVILEGED_OPERATOR_ROLES.SYNC_ADMIN],
+      PRIVILEGED_OPERATOR_ROLES.SYNC_ADMIN,
+    ),
   };
 }
 
 function requireActorIds(value: unknown, role: PrivilegedOperatorRole): readonly string[] {
-  if (!Array.isArray(value) || value.length === 0) {
-    throw new Error(role + " allowlist must contain at least one actor ID");
+  if (!Array.isArray(value) || value.length === EMPTY_ARRAY_LENGTH_ZERO) {
+    throwInvalidConfig(role + " allowlist must contain at least one actor ID");
   }
 
   const actorIds = new Set<string>();
   for (const actorId of value) {
-    if (typeof actorId !== "string" || actorId.trim().length === 0) {
-      throw new Error(role + " allowlist contains an invalid actor ID");
+    if (typeof actorId !== "string" || actorId.trim().length === EMPTY_STRING_LENGTH_ZERO) {
+      throwInvalidConfig(role + " allowlist contains an invalid actor ID");
     }
     if (actorIds.has(actorId)) {
-      throw new Error(role + " allowlist contains a duplicate actor ID");
+      throwInvalidConfig(role + " allowlist contains a duplicate actor ID");
     }
     actorIds.add(actorId);
   }
   return [...actorIds];
+}
+
+function throwInvalidConfig(message: string): never {
+  throw new StorageError(STORAGE_ERROR_CODES.INVALID_SYNC_DEPLOYMENT_CONFIG, message);
 }
