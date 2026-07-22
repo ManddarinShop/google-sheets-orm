@@ -84,6 +84,21 @@ export interface ProjectionEffectInput {
   readonly streamSequence: number;
 }
 
+/** Input for a System_State projection effect. */
+export type SystemProjectionEffectInput = Omit<ProjectionEffectInput, "effectKind">;
+
+/** Input for a User_Input candidate reconciliation effect. */
+export type CandidateReconcileEffectInput =
+  Omit<ProjectionEffectInput, "effectKind" | "projection"> & {
+    readonly projection?: typeof SYNC_GATEWAY_PROJECTIONS.USER_INPUT;
+  };
+
+/** Shared input for effects projected to the Sync_Conflicts control sheet. */
+export type ResolutionEffectInput =
+  Omit<ProjectionEffectInput, "effectKind" | "projection" | "targetKind"> & {
+    readonly projection?: typeof SYNC_GATEWAY_PROJECTIONS.SYNC_CONFLICTS;
+  };
+
 /** Builds an immutable outbox row, including stable payload/dedupe identities. */
 export function createProjectionEffect(input: ProjectionEffectInput): NewEffect {
   validateInput(input);
@@ -147,7 +162,7 @@ export function createProjectionEffect(input: ProjectionEffectInput): NewEffect 
 
 /** Creates a canonical System_State projection effect. */
 export function createSystemProjectionEffect(
-  input: Omit<ProjectionEffectInput, "effectKind">,
+  input: SystemProjectionEffectInput,
 ): NewEffect {
   if (input.projection !== SYNC_GATEWAY_PROJECTIONS.SYSTEM_STATE) {
     throwEffectError("system projection must target system_state");
@@ -160,9 +175,7 @@ export function createSystemProjectionEffect(
 
 /** Creates a baseline-CAS User_Input reconcile that cannot overwrite a candidate. */
 export function createCandidateReconcileEffect(
-  input: Omit<ProjectionEffectInput, "effectKind" | "projection"> & {
-    readonly projection?: typeof SYNC_GATEWAY_PROJECTIONS.USER_INPUT;
-  },
+  input: CandidateReconcileEffectInput,
 ): NewEffect {
   return createProjectionEffect({
     ...input,
@@ -185,9 +198,7 @@ export function createSystemRepairEffect(
 
 /** Creates the system-owned Sync_Conflicts control-row projection effect. */
 export function createResolutionProjectionEffect(
-  input: Omit<ProjectionEffectInput, "effectKind" | "projection" | "targetKind"> & {
-    readonly projection?: typeof SYNC_GATEWAY_PROJECTIONS.SYNC_CONFLICTS;
-  },
+  input: ResolutionEffectInput,
 ): NewEffect {
   requireConflictTarget(input.conflictId, input.targetId, "resolution projection must target exactly one conflict ID");
   return createProjectionEffect({
@@ -206,9 +217,7 @@ export function createResolutionProjectionEffect(
  * resolver observed; it never deletes by mutable sheet row number.
  */
 export function createResolutionDeleteEffect(
-  input: Omit<ProjectionEffectInput, "effectKind" | "projection" | "targetKind"> & {
-    readonly projection?: typeof SYNC_GATEWAY_PROJECTIONS.SYNC_CONFLICTS;
-  },
+  input: ResolutionEffectInput,
 ): NewEffect {
   requireConflictTarget(input.conflictId, input.targetId, "resolution deletion must target exactly one conflict ID");
   return createProjectionEffect({
