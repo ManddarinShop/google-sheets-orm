@@ -11,8 +11,24 @@ import {
   type FieldConflict,
   type ObservedEditBatch,
   type ObservedRowChange,
+  type NormalizedRow,
+  type Presence,
 } from "../../core/index.js";
+import { ROW_OUTCOMES } from "../../core/evaluate/constants.js";
+import { PRESENCE_KINDS } from "../../core/state/constants.js";
+import {
+  CONFLICT_STATUSES,
+  ROW_BINDING_STATES,
+  ROW_OPERATIONS,
+} from "../../core/model/constants.js";
+import { STORAGE_ERROR_CODES, StorageError } from "../errors.js";
 import type { DatabaseSyncLike } from "../sqlite/sqliteBridge.js";
+import { fromSqlNullable, toSqlNullable } from "../sqlite/sqlState.js";
+import {
+  OBSERVATION_APPEND_RESULT_KINDS,
+  OBSERVATION_RECEIPT_STATES,
+  type ObservationCompletionState,
+} from "./observationConstants.js";
 import { auditJson, rowHash } from "./observationAudit.js";
 import type {
   ActiveCandidateRow,
@@ -25,6 +41,43 @@ import type {
   RowBindingRow,
 } from "./observationTypes.js";
 
+interface EventSequenceRow {
+  readonly next_sequence: number;
+}
+
+interface EventBatchRow {
+  readonly logical_sheet_id: string;
+  readonly physical_sheet_id: string;
+  readonly source: string;
+  readonly projection: string;
+  readonly atomicity: string;
+  readonly base_snapshot_hash: string;
+}
+
+/** Returns the before snapshot, using SQL null only for insert rows. */
+function observedBeforeRow(row: ObservedRowChange): NormalizedRow | null {
+  switch (row.operation) {
+    case ROW_OPERATIONS.INSERT:
+      return null;
+    case ROW_OPERATIONS.UPDATE:
+    case ROW_OPERATIONS.RENAME:
+    case ROW_OPERATIONS.DELETE:
+      return row.beforeRow;
+  }
+}
+
+/** Returns the after snapshot, using SQL null only for delete rows. */
+function observedAfterRow(row: ObservedRowChange): NormalizedRow | null {
+  switch (row.operation) {
+    case ROW_OPERATIONS.INSERT:
+    case ROW_OPERATIONS.UPDATE:
+    case ROW_OPERATIONS.RENAME:
+      return row.afterRow;
+    case ROW_OPERATIONS.DELETE:
+      return null;
+  }
+}
+
 /** Appends an observation occurrence and classifies receipt replay semantics. */
 export function appendObservation(
   db: DatabaseSyncLike,
@@ -32,22 +85,13 @@ export function appendObservation(
   physicalSheetId: string,
   observation: ObservationAttemptInput,
 ): ObservationAppendResult {
-  const receipt = db.prepare(`
-    SELECT representative_payload_hash, event_id, state
-    FROM observation_receipt
-    WHERE logical_sheet_id = ? AND observation_key = ?
-  `).get(batch.sheetId, observation.observationKey) as ReceiptRow | undefined;
+  const receipt = db.prepare(READ_OBSERVATION_RECEIPT_SQL)
+    .get<ReceiptRow>(batch.sheetId, observation.observationKey);
 
   const samePayload = receipt !== undefined &&
     receipt.representative_payload_hash === observation.payloadHash;
   const linkedEventId = samePayload ? receipt.event_id : null;
-  db.prepare(`
-    INSERT INTO event_observation (
-      observation_id, logical_sheet_id, physical_sheet_id, observation_key, event_id,
-      source, payload_json, payload_hash, detected_at, received_at, ingress_actor_id,
-      editor_actor_id, editor_actor_source
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(
+  db.prepare(INSERT_EVENT_OBSERVATION_SQL).run(
     observation.observationId,
     batch.sheetId,
     physicalSheetId,
@@ -59,18 +103,12 @@ export function appendObservation(
     observation.detectedAt,
     observation.receivedAt,
     observation.ingressActorId,
-    observation.editorActorId,
+    toSqlNullable(observation.editorActorId),
     observation.editorActorSource,
   );
 
   if (receipt === undefined) {
-    db.prepare(`
-      INSERT INTO observation_receipt (
-        logical_sheet_id, observation_key, representative_payload_hash,
-        first_observation_id, last_observation_id, event_id, state,
-        first_seen_at, last_seen_at
-      ) VALUES (?, ?, ?, ?, ?, NULL, 'pending', ?, ?)
-    `).run(
+    db.prepare(INSERT_OBSERVATION_RECEIPT_SQL).run(
       batch.sheetId,
       observation.observationKey,
       observation.payloadHash,
@@ -79,21 +117,20 @@ export function appendObservation(
       observation.receivedAt,
       observation.receivedAt,
     );
-    return { kind: "new", eventId: null };
+    return {
+      kind: OBSERVATION_APPEND_RESULT_KINDS.NEW,
+      eventId: fromSqlNullable<string>(null),
+    };
   }
 
   const nextState = !samePayload
     ? receipt.state
-    : receipt.state === "pending"
-      ? "pending"
-      : receipt.state === "quarantined"
-        ? "quarantined"
-        : "duplicate";
-  db.prepare(`
-    UPDATE observation_receipt
-    SET last_observation_id = ?, last_seen_at = ?, state = ?
-    WHERE logical_sheet_id = ? AND observation_key = ?
-  `).run(
+    : receipt.state === OBSERVATION_RECEIPT_STATES.PENDING
+      ? OBSERVATION_RECEIPT_STATES.PENDING
+      : receipt.state === OBSERVATION_RECEIPT_STATES.QUARANTINED
+        ? OBSERVATION_RECEIPT_STATES.QUARANTINED
+        : OBSERVATION_RECEIPT_STATES.DUPLICATE;
+  db.prepare(UPDATE_OBSERVATION_RECEIPT_REPLAY_SQL).run(
     observation.observationId,
     observation.receivedAt,
     nextState,
@@ -101,11 +138,22 @@ export function appendObservation(
     observation.observationKey,
   );
 
-  if (!samePayload) return { kind: "integrity_collision", eventId: null };
-  if (receipt.state === "pending" && receipt.event_id === null) {
-    return { kind: "pending_replay", eventId: null };
+  if (!samePayload) {
+    return {
+      kind: OBSERVATION_APPEND_RESULT_KINDS.INTEGRITY_COLLISION,
+      eventId: fromSqlNullable<string>(null),
+    };
   }
-  return { kind: "duplicate", eventId: receipt.event_id };
+  if (receipt.state === OBSERVATION_RECEIPT_STATES.PENDING && receipt.event_id === null) {
+    return {
+      kind: OBSERVATION_APPEND_RESULT_KINDS.PENDING_REPLAY,
+      eventId: fromSqlNullable<string>(null),
+    };
+  }
+  return {
+    kind: OBSERVATION_APPEND_RESULT_KINDS.DUPLICATE,
+    eventId: fromSqlNullable(receipt.event_id),
+  };
 }
 
 /** Completes the receipt after an event, duplicate, or quarantine outcome. */
@@ -113,16 +161,13 @@ export function completeObservation(
   db: DatabaseSyncLike,
   logicalSheetId: string,
   observation: ObservationAttemptInput,
-  eventId: string | null,
-  state: "evaluated" | "duplicate" | "quarantined",
+  eventId: Presence<string>,
+  state: ObservationCompletionState,
 ): void {
-  db.prepare("UPDATE event_observation SET event_id = ? WHERE observation_id = ?")
-    .run(eventId, observation.observationId);
-  db.prepare(`
-    UPDATE observation_receipt
-    SET event_id = ?, state = ?
-    WHERE logical_sheet_id = ? AND observation_key = ?
-  `).run(eventId, state, logicalSheetId, observation.observationKey);
+  db.prepare(UPDATE_EVENT_OBSERVATION_EVENT_SQL)
+    .run(toSqlNullable(eventId), observation.observationId);
+  db.prepare(COMPLETE_OBSERVATION_RECEIPT_SQL)
+    .run(toSqlNullable(eventId), state, logicalSheetId, observation.observationKey);
 }
 
 /** Requires the binding identity that makes an event-bearing observation safe. */
@@ -131,13 +176,13 @@ export function requireKnownBinding(
   logicalSheetId: string,
   rowBindingId: string,
 ): RowBindingRow {
-  const binding = db.prepare(`
-    SELECT entity_id, state
-    FROM row_binding
-    WHERE row_binding_id = ? AND logical_sheet_id = ?
-  `).get(rowBindingId, logicalSheetId) as RowBindingRow | undefined;
+  const binding = db.prepare(READ_ROW_BINDING_SQL)
+    .get<RowBindingRow>(rowBindingId, logicalSheetId);
   if (binding === undefined) {
-    throw new Error("event-bearing observations require a known row binding");
+    throw new StorageError(
+      STORAGE_ERROR_CODES.OBSERVATION_STORAGE_INCONSISTENT,
+      "event-bearing observations require a known row binding",
+    );
   }
   return binding;
 }
@@ -150,10 +195,10 @@ export function findMatchingCandidateEventId(
   binding: RowBindingRow,
 ): string | null {
   if (
-    input.evaluation.quarantine !== null ||
+    input.evaluation.outcome === ROW_OUTCOMES.QUARANTINE ||
     input.evaluation.acceptedFields.length > 0 ||
     input.evaluation.conflicts.length === 0 ||
-    binding.state !== "active" ||
+    binding.state !== ROW_BINDING_STATES.ACTIVE ||
     binding.entity_id === null
   ) {
     return null;
@@ -170,7 +215,8 @@ export function findMatchingCandidateEventId(
     );
     if (
       active === null ||
-      (active.status !== "OPEN" && active.status !== "NEEDS_REBASE") ||
+      (active.status !== CONFLICT_STATUSES.OPEN &&
+        active.status !== CONFLICT_STATUSES.NEEDS_REBASE) ||
       active.active_candidate_hash !== candidateHash(conflict)
     ) {
       return null;
@@ -188,17 +234,8 @@ export function readActiveCandidate(
   rowBindingId: string,
   fieldName: string,
 ): ActiveCandidateRow | null {
-  const candidate = db.prepare(`
-    SELECT visible.active_candidate_conflict_id, visible.active_candidate_hash,
-           visible.candidate_epoch, conflict.event_id, conflict.status
-    FROM sheet_visible_field_state AS visible
-    JOIN sync_conflict AS conflict
-      ON conflict.conflict_id = visible.active_candidate_conflict_id
-    WHERE visible.physical_sheet_id = ? AND visible.projection = ?
-      AND visible.row_binding_id = ? AND visible.field_name = ?
-      AND visible.active_candidate_conflict_id IS NOT NULL
-      AND visible.active_candidate_hash IS NOT NULL
-  `).get(physicalSheetId, projection, rowBindingId, fieldName) as ActiveCandidateRow | undefined;
+  const candidate = db.prepare(READ_ACTIVE_CANDIDATE_SQL)
+    .get<ActiveCandidateRow>(physicalSheetId, projection, rowBindingId, fieldName);
   return candidate ?? null;
 }
 
@@ -208,11 +245,8 @@ export function findEventByKey(
   logicalSheetId: string,
   eventKey: string,
 ): EventRow | null {
-  const event = db.prepare(`
-    SELECT event_id, payload_hash, event_sequence
-    FROM event_log
-    WHERE logical_sheet_id = ? AND event_key = ?
-  `).get(logicalSheetId, eventKey) as EventRow | undefined;
+  const event = db.prepare(READ_EVENT_BY_KEY_SQL)
+    .get<EventRow>(logicalSheetId, eventKey);
   return event ?? null;
 }
 
@@ -223,36 +257,37 @@ export function createEvent(
   row: ObservedRowChange,
 ): CreatedEvent {
   const eventIdentity = input.event;
-  if (eventIdentity === null) throw new Error("cannot create an event without an identity");
+  if (eventIdentity.kind === PRESENCE_KINDS.ABSENT) {
+    throw new StorageError(
+      STORAGE_ERROR_CODES.INVALID_OBSERVATION_INPUT,
+      "cannot create an event without an identity",
+    );
+  }
+  const event = eventIdentity.value;
   ensureEventBatch(db, input);
 
-  const sequenceRow = db.prepare(`
-    SELECT COALESCE(MAX(event_sequence), 0) + 1 AS next_sequence
-    FROM event_log
-    WHERE logical_sheet_id = ?
-  `).get(input.batch.sheetId) as { next_sequence: number } | undefined;
+  const sequenceRow = db.prepare(READ_NEXT_EVENT_SEQUENCE_SQL)
+    .get<EventSequenceRow>(input.batch.sheetId);
   const eventSequence = sequenceRow?.next_sequence;
   if (eventSequence === undefined || !Number.isSafeInteger(eventSequence)) {
-    throw new Error("could not allocate the next event sequence");
+    throw new StorageError(
+      STORAGE_ERROR_CODES.OBSERVATION_STORAGE_INCONSISTENT,
+      "could not allocate the next event sequence",
+    );
   }
 
   const eventId = `event:${randomUUID()}`;
-  const status = input.evaluation.quarantine !== null
+  const status = input.evaluation.outcome === ROW_OUTCOMES.QUARANTINE
     ? "quarantined"
     : input.evaluation.conflicts.length > 0
-      ? "conflict"
-      : "accepted";
-  db.prepare(`
-    INSERT INTO event_log (
-      event_id, logical_sheet_id, physical_sheet_id, event_key, payload_hash,
-      event_sequence, batch_id, row_binding_id, operation, status, received_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(
+      ? ROW_OUTCOMES.CONFLICT
+      : ROW_OUTCOMES.ACCEPTED;
+  db.prepare(INSERT_EVENT_LOG_SQL).run(
     eventId,
     input.batch.sheetId,
     input.physicalSheetId,
-    eventIdentity.eventKey,
-    eventIdentity.payloadHash,
+    event.eventKey,
+    event.payloadHash,
     eventSequence,
     input.batch.batchId,
     row.rowBindingId,
@@ -260,22 +295,17 @@ export function createEvent(
     status,
     input.observation.receivedAt,
   );
-  db.prepare(`
-    INSERT INTO event_row (event_id, before_row_json, after_row_json, before_hash, after_hash)
-    VALUES (?, ?, ?, ?, ?)
-  `).run(
+  const beforeRow = observedBeforeRow(row);
+  const afterRow = observedAfterRow(row);
+  db.prepare(INSERT_EVENT_ROW_SQL).run(
     eventId,
-    auditJson(row.beforeRow),
-    auditJson(row.afterRow),
-    rowHash(row.beforeRow, row.rowBindingId),
-    rowHash(row.afterRow, row.rowBindingId),
+    auditJson(beforeRow),
+    auditJson(afterRow),
+    rowHash(beforeRow, row.rowBindingId),
+    rowHash(afterRow, row.rowBindingId),
   );
   for (const field of row.fields) {
-    db.prepare(`
-      INSERT INTO event_field (
-        event_id, field_name, previous_value, next_value, base_field_revision
-      ) VALUES (?, ?, ?, ?, ?)
-    `).run(
+    db.prepare(INSERT_EVENT_FIELD_SQL).run(
       eventId,
       field.fieldName,
       auditJson(field.previousValue),
@@ -292,23 +322,14 @@ export function persistObservedHashes(
   input: PersistObservedRowInput,
   row: ObservedRowChange,
 ): void {
-  db.prepare(`
-    UPDATE sheet_visible_state
-    SET last_observed_hash = ?
-    WHERE physical_sheet_id = ? AND projection = ? AND row_binding_id = ?
-  `).run(
-    rowHash(row.afterRow, row.rowBindingId),
+  db.prepare(UPDATE_VISIBLE_ROW_OBSERVED_HASH_SQL).run(
+    rowHash(observedAfterRow(row), row.rowBindingId),
     input.physicalSheetId,
     input.batch.projection,
     row.rowBindingId,
   );
   for (const field of row.fields) {
-    db.prepare(`
-      UPDATE sheet_visible_field_state
-      SET last_observed_field_hash = ?
-      WHERE physical_sheet_id = ? AND projection = ?
-        AND row_binding_id = ? AND field_name = ?
-    `).run(
+    db.prepare(UPDATE_VISIBLE_FIELD_OBSERVED_HASH_SQL).run(
       stableHash(field.nextValue),
       input.physicalSheetId,
       input.batch.projection,
@@ -324,18 +345,8 @@ export function candidateHash(conflict: FieldConflict): string {
 }
 
 function ensureEventBatch(db: DatabaseSyncLike, input: PersistObservedRowInput): void {
-  const existing = db.prepare(`
-    SELECT logical_sheet_id, physical_sheet_id, source, projection, atomicity, base_snapshot_hash
-    FROM event_batch
-    WHERE batch_id = ?
-  `).get(input.batch.batchId) as {
-    logical_sheet_id: string;
-    physical_sheet_id: string;
-    source: string;
-    projection: string;
-    atomicity: string;
-    base_snapshot_hash: string;
-  } | undefined;
+  const existing = db.prepare(READ_EVENT_BATCH_SQL)
+    .get<EventBatchRow>(input.batch.batchId);
   if (existing !== undefined) {
     const matches = existing.logical_sheet_id === input.batch.sheetId &&
       existing.physical_sheet_id === input.physicalSheetId &&
@@ -343,15 +354,16 @@ function ensureEventBatch(db: DatabaseSyncLike, input: PersistObservedRowInput):
       existing.projection === input.batch.projection &&
       existing.atomicity === input.batch.atomicity &&
       existing.base_snapshot_hash === input.batch.baseSnapshotHash;
-    if (!matches) throw new Error("batch ID was replayed with different batch identity");
+    if (!matches) {
+      throw new StorageError(
+        STORAGE_ERROR_CODES.OBSERVATION_STORAGE_INCONSISTENT,
+        "batch ID was replayed with different batch identity",
+      );
+    }
     return;
   }
 
-  db.prepare(`
-    INSERT INTO event_batch (
-      batch_id, logical_sheet_id, physical_sheet_id, source, projection, atomicity, base_snapshot_hash
-    ) VALUES (?, ?, ?, ?, ?, ?, ?)
-  `).run(
+  db.prepare(INSERT_EVENT_BATCH_SQL).run(
     input.batch.batchId,
     input.batch.sheetId,
     input.physicalSheetId,
@@ -361,3 +373,117 @@ function ensureEventBatch(db: DatabaseSyncLike, input: PersistObservedRowInput):
     input.batch.baseSnapshotHash,
   );
 }
+
+
+const READ_OBSERVATION_RECEIPT_SQL = `
+  SELECT representative_payload_hash, event_id, state
+  FROM observation_receipt
+  WHERE logical_sheet_id = ? AND observation_key = ?
+`;
+
+const INSERT_EVENT_OBSERVATION_SQL = `
+  INSERT INTO event_observation (
+    observation_id, logical_sheet_id, physical_sheet_id, observation_key, event_id,
+    source, payload_json, payload_hash, detected_at, received_at, ingress_actor_id,
+    editor_actor_id, editor_actor_source
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+`;
+
+const INSERT_OBSERVATION_RECEIPT_SQL = `
+  INSERT INTO observation_receipt (
+    logical_sheet_id, observation_key, representative_payload_hash,
+    first_observation_id, last_observation_id, event_id, state,
+    first_seen_at, last_seen_at
+  ) VALUES (?, ?, ?, ?, ?, NULL, '${OBSERVATION_RECEIPT_STATES.PENDING}', ?, ?)
+`;
+
+const UPDATE_OBSERVATION_RECEIPT_REPLAY_SQL = `
+  UPDATE observation_receipt
+  SET last_observation_id = ?, last_seen_at = ?, state = ?
+  WHERE logical_sheet_id = ? AND observation_key = ?
+`;
+
+const UPDATE_EVENT_OBSERVATION_EVENT_SQL = `
+  UPDATE event_observation
+  SET event_id = ?
+  WHERE observation_id = ?
+`;
+
+const COMPLETE_OBSERVATION_RECEIPT_SQL = `
+  UPDATE observation_receipt
+  SET event_id = ?, state = ?
+  WHERE logical_sheet_id = ? AND observation_key = ?
+`;
+
+const READ_ROW_BINDING_SQL = `
+  SELECT entity_id, state
+  FROM row_binding
+  WHERE row_binding_id = ? AND logical_sheet_id = ?
+`;
+
+const READ_ACTIVE_CANDIDATE_SQL = `
+  SELECT visible.active_candidate_conflict_id, visible.active_candidate_hash,
+         visible.candidate_epoch, conflict.event_id, conflict.status
+  FROM sheet_visible_field_state AS visible
+  JOIN sync_conflict AS conflict
+    ON conflict.conflict_id = visible.active_candidate_conflict_id
+  WHERE visible.physical_sheet_id = ? AND visible.projection = ?
+    AND visible.row_binding_id = ? AND visible.field_name = ?
+    AND visible.active_candidate_conflict_id IS NOT NULL
+    AND visible.active_candidate_hash IS NOT NULL
+`;
+
+const READ_EVENT_BY_KEY_SQL = `
+  SELECT event_id, payload_hash, event_sequence
+  FROM event_log
+  WHERE logical_sheet_id = ? AND event_key = ?
+`;
+
+const READ_NEXT_EVENT_SEQUENCE_SQL = `
+  SELECT COALESCE(MAX(event_sequence), 0) + 1 AS next_sequence
+  FROM event_log
+  WHERE logical_sheet_id = ?
+`;
+
+const INSERT_EVENT_LOG_SQL = `
+  INSERT INTO event_log (
+    event_id, logical_sheet_id, physical_sheet_id, event_key, payload_hash,
+    event_sequence, batch_id, row_binding_id, operation, status, received_at
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+`;
+
+const INSERT_EVENT_ROW_SQL = `
+  INSERT INTO event_row (event_id, before_row_json, after_row_json, before_hash, after_hash)
+  VALUES (?, ?, ?, ?, ?)
+`;
+
+const INSERT_EVENT_FIELD_SQL = `
+  INSERT INTO event_field (
+    event_id, field_name, previous_value, next_value, base_field_revision
+  ) VALUES (?, ?, ?, ?, ?)
+`;
+
+const UPDATE_VISIBLE_ROW_OBSERVED_HASH_SQL = `
+  UPDATE sheet_visible_state
+  SET last_observed_hash = ?
+  WHERE physical_sheet_id = ? AND projection = ? AND row_binding_id = ?
+`;
+
+const UPDATE_VISIBLE_FIELD_OBSERVED_HASH_SQL = `
+  UPDATE sheet_visible_field_state
+  SET last_observed_field_hash = ?
+  WHERE physical_sheet_id = ? AND projection = ?
+    AND row_binding_id = ? AND field_name = ?
+`;
+
+const READ_EVENT_BATCH_SQL = `
+  SELECT logical_sheet_id, physical_sheet_id, source, projection, atomicity, base_snapshot_hash
+  FROM event_batch
+  WHERE batch_id = ?
+`;
+
+const INSERT_EVENT_BATCH_SQL = `
+  INSERT INTO event_batch (
+    batch_id, logical_sheet_id, physical_sheet_id, source, projection, atomicity, base_snapshot_hash
+  ) VALUES (?, ?, ?, ?, ?, ?, ?)
+`;
