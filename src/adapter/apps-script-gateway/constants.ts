@@ -44,6 +44,13 @@ export const SYNC_GATEWAY_DEFAULTS = {
   MAX_EXPIRY_MS: 10 * 60_000,
 } as const;
 
+/** Request timeout bounds for the Node-side Apps Script client. */
+export const SYNC_GATEWAY_CLIENT_DEFAULTS = {
+  REQUEST_TIMEOUT_MS: 30_000,
+  MIN_REQUEST_TIMEOUT_MS: 1_000,
+  MAX_REQUEST_TIMEOUT_MS: 120_000,
+} as const;
+
 /** Cryptographic algorithm used by both gateway envelope types. */
 export const SYNC_GATEWAY_HASH_ALGORITHMS = {
   SHA256: "sha256",
