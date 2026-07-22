@@ -7,7 +7,10 @@
 
 import { stableHash } from "../../core/index.js";
 import type { ObservedEditBatch } from "../../core/index.js";
+import { ROW_OUTCOMES } from "../../core/evaluate/constants.js";
+import { ROW_OPERATIONS } from "../../core/model/constants.js";
 import { EMPTY_STRING_LENGTH_ZERO } from "../constants.js";
+import { STORAGE_ERROR_CODES, StorageError } from "../errors.js";
 import type { NewEffect } from "../sync/effectOutbox.js";
 import type { DatabaseSyncLike } from "../sqlite/sqliteBridge.js";
 import type {
@@ -42,16 +45,25 @@ interface LogicalSheetEnabledRow {
 export function validatePersistObservedRowInput(input: PersistObservedRowInput): void {
   const row = requireBatchRow(input.batch, input.rowIndex);
   if (input.physicalSheetId.length === EMPTY_STRING_LENGTH_ZERO) {
-    throw new Error("physical sheet ID is required");
+    throw new StorageError(
+      STORAGE_ERROR_CODES.INVALID_OBSERVATION_INPUT,
+      "physical sheet ID is required",
+    );
   }
   if (
     input.batch.sheetId.length === EMPTY_STRING_LENGTH_ZERO ||
     input.batch.batchId.length === EMPTY_STRING_LENGTH_ZERO
   ) {
-    throw new Error("logical sheet ID and batch ID are required");
+    throw new StorageError(
+      STORAGE_ERROR_CODES.INVALID_OBSERVATION_INPUT,
+      "logical sheet ID and batch ID are required",
+    );
   }
   if (input.evaluation.rowBindingId !== row.rowBindingId) {
-    throw new Error("evaluation row binding does not match the observed row");
+    throw new StorageError(
+      STORAGE_ERROR_CODES.INVALID_OBSERVATION_INPUT,
+      "evaluation row binding does not match the observed row",
+    );
   }
   validateObservation(input.observation);
   if (
@@ -59,19 +71,38 @@ export function validatePersistObservedRowInput(input: PersistObservedRowInput):
     (input.event.eventKey.length === EMPTY_STRING_LENGTH_ZERO ||
       input.event.payloadHash.length === EMPTY_STRING_LENGTH_ZERO)
   ) {
-    throw new Error("event key and payload hash are required when an event is present");
+    throw new StorageError(
+      STORAGE_ERROR_CODES.INVALID_OBSERVATION_INPUT,
+      "event key and payload hash are required when an event is present",
+    );
   }
-  if (input.event === null && input.evaluation.quarantine === null) {
-    throw new Error("only quarantined rows may omit an event identity");
+  if (
+    input.event === null &&
+    input.evaluation.outcome !== ROW_OUTCOMES.QUARANTINE
+  ) {
+    throw new StorageError(
+      STORAGE_ERROR_CODES.INVALID_OBSERVATION_INPUT,
+      "only quarantined rows may omit an event identity",
+    );
   }
-  if (input.evaluation.quarantine !== null && input.canonical !== null) {
-    throw new Error("a quarantined row cannot carry a canonical mutation");
+  if (
+    input.evaluation.outcome === ROW_OUTCOMES.QUARANTINE &&
+    input.canonical !== null
+  ) {
+    throw new StorageError(
+      STORAGE_ERROR_CODES.INVALID_OBSERVATION_INPUT,
+      "a quarantined row cannot carry a canonical mutation",
+    );
   }
 
   const needsCanonical = input.evaluation.acceptedFields.length > 0 ||
-    (row.operation === "delete" && input.evaluation.outcome === "accepted");
+    (row.operation === ROW_OPERATIONS.DELETE &&
+      input.evaluation.outcome === ROW_OUTCOMES.ACCEPTED);
   if (needsCanonical !== (input.canonical !== null)) {
-    throw new Error("accepted canonical work must have exactly one canonical mutation");
+    throw new StorageError(
+      STORAGE_ERROR_CODES.INVALID_OBSERVATION_INPUT,
+      "accepted canonical work must have exactly one canonical mutation",
+    );
   }
   if (input.canonical !== null) validateCanonicalMutation(input.canonical, row.operation, input.evaluation);
   validateEffects(input.effects, input.batch);
@@ -81,10 +112,18 @@ export function validatePersistObservedRowInput(input: PersistObservedRowInput):
 /** Requires a valid row index and returns its observed row. */
 export function requireBatchRow(batch: ObservedEditBatch, rowIndex: number) {
   if (!Number.isSafeInteger(rowIndex) || rowIndex < 0) {
-    throw new Error("row index must be a non-negative safe integer");
+    throw new StorageError(
+      STORAGE_ERROR_CODES.INVALID_OBSERVATION_INPUT,
+      "row index must be a non-negative safe integer",
+    );
   }
   const row = batch.rows[rowIndex];
-  if (row === undefined) throw new Error("row index is outside the observed batch");
+  if (row === undefined) {
+    throw new StorageError(
+      STORAGE_ERROR_CODES.INVALID_OBSERVATION_INPUT,
+      "row index is outside the observed batch",
+    );
+  }
   return row;
 }
 
@@ -102,13 +141,19 @@ export function ensureRegisteredProjection(
     row.projection !== batch.projection ||
     row.enabled !== 1
   ) {
-    throw new Error("physical sheet is not an enabled projection of the observed logical sheet");
+    throw new StorageError(
+      STORAGE_ERROR_CODES.SYNC_REGISTRY_TARGET_UNAVAILABLE,
+      "physical sheet is not an enabled projection of the observed logical sheet",
+    );
   }
 
   const logical = db.prepare(READ_LOGICAL_SHEET_ENABLED_SQL)
     .get<LogicalSheetEnabledRow>(batch.sheetId);
   if (logical === undefined || logical.enabled !== 1) {
-    throw new Error("logical sheet is not enabled");
+    throw new StorageError(
+      STORAGE_ERROR_CODES.SYNC_REGISTRY_TARGET_UNAVAILABLE,
+      "logical sheet is not enabled",
+    );
   }
 }
 
@@ -127,7 +172,10 @@ export function ensureEffectsTargetRegistered(
       target.projection !== effect.projection ||
       target.enabled !== 1
     ) {
-      throw new Error("effect targets an unregistered physical projection");
+      throw new StorageError(
+        STORAGE_ERROR_CODES.SYNC_REGISTRY_TARGET_UNAVAILABLE,
+        "effect targets an unregistered physical projection",
+      );
     }
   }
 }
@@ -140,18 +188,30 @@ function validateObservation(observation: ObservationAttemptInput): void {
     observation.payloadHash.length === EMPTY_STRING_LENGTH_ZERO ||
     observation.ingressActorId.length === EMPTY_STRING_LENGTH_ZERO
   ) {
-    throw new Error("observation identity, payload, and ingress actor are required");
+    throw new StorageError(
+      STORAGE_ERROR_CODES.INVALID_OBSERVATION_INPUT,
+      "observation identity, payload, and ingress actor are required",
+    );
   }
   for (const [name, value] of [["detectedAt", observation.detectedAt], ["receivedAt", observation.receivedAt]] as const) {
     if (!Number.isSafeInteger(value) || value < 0) {
-      throw new Error(`${name} must be a non-negative safe integer`);
+      throw new StorageError(
+        STORAGE_ERROR_CODES.INVALID_OBSERVATION_INPUT,
+        `${name} must be a non-negative safe integer`,
+      );
     }
   }
   if (observation.editorActorSource === "google_active_user" && observation.editorActorId === null) {
-    throw new Error("a verified editor source requires an editor actor ID");
+    throw new StorageError(
+      STORAGE_ERROR_CODES.INVALID_OBSERVATION_INPUT,
+      "a verified editor source requires an editor actor ID",
+    );
   }
   if (observation.editorActorSource === "unavailable" && observation.editorActorId !== null) {
-    throw new Error("an unavailable editor source cannot claim an editor actor ID");
+    throw new StorageError(
+      STORAGE_ERROR_CODES.INVALID_OBSERVATION_INPUT,
+      "an unavailable editor source cannot claim an editor actor ID",
+    );
   }
 }
 
@@ -161,26 +221,47 @@ function validateCanonicalMutation(
   evaluation: PersistObservedRowInput["evaluation"],
 ): void {
   if (mutation.commitId.length === EMPTY_STRING_LENGTH_ZERO) {
-    throw new Error("canonical commit ID is required");
+    throw new StorageError(
+      STORAGE_ERROR_CODES.INVALID_OBSERVATION_INPUT,
+      "canonical commit ID is required",
+    );
   }
-  const expectedKind = operation === "insert" ? "insert" : operation === "delete" ? "delete" : "update";
+  const expectedKind = operation === ROW_OPERATIONS.INSERT
+    ? ROW_OPERATIONS.INSERT
+    : operation === ROW_OPERATIONS.DELETE
+      ? ROW_OPERATIONS.DELETE
+      : ROW_OPERATIONS.UPDATE;
   if (mutation.commit.kind !== expectedKind) {
-    throw new Error(`observed ${operation} requires a ${expectedKind} canonical mutation`);
+    throw new StorageError(
+      STORAGE_ERROR_CODES.INVALID_OBSERVATION_INPUT,
+      `observed ${operation} requires a ${expectedKind} canonical mutation`,
+    );
   }
 
-  if (mutation.commit.kind !== "delete") {
+  if (mutation.commit.kind !== ROW_OPERATIONS.DELETE) {
     const acceptedByName = new Map(evaluation.acceptedFields.map((field) => [field.fieldName, field]));
     if (acceptedByName.size !== mutation.commit.fields.length) {
-      throw new Error("canonical fields must exactly match accepted fields");
+      throw new StorageError(
+        STORAGE_ERROR_CODES.INVALID_OBSERVATION_INPUT,
+        "canonical fields must exactly match accepted fields",
+      );
     }
     for (const field of mutation.commit.fields) {
       const accepted = acceptedByName.get(field.fieldName);
       if (accepted === undefined || stableHash(field.value) !== stableHash(accepted.nextValue)) {
-        throw new Error(`canonical field ${field.fieldName} does not match the core result`);
+        throw new StorageError(
+          STORAGE_ERROR_CODES.INVALID_OBSERVATION_INPUT,
+          `canonical field ${field.fieldName} does not match the core result`,
+        );
       }
-      const expectedRevision = mutation.commit.kind === "insert" ? null : accepted.nextFieldRevision - 1;
+      const expectedRevision = mutation.commit.kind === ROW_OPERATIONS.INSERT
+        ? null
+        : accepted.nextFieldRevision - 1;
       if (field.expectedFieldRevision !== expectedRevision) {
-        throw new Error(`canonical field ${field.fieldName} has an unexpected base revision`);
+        throw new StorageError(
+          STORAGE_ERROR_CODES.INVALID_OBSERVATION_INPUT,
+          `canonical field ${field.fieldName} has an unexpected base revision`,
+        );
       }
     }
   }
@@ -191,7 +272,10 @@ function validateCanonicalMutation(
       change.fieldName.length === EMPTY_STRING_LENGTH_ZERO ||
       keyNames.has(change.fieldName)
     ) {
-      throw new Error("business key changes must have unique non-empty field names");
+      throw new StorageError(
+        STORAGE_ERROR_CODES.INVALID_OBSERVATION_INPUT,
+        "business key changes must have unique non-empty field names",
+      );
     }
     keyNames.add(change.fieldName);
     if (
@@ -200,7 +284,10 @@ function validateCanonicalMutation(
       (change.nextNormalizedKey !== null &&
         change.nextNormalizedKey.length === EMPTY_STRING_LENGTH_ZERO)
     ) {
-      throw new Error("business key hashes cannot be empty strings");
+      throw new StorageError(
+        STORAGE_ERROR_CODES.INVALID_OBSERVATION_INPUT,
+        "business key hashes cannot be empty strings",
+      );
     }
   }
 }
@@ -212,7 +299,10 @@ function validateEffects(effects: readonly NewEffect[], batch: ObservedEditBatch
       effect.physicalSheetId.length === EMPTY_STRING_LENGTH_ZERO ||
       effect.projection.length === EMPTY_STRING_LENGTH_ZERO
     ) {
-      throw new Error("effect must target a registered physical projection of the logical sheet");
+      throw new StorageError(
+        STORAGE_ERROR_CODES.INVALID_OBSERVATION_INPUT,
+        "effect must target a registered physical projection of the logical sheet",
+      );
     }
   }
 }
