@@ -6,84 +6,101 @@
  * row-independent decision atomically later.
  */
 
-import type { NormalizedCell } from "../encoding/types.js";
+import {
+  CANONICAL_RESOLUTION_STATUSES,
+  CONFLICT_STATUSES,
+  ROW_OPERATIONS,
+} from "../model/constants.js";
+import {
+  EVALUATION_ERROR_CODES,
+  EvaluationContractError,
+} from "../errors/index.js";
 import type {
   CanonicalEntityState,
+  CanonicalResolution,
+  ObservedDeleteRowChange,
   ObservedFieldChange,
   ObservedRowChange,
+  ObservedVersionedFieldChange,
 } from "../model/types.js";
 import type {
   AcceptedField,
+  AppliedRowEvaluationResult,
+  ConflictRowEvaluationResult,
   EvaluationContext,
   FieldConflict,
   RowEvaluationResult,
-  RowOutcome,
 } from "./contracts.js";
+import { ROW_OUTCOMES } from "./constants.js";
 
 /** Evaluates all user-owned fields after structural/ownership checks passed. */
 export function evaluateUserFields(
   row: ObservedRowChange,
-  canonical: CanonicalEntityState | null,
+  canonical: CanonicalResolution,
   context: EvaluationContext,
 ): RowEvaluationResult {
   const accepted: AcceptedField[] = [];
   const conflicts: FieldConflict[] = [];
+  const canonicalEntity = canonical.status === CANONICAL_RESOLUTION_STATUSES.AVAILABLE
+    ? canonical.entity
+    : undefined;
 
   for (const fieldChange of row.fields) {
-    const result = evaluateSingleUserField(fieldChange, canonical, row, context);
-    if (result.kind === "accepted") accepted.push(result.field);
+    const result = evaluateSingleUserField(fieldChange, canonicalEntity, row, context);
+    if (result.kind === ROW_OUTCOMES.ACCEPTED) {
+      accepted.push(result.field);
+    }
     else conflicts.push(result.conflict);
   }
 
   const outcome = classifyFieldOutcome(accepted, conflicts);
-  const nextEntityRevision = accepted.length > 0
-    ? canonical === null ? 1 : canonical.entityRevision + 1
-    : null;
+  if (outcome === ROW_OUTCOMES.CONFLICT) {
+    const conflictResult: ConflictRowEvaluationResult = {
+      rowBindingId: row.rowBindingId,
+      outcome,
+      acceptedFields: [],
+      conflicts,
+    };
+    return conflictResult;
+  }
 
-  return {
+  const appliedResult: AppliedRowEvaluationResult = {
     rowBindingId: row.rowBindingId,
     outcome,
     acceptedFields: accepted,
     conflicts,
-    quarantine: null,
-    repairPlan: null,
-    nextEntityRevision,
+    nextEntityRevision: nextEntityRevisionFor(row, canonicalEntity),
   };
+  return appliedResult;
 }
 
 /** Produces an accepted tombstone without treating delete fields as updates. */
 export function acceptedDelete(
-  row: ObservedRowChange,
+  row: ObservedDeleteRowChange,
   canonical: CanonicalEntityState,
-): RowEvaluationResult {
+): AppliedRowEvaluationResult {
   return {
     rowBindingId: row.rowBindingId,
-    outcome: "accepted",
+    outcome: ROW_OUTCOMES.ACCEPTED,
     acceptedFields: [],
     conflicts: [],
-    quarantine: null,
-    repairPlan: null,
     nextEntityRevision: canonical.entityRevision + 1,
   };
 }
 
 type FieldEvaluationResult =
-  | { readonly kind: "accepted"; readonly field: AcceptedField }
-  | { readonly kind: "conflict"; readonly conflict: FieldConflict };
+  | { readonly kind: typeof ROW_OUTCOMES.ACCEPTED; readonly field: AcceptedField }
+  | { readonly kind: typeof ROW_OUTCOMES.CONFLICT; readonly conflict: FieldConflict };
 
 function evaluateSingleUserField(
   fieldChange: ObservedFieldChange,
-  canonical: CanonicalEntityState | null,
+  canonical: CanonicalEntityState | undefined,
   row: ObservedRowChange,
   context: EvaluationContext,
 ): FieldEvaluationResult {
-  if (hasActiveConflict(context, row.rowBindingId, fieldChange.fieldName)) {
-    return conflictResult(fieldChange, canonical);
-  }
-
-  if (row.operation === "insert" || canonical === null) {
+  if (row.operation === ROW_OPERATIONS.INSERT) {
     return {
-      kind: "accepted",
+      kind: ROW_OUTCOMES.ACCEPTED,
       field: {
         fieldName: fieldChange.fieldName,
         nextValue: fieldChange.nextValue,
@@ -92,13 +109,22 @@ function evaluateSingleUserField(
     };
   }
 
-  const currentField = canonical.fields.get(fieldChange.fieldName);
-  if (currentField === undefined || fieldChange.baseFieldRevision !== currentField.fieldRevision) {
-    return conflictResult(fieldChange, canonical);
+  const existingFieldChange = requireVersionedFieldChange(fieldChange);
+  const existingCanonical = requireCanonicalEntity(canonical);
+  if (hasActiveConflict(context, row.rowBindingId, fieldChange.fieldName)) {
+    return conflictResult(existingFieldChange, existingCanonical);
+  }
+
+  const currentField = existingCanonical.fields.get(fieldChange.fieldName);
+  if (
+    currentField === undefined ||
+    existingFieldChange.baseFieldRevision !== currentField.fieldRevision
+  ) {
+    return conflictResult(existingFieldChange, existingCanonical);
   }
 
   return {
-    kind: "accepted",
+    kind: ROW_OUTCOMES.ACCEPTED,
     field: {
       fieldName: fieldChange.fieldName,
       nextValue: fieldChange.nextValue,
@@ -110,24 +136,32 @@ function evaluateSingleUserField(
 function classifyFieldOutcome(
   accepted: readonly AcceptedField[],
   conflicts: readonly FieldConflict[],
-): RowOutcome {
-  if (conflicts.length === 0) return "accepted";
-  return accepted.length > 0 ? "partially_accepted" : "conflict";
+): AppliedRowEvaluationResult["outcome"] | typeof ROW_OUTCOMES.CONFLICT {
+  if (conflicts.length === 0) return ROW_OUTCOMES.ACCEPTED;
+  return accepted.length > 0
+    ? ROW_OUTCOMES.PARTIALLY_ACCEPTED
+    : ROW_OUTCOMES.CONFLICT;
 }
 
 function conflictResult(
-  fieldChange: ObservedFieldChange,
-  canonical: CanonicalEntityState | null,
+  fieldChange: ObservedVersionedFieldChange,
+  canonical: CanonicalEntityState,
 ): FieldEvaluationResult {
-  const currentField = canonical?.fields.get(fieldChange.fieldName);
+  const currentField = canonical.fields.get(fieldChange.fieldName);
+  if (currentField === undefined) {
+    throw new EvaluationContractError(
+      EVALUATION_ERROR_CODES.CANONICAL_FIELD_REQUIRED,
+      `existing row evaluation requires canonical field ${fieldChange.fieldName}`,
+    );
+  }
   return {
-    kind: "conflict",
+    kind: ROW_OUTCOMES.CONFLICT,
     conflict: {
       fieldName: fieldChange.fieldName,
       userValue: fieldChange.nextValue,
-      userBaseRevision: fieldChange.baseFieldRevision ?? 0,
-      canonicalValue: currentField?.value ?? null,
-      canonicalRevision: currentField?.fieldRevision ?? 0,
+      userBaseRevision: fieldChange.baseFieldRevision,
+      canonicalValue: currentField.value,
+      canonicalRevision: currentField.fieldRevision,
     },
   };
 }
@@ -138,5 +172,44 @@ function hasActiveConflict(
   fieldName: string,
 ): boolean {
   const conflict = context.activeConflictsByBindingAndField.get(rowBindingId)?.get(fieldName);
-  return conflict?.status === "OPEN" || conflict?.status === "NEEDS_REBASE";
+  return conflict?.status === CONFLICT_STATUSES.OPEN ||
+    conflict?.status === CONFLICT_STATUSES.NEEDS_REBASE;
+}
+
+function nextEntityRevisionFor(
+  row: ObservedRowChange,
+  canonical: CanonicalEntityState | undefined,
+): number {
+  if (row.operation === ROW_OPERATIONS.INSERT) return 1;
+  return requireCanonicalEntity(canonical).entityRevision + 1;
+}
+
+function requireCanonicalEntity(
+  canonical: CanonicalEntityState | undefined,
+): CanonicalEntityState {
+  if (canonical === undefined) {
+    throw new EvaluationContractError(
+      EVALUATION_ERROR_CODES.CANONICAL_STATE_REQUIRED,
+      "existing row evaluation requires canonical state",
+    );
+  }
+  return canonical;
+}
+
+function requireVersionedFieldChange(
+  fieldChange: ObservedFieldChange,
+): ObservedVersionedFieldChange {
+  if (!isVersionedFieldChange(fieldChange)) {
+    throw new EvaluationContractError(
+      EVALUATION_ERROR_CODES.BASE_FIELD_REVISION_REQUIRED,
+      "existing row evaluation requires a base field revision",
+    );
+  }
+  return fieldChange;
+}
+
+function isVersionedFieldChange(
+  fieldChange: ObservedFieldChange,
+): fieldChange is ObservedVersionedFieldChange {
+  return fieldChange.baseFieldRevision !== undefined;
 }

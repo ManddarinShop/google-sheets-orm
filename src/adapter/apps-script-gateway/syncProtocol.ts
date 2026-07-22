@@ -6,38 +6,40 @@
  */
 
 import { createHash, createHmac, randomUUID } from "node:crypto";
+import { JAVASCRIPT_TYPE_NAMES } from "../../core/encoding/constants.js";
+import {
+  SYNC_GATEWAY_DEFAULTS,
+  SYNC_GATEWAY_ENCODINGS,
+  SYNC_GATEWAY_HASH_ALGORITHMS,
+  SYNC_GATEWAY_PROTOCOL_VERSIONS,
+  SYNC_JSON_LITERAL_TOKENS,
+  type SyncGatewayOperation,
+} from "./constants.js";
+import {
+  SYNC_GATEWAY_PROTOCOL_ERROR_CODES,
+  SyncGatewayProtocolError,
+} from "./errors.js";
+import {
+  requireSyncGatewayExpiry,
+  requireSyncGatewayIssuedAt,
+  requireSyncGatewayOperation,
+  requireSyncGatewayRequestId,
+  requireSyncGatewayText,
+} from "./validation.js";
+import type {
+  SyncGatewayDataSigningFields,
+  SyncJsonValue,
+} from "./types.js";
 
 /** Protocol accepted by the production-shaped Apps Script sync handler. */
-export const SYNC_GATEWAY_PROTOCOL_VERSION = "typed-sheets-sync-v1" as const;
-
-/** Operations exposed by the registry-bound sync gateway. */
-export type SyncGatewayOperation =
-  | "ensureRowAnchors"
-  | "readSnapshot"
-  | "readEffectPostcondition"
-  | "applyEffects";
-
-/** JSON payload accepted in a sync envelope. */
-export type SyncJsonValue =
-  | null
-  | boolean
-  | number
-  | string
-  | readonly SyncJsonValue[]
-  | { readonly [key: string]: SyncJsonValue };
+export const SYNC_GATEWAY_PROTOCOL_VERSION = SYNC_GATEWAY_PROTOCOL_VERSIONS.DATA;
+export type { SyncGatewayOperation } from "./constants.js";
+export type { SyncJsonValue } from "./types.js";
 
 /** Authenticated gateway request. `registeredRange` is also part of the signature. */
-export interface SyncGatewayEnvelope<Payload extends SyncJsonValue = SyncJsonValue> {
+export interface SyncGatewayEnvelope<Payload extends SyncJsonValue = SyncJsonValue>
+  extends SyncGatewayDataSigningFields {
   readonly protocolVersion: typeof SYNC_GATEWAY_PROTOCOL_VERSION;
-  readonly requestId: string;
-  readonly operation: SyncGatewayOperation;
-  readonly keyId: string;
-  readonly issuedAt: number;
-  readonly expiresAt: number;
-  readonly sheetId: string;
-  readonly registeredRange: string;
-  readonly actorId: string;
-  readonly bodyHash: string;
   readonly signature: string;
   readonly payload: Payload;
 }
@@ -58,32 +60,33 @@ export interface CreateSyncGatewayEnvelopeOptions<Payload extends SyncJsonValue>
 
 /** Canonical JSON used for payload hashes and cross-runtime HMAC inputs. */
 export function canonicalSyncJson(value: unknown): string {
-  if (value === null) return "null";
-  if (value === true) return "true";
-  if (value === false) return "false";
-  if (typeof value === "string") return JSON.stringify(value);
-  if (typeof value === "number") return canonicalNumber(value);
+  if (value === null) return SYNC_JSON_LITERAL_TOKENS.NULL;
+  if (value === true) return SYNC_JSON_LITERAL_TOKENS.TRUE;
+  if (value === false) return SYNC_JSON_LITERAL_TOKENS.FALSE;
+  if (isString(value)) return JSON.stringify(value);
+  if (isNumber(value)) return canonicalNumber(value);
   if (Array.isArray(value)) return `[${value.map((item) => canonicalSyncJson(item)).join(",")}]`;
-  if (typeof value === "object" && value !== null && isPlainObject(value)) {
+  if (isObject(value) && isPlainObject(value)) {
     const entries = Object.keys(value)
       .sort()
       .map((key) => `${JSON.stringify(key)}:${canonicalSyncJson((value as Record<string, unknown>)[key])}`);
     return `{${entries.join(",")}}`;
   }
-  throw new Error("sync gateway payload must contain JSON values only");
+  throw new SyncGatewayProtocolError(
+    SYNC_GATEWAY_PROTOCOL_ERROR_CODES.INVALID_JSON_VALUE,
+    "sync gateway payload must contain JSON values only",
+  );
 }
 
 /** SHA-256 helper shared by envelope and effect payload verification. */
 export function syncSha256Hex(value: string): string {
-  return createHash("sha256").update(value, "utf8").digest("hex");
+  return createHash(SYNC_GATEWAY_HASH_ALGORITHMS.SHA256)
+    .update(value, SYNC_GATEWAY_ENCODINGS.UTF8)
+    .digest("hex");
 }
 
 /** Exact signing input that Apps Script verifies before opening a spreadsheet. */
-export function syncGatewaySigningInput(input: Pick<
-  SyncGatewayEnvelope,
-  "protocolVersion" | "requestId" | "operation" | "keyId" | "issuedAt" | "expiresAt" |
-  "sheetId" | "registeredRange" | "actorId" | "bodyHash"
->): string {
+export function syncGatewaySigningInput(input: SyncGatewayDataSigningFields): string {
   return [
     input.protocolVersion,
     input.requestId,
@@ -100,49 +103,59 @@ export function syncGatewaySigningInput(input: Pick<
 
 /** Computes the URL-safe HMAC signature used by the sync gateway. */
 export function signSyncGatewayEnvelope(
-  input: Pick<
-    SyncGatewayEnvelope,
-    "protocolVersion" | "requestId" | "operation" | "keyId" | "issuedAt" | "expiresAt" |
-    "sheetId" | "registeredRange" | "actorId" | "bodyHash"
-  >,
+  input: SyncGatewayDataSigningFields,
   secret: string,
 ): string {
-  if (secret.length === 0) throw new Error("sync gateway secret must not be empty");
-  return createHmac("sha256", secret).update(syncGatewaySigningInput(input), "utf8").digest("base64url");
+  const validSecret = requireSyncGatewayText(
+    secret,
+    "sync gateway secret",
+    SYNC_GATEWAY_PROTOCOL_ERROR_CODES.INVALID_SECRET,
+  );
+  return createHmac(SYNC_GATEWAY_HASH_ALGORITHMS.SHA256, validSecret)
+    .update(syncGatewaySigningInput(input), SYNC_GATEWAY_ENCODINGS.UTF8)
+    .digest(SYNC_GATEWAY_ENCODINGS.BASE64URL);
 }
 
 /** Creates a short-lived signed request for one registered sheet range. */
 export function createSyncGatewayEnvelope<Payload extends SyncJsonValue>(
   options: CreateSyncGatewayEnvelopeOptions<Payload>,
 ): SyncGatewayEnvelope<Payload> {
-  const issuedAt = options.issuedAt ?? Date.now();
-  const expiresInMs = options.expiresInMs ?? 60_000;
-  if (!Number.isSafeInteger(issuedAt) || issuedAt <= 0) {
-    throw new Error("sync gateway issuedAt must be a positive safe integer");
-  }
-  if (!Number.isSafeInteger(expiresInMs) || expiresInMs < 1_000 || expiresInMs > 10 * 60_000) {
-    throw new Error("sync gateway expiry must be between 1 second and 10 minutes");
-  }
-  if (options.sheetId.length === 0 || options.registeredRange.length === 0) {
-    throw new Error("sync gateway sheetId and registeredRange are required");
-  }
-  const actorId = options.actorId ?? "typed-sheets-sync-worker";
-  const keyId = options.keyId ?? "typed-sheets-shared-secret-v1";
-  if (actorId.length === 0 || keyId.length === 0) throw new Error("sync gateway actor and key ID are required");
-  const requestId = options.requestId ?? randomUUID();
-  if (!/^[A-Za-z0-9._:-]{8,128}$/.test(requestId)) {
-    throw new Error("sync gateway requestId must be 8-128 URL-safe characters");
-  }
+  const issuedAt = requireSyncGatewayIssuedAt(options.issuedAt ?? Date.now());
+  const expiresInMs = requireSyncGatewayExpiry(
+    options.expiresInMs ?? SYNC_GATEWAY_DEFAULTS.EXPIRY_MS,
+  );
+  const sheetId = requireSyncGatewayText(
+    options.sheetId,
+    "sync gateway sheetId",
+    SYNC_GATEWAY_PROTOCOL_ERROR_CODES.INVALID_SHEET_ID,
+  );
+  const registeredRange = requireSyncGatewayText(
+    options.registeredRange,
+    "sync gateway registeredRange",
+    SYNC_GATEWAY_PROTOCOL_ERROR_CODES.INVALID_REGISTERED_RANGE,
+  );
+  const actorId = requireSyncGatewayText(
+    options.actorId ?? SYNC_GATEWAY_DEFAULTS.DATA_ACTOR_ID,
+    "sync gateway actorId",
+    SYNC_GATEWAY_PROTOCOL_ERROR_CODES.INVALID_ACTOR_ID,
+  );
+  const keyId = requireSyncGatewayText(
+    options.keyId ?? SYNC_GATEWAY_DEFAULTS.KEY_ID,
+    "sync gateway keyId",
+    SYNC_GATEWAY_PROTOCOL_ERROR_CODES.INVALID_KEY_ID,
+  );
+  const requestId = requireSyncGatewayRequestId(options.requestId ?? randomUUID());
+  const operation = requireSyncGatewayOperation(options.operation);
   const bodyHash = syncSha256Hex(canonicalSyncJson(options.payload));
   const unsigned = {
     protocolVersion: SYNC_GATEWAY_PROTOCOL_VERSION,
     requestId,
-    operation: options.operation,
+    operation,
     keyId,
     issuedAt,
     expiresAt: issuedAt + expiresInMs,
-    sheetId: options.sheetId,
-    registeredRange: options.registeredRange,
+    sheetId,
+    registeredRange,
     actorId,
     bodyHash,
   } as const;
@@ -154,11 +167,28 @@ export function createSyncGatewayEnvelope<Payload extends SyncJsonValue>(
 }
 
 function canonicalNumber(value: number): string {
-  if (!Number.isFinite(value)) throw new Error("sync gateway payload numbers must be finite");
+  if (!Number.isFinite(value)) {
+    throw new SyncGatewayProtocolError(
+      SYNC_GATEWAY_PROTOCOL_ERROR_CODES.NON_FINITE_NUMBER,
+      "sync gateway payload numbers must be finite",
+    );
+  }
   return (value === 0 ? "0" : value.toString()).replace(/e\+/, "e").replace(/e(-?)0+(\d+)/, "e$1$2");
 }
 
 function isPlainObject(value: object): boolean {
   const prototype = Object.getPrototypeOf(value);
   return prototype === Object.prototype || prototype === null;
+}
+
+function isString(value: unknown): value is string {
+  return typeof value === JAVASCRIPT_TYPE_NAMES.STRING;
+}
+
+function isNumber(value: unknown): value is number {
+  return typeof value === JAVASCRIPT_TYPE_NAMES.NUMBER;
+}
+
+function isObject(value: unknown): value is object {
+  return typeof value === JAVASCRIPT_TYPE_NAMES.OBJECT && value !== null;
 }
