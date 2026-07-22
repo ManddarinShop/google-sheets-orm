@@ -7,14 +7,53 @@
  * the remote compare-and-set through the gateway.
  */
 
-import { stableHash, type NormalizedCell } from "../../core/index.js";
-import type { NewEffect } from "../../storage/index.js";
+import {
+  EMPTY_ARRAY_LENGTH_ZERO,
+  EMPTY_STRING_LENGTH_ZERO,
+  NON_NEGATIVE_SAFE_INTEGER_MINIMUM,
+  POSITIVE_SAFE_INTEGER_MINIMUM,
+  stableHash,
+  type Applicability,
+  type EffectTargetKind,
+  type NormalizedCell,
+  type Presence,
+} from "../../core/index.js";
+import {
+  APPLICABILITY_KINDS,
+  PRESENCE_KINDS,
+} from "../../core/state/index.js";
+import {
+  SYNC_GATEWAY_EFFECT_KINDS,
+  SYNC_GATEWAY_PROJECTIONS,
+} from "../gateway/constants.js";
 import {
   computeSyncVisibleHash,
   serializeSyncProjectionEffectPayload,
   type SyncEffectKind,
   type SyncProjection,
 } from "../gateway/syncGateway.js";
+import {
+  STORAGE_ERROR_CODES,
+  StorageError,
+} from "../../storage/errors.js";
+import type { NewEffect } from "../../storage/index.js";
+
+const PROJECTION_EFFECT_KINDS = {
+  SYSTEM_PROJECTION: "system_projection",
+  CANDIDATE_RECONCILE: "candidate_reconcile",
+  SYSTEM_REPAIR: "system_repair",
+  RESOLUTION_PROJECTION: "resolution_projection",
+  RESOLUTION_DELETE: SYNC_GATEWAY_EFFECT_KINDS.RESOLUTION_DELETE,
+} as const satisfies Record<string, SyncEffectKind>;
+
+const PROJECTION_TARGET_KINDS = {
+  ENTITY: "entity",
+  ROW_BINDING: "row_binding",
+  PROJECTION_ROW: "projection_row",
+  CONFLICT: "conflict",
+} as const satisfies Record<string, EffectTargetKind>;
+
+const EMPTY_VISIBLE_HASH = "" as const;
 
 /** Common immutable coordinates of a writer-approved projection effect. */
 export interface ProjectionEffectInput {
@@ -27,31 +66,55 @@ export interface ProjectionEffectInput {
   readonly registeredRange: string;
   readonly projection: SyncProjection;
   readonly schemaVersion: number;
-  readonly targetKind: "entity" | "row_binding" | "projection_row" | "conflict";
+  readonly targetKind: EffectTargetKind;
   readonly targetId: string;
-  readonly rowBindingId: string | null;
-  readonly conflictId: string | null;
+  readonly rowBindingId: Presence<string>;
+  readonly conflictId: Presence<string>;
   readonly targetAnchor: string;
   readonly fields: Readonly<Record<string, NormalizedCell>>;
   readonly createIfMissing: boolean;
   readonly expectedVisibleRevision: number;
   readonly expectedVisibleHash: string;
-  readonly expectedCandidateHash?: string | null;
-  readonly repairGuardHash?: string | null;
-  readonly sourceQuarantineId?: string | null;
-  readonly targetEntityRevision?: number | null;
-  readonly targetFieldRevisionHash?: string | null;
-  readonly targetCanonicalCommitId?: string | null;
+  readonly expectedCandidateHash?: Applicability<string>;
+  readonly repairGuardHash?: Presence<string>;
+  readonly sourceQuarantineId?: Presence<string>;
+  readonly targetEntityRevision?: Applicability<number>;
+  readonly targetFieldRevisionHash?: Applicability<string>;
+  readonly targetCanonicalCommitId?: Applicability<string>;
   readonly streamSequence: number;
 }
+
+/** Input for a System_State projection effect. */
+export type SystemProjectionEffectInput = Omit<ProjectionEffectInput, "effectKind">;
+
+/** Input for a User_Input candidate reconciliation effect. */
+export type CandidateReconcileEffectInput =
+  Omit<ProjectionEffectInput, "effectKind" | "projection"> & {
+    readonly projection?: typeof SYNC_GATEWAY_PROJECTIONS.USER_INPUT;
+  };
+
+/** Shared input for effects projected to the Sync_Conflicts control sheet. */
+export type ResolutionEffectInput =
+  Omit<ProjectionEffectInput, "effectKind" | "projection" | "targetKind"> & {
+    readonly projection?: typeof SYNC_GATEWAY_PROJECTIONS.SYNC_CONFLICTS;
+  };
 
 /** Builds an immutable outbox row, including stable payload/dedupe identities. */
 export function createProjectionEffect(input: ProjectionEffectInput): NewEffect {
   validateInput(input);
   const targetVisibleHash = computeSyncVisibleHash(input.fields);
-  if (input.effectKind === "resolution_delete" && targetVisibleHash !== input.expectedVisibleHash) {
-    throw new Error("resolution deletion requires the full current visible hash");
+  if (
+    input.effectKind === PROJECTION_EFFECT_KINDS.RESOLUTION_DELETE &&
+    targetVisibleHash !== input.expectedVisibleHash
+  ) {
+    throwEffectError("resolution deletion requires the full current visible hash");
   }
+  const expectedCandidateHash = input.expectedCandidateHash ?? notApplicableValue();
+  const targetEntityRevision = input.targetEntityRevision ?? notApplicableValue();
+  const targetFieldRevisionHash = input.targetFieldRevisionHash ?? notApplicableValue();
+  const targetCanonicalCommitId = input.targetCanonicalCommitId ?? applicableValue(input.commitId);
+  const repairGuardHash = input.repairGuardHash ?? absentValue();
+  const sourceQuarantineId = input.sourceQuarantineId ?? absentValue();
   const payloadJson = serializeSyncProjectionEffectPayload({
     sheetName: input.sheetName,
     registeredRange: input.registeredRange,
@@ -60,7 +123,7 @@ export function createProjectionEffect(input: ProjectionEffectInput): NewEffect 
     fields: input.fields,
     targetVisibleHash,
     createIfMissing: input.createIfMissing,
-    expectedCandidateHash: input.expectedCandidateHash ?? null,
+    expectedCandidateHash,
   });
   const payloadHash = stableHash({ payloadJson });
   return {
@@ -74,13 +137,13 @@ export function createProjectionEffect(input: ProjectionEffectInput): NewEffect 
     conflictId: input.conflictId,
     targetKind: input.targetKind,
     targetId: input.targetId,
-    targetEntityRevision: input.targetEntityRevision ?? null,
-    targetFieldRevisionHash: input.targetFieldRevisionHash ?? null,
-    targetCanonicalCommitId: input.targetCanonicalCommitId ?? input.commitId,
+    targetEntityRevision,
+    targetFieldRevisionHash,
+    targetCanonicalCommitId,
     expectedVisibleRevision: input.expectedVisibleRevision,
     expectedVisibleHash: input.expectedVisibleHash,
-    repairGuardHash: input.repairGuardHash ?? null,
-    sourceQuarantineId: input.sourceQuarantineId ?? null,
+    repairGuardHash,
+    sourceQuarantineId,
     payloadJson,
     payloadHash,
     effectDedupeKey: stableHash({
@@ -90,7 +153,7 @@ export function createProjectionEffect(input: ProjectionEffectInput): NewEffect 
       projection: input.projection,
       targetKind: input.targetKind,
       targetId: input.targetId,
-      targetCanonicalCommitId: input.targetCanonicalCommitId ?? input.commitId,
+      targetCanonicalCommitId: stableApplicabilityValue(targetCanonicalCommitId),
       payloadHash,
     }),
     streamSequence: input.streamSequence,
@@ -99,46 +162,50 @@ export function createProjectionEffect(input: ProjectionEffectInput): NewEffect 
 
 /** Creates a canonical System_State projection effect. */
 export function createSystemProjectionEffect(
-  input: Omit<ProjectionEffectInput, "effectKind">,
+  input: SystemProjectionEffectInput,
 ): NewEffect {
-  if (input.projection !== "system_state") throw new Error("system projection must target system_state");
-  return createProjectionEffect({ ...input, effectKind: "system_projection" });
+  if (input.projection !== SYNC_GATEWAY_PROJECTIONS.SYSTEM_STATE) {
+    throwEffectError("system projection must target system_state");
+  }
+  return createProjectionEffect({
+    ...input,
+    effectKind: PROJECTION_EFFECT_KINDS.SYSTEM_PROJECTION,
+  });
 }
 
 /** Creates a baseline-CAS User_Input reconcile that cannot overwrite a candidate. */
 export function createCandidateReconcileEffect(
-  input: Omit<ProjectionEffectInput, "effectKind" | "projection"> & { readonly projection?: "user_input" },
+  input: CandidateReconcileEffectInput,
 ): NewEffect {
-  return createProjectionEffect({ ...input, projection: "user_input", effectKind: "candidate_reconcile" });
+  return createProjectionEffect({
+    ...input,
+    projection: SYNC_GATEWAY_PROJECTIONS.USER_INPUT,
+    effectKind: PROJECTION_EFFECT_KINDS.CANDIDATE_RECONCILE,
+  });
 }
 
 /** Creates a guard-specific repair effect; caller must preserve the quarantine link. */
 export function createSystemRepairEffect(
   input: Omit<ProjectionEffectInput, "effectKind">,
 ): NewEffect {
-  if (input.repairGuardHash === undefined || input.repairGuardHash === null || input.repairGuardHash.length === 0) {
-    throw new Error("system repair requires a non-empty repairGuardHash");
-  }
-  if (input.sourceQuarantineId === undefined || input.sourceQuarantineId === null || input.sourceQuarantineId.length === 0) {
-    throw new Error("system repair requires a sourceQuarantineId");
-  }
-  return createProjectionEffect({ ...input, effectKind: "system_repair" });
+  requireNonEmptyPresence(input.repairGuardHash, "system repair requires a non-empty repairGuardHash");
+  requireNonEmptyPresence(input.sourceQuarantineId, "system repair requires a sourceQuarantineId");
+  return createProjectionEffect({
+    ...input,
+    effectKind: PROJECTION_EFFECT_KINDS.SYSTEM_REPAIR,
+  });
 }
 
 /** Creates the system-owned Sync_Conflicts control-row projection effect. */
 export function createResolutionProjectionEffect(
-  input: Omit<ProjectionEffectInput, "effectKind" | "projection" | "targetKind"> & {
-    readonly projection?: "sync_conflicts";
-  },
+  input: ResolutionEffectInput,
 ): NewEffect {
-  if (input.conflictId === null || input.conflictId.length === 0 || input.targetId !== input.conflictId) {
-    throw new Error("resolution projection must target exactly one conflict ID");
-  }
+  requireConflictTarget(input.conflictId, input.targetId, "resolution projection must target exactly one conflict ID");
   return createProjectionEffect({
     ...input,
-    projection: "sync_conflicts",
-    targetKind: "conflict",
-    effectKind: "resolution_projection",
+    projection: SYNC_GATEWAY_PROJECTIONS.SYNC_CONFLICTS,
+    targetKind: PROJECTION_TARGET_KINDS.CONFLICT,
+    effectKind: PROJECTION_EFFECT_KINDS.RESOLUTION_PROJECTION,
   });
 }
 
@@ -150,18 +217,14 @@ export function createResolutionProjectionEffect(
  * resolver observed; it never deletes by mutable sheet row number.
  */
 export function createResolutionDeleteEffect(
-  input: Omit<ProjectionEffectInput, "effectKind" | "projection" | "targetKind"> & {
-    readonly projection?: "sync_conflicts";
-  },
+  input: ResolutionEffectInput,
 ): NewEffect {
-  if (input.conflictId === null || input.conflictId.length === 0 || input.targetId !== input.conflictId) {
-    throw new Error("resolution deletion must target exactly one conflict ID");
-  }
+  requireConflictTarget(input.conflictId, input.targetId, "resolution deletion must target exactly one conflict ID");
   return createProjectionEffect({
     ...input,
-    projection: "sync_conflicts",
-    targetKind: "conflict",
-    effectKind: "resolution_delete",
+    projection: SYNC_GATEWAY_PROJECTIONS.SYNC_CONFLICTS,
+    targetKind: PROJECTION_TARGET_KINDS.CONFLICT,
+    effectKind: PROJECTION_EFFECT_KINDS.RESOLUTION_DELETE,
   });
 }
 
@@ -176,34 +239,100 @@ function validateInput(input: ProjectionEffectInput): void {
     ["target ID", input.targetId],
     ["target anchor", input.targetAnchor],
   ] as const) {
-    if (value.length === 0) throw new Error(label + " is required");
-  }
-  if (!Number.isSafeInteger(input.schemaVersion) || input.schemaVersion < 1 ||
-    !Number.isSafeInteger(input.expectedVisibleRevision) || input.expectedVisibleRevision < 0 ||
-    !Number.isSafeInteger(input.streamSequence) || input.streamSequence < 1) {
-    throw new Error("projection effect has an invalid schema, visible revision, or stream sequence");
-  }
-  if (input.createIfMissing) {
-    if (input.expectedVisibleRevision !== 0 || input.expectedVisibleHash !== "") {
-      throw new Error("new projection rows require an empty visible baseline");
-    }
-  } else if (input.expectedVisibleHash.length === 0) {
-    throw new Error("existing projection effects require an expected visible hash");
-  }
-  if (Object.keys(input.fields).length === 0) throw new Error("projection effect must contain fields");
-  if (input.effectKind === "candidate_reconcile" && input.projection !== "user_input") {
-    throw new Error("candidate reconcile must target user_input");
+    requireNonEmptyText(value, label);
   }
   if (
-    (input.effectKind === "resolution_projection" || input.effectKind === "resolution_delete") &&
-    input.projection !== "sync_conflicts"
+    !Number.isSafeInteger(input.schemaVersion) ||
+    input.schemaVersion < POSITIVE_SAFE_INTEGER_MINIMUM ||
+    !Number.isSafeInteger(input.expectedVisibleRevision) ||
+    input.expectedVisibleRevision < NON_NEGATIVE_SAFE_INTEGER_MINIMUM ||
+    !Number.isSafeInteger(input.streamSequence) ||
+    input.streamSequence < POSITIVE_SAFE_INTEGER_MINIMUM
   ) {
-    throw new Error("resolution projection must target sync_conflicts");
+    throwEffectError("projection effect has an invalid schema, visible revision, or stream sequence");
   }
-  if (input.effectKind === "resolution_delete" && (input.createIfMissing || input.expectedVisibleRevision < 1)) {
-    throw new Error("resolution deletion requires an existing visible row");
+  if (input.createIfMissing) {
+    if (
+      input.expectedVisibleRevision !== NON_NEGATIVE_SAFE_INTEGER_MINIMUM ||
+      input.expectedVisibleHash !== EMPTY_VISIBLE_HASH
+    ) {
+      throwEffectError("new projection rows require an empty visible baseline");
+    }
+  } else if (input.expectedVisibleHash.length === EMPTY_STRING_LENGTH_ZERO) {
+    throwEffectError("existing projection effects require an expected visible hash");
   }
-  if (input.rowBindingId === null && input.targetKind !== "conflict") {
-    throw new Error("non-conflict projection effect requires a row binding ID");
+  if (Object.keys(input.fields).length === EMPTY_ARRAY_LENGTH_ZERO) {
+    throwEffectError("projection effect must contain fields");
   }
+  if (
+    input.effectKind === PROJECTION_EFFECT_KINDS.CANDIDATE_RECONCILE &&
+    input.projection !== SYNC_GATEWAY_PROJECTIONS.USER_INPUT
+  ) {
+    throwEffectError("candidate reconcile must target user_input");
+  }
+  if (
+    (input.effectKind === PROJECTION_EFFECT_KINDS.RESOLUTION_PROJECTION ||
+      input.effectKind === PROJECTION_EFFECT_KINDS.RESOLUTION_DELETE) &&
+    input.projection !== SYNC_GATEWAY_PROJECTIONS.SYNC_CONFLICTS
+  ) {
+    throwEffectError("resolution projection must target sync_conflicts");
+  }
+  if (
+    input.effectKind === PROJECTION_EFFECT_KINDS.RESOLUTION_DELETE &&
+    (input.createIfMissing || input.expectedVisibleRevision < POSITIVE_SAFE_INTEGER_MINIMUM)
+  ) {
+    throwEffectError("resolution deletion requires an existing visible row");
+  }
+  if (
+    input.rowBindingId.kind === PRESENCE_KINDS.ABSENT &&
+    input.targetKind !== PROJECTION_TARGET_KINDS.CONFLICT
+  ) {
+    throwEffectError("non-conflict projection effect requires a row binding ID");
+  }
+}
+
+function requireNonEmptyText(value: string, label: string): void {
+  if (value.length === EMPTY_STRING_LENGTH_ZERO) {
+    throwEffectError(`${label} is required`);
+  }
+}
+
+function requireNonEmptyPresence(
+  value: Presence<string> | undefined,
+  message: string,
+): string {
+  if (value?.kind !== PRESENCE_KINDS.PRESENT || value.value.length === EMPTY_STRING_LENGTH_ZERO) {
+    throwEffectError(message);
+  }
+  return value.value;
+}
+
+function requireConflictTarget(
+  conflictId: Presence<string>,
+  targetId: string,
+  message: string,
+): string {
+  const value = requireNonEmptyPresence(conflictId, message);
+  if (targetId !== value) throwEffectError(message);
+  return value;
+}
+
+function applicableValue<T>(value: T): Applicability<T> {
+  return { kind: APPLICABILITY_KINDS.APPLICABLE, value };
+}
+
+function notApplicableValue<T>(): Applicability<T> {
+  return { kind: APPLICABILITY_KINDS.NOT_APPLICABLE };
+}
+
+function absentValue<T>(): Presence<T> {
+  return { kind: PRESENCE_KINDS.ABSENT };
+}
+
+function stableApplicabilityValue<T>(value: Applicability<T>): T | null {
+  return value.kind === APPLICABILITY_KINDS.APPLICABLE ? value.value : null;
+}
+
+function throwEffectError(message: string): never {
+  throw new StorageError(STORAGE_ERROR_CODES.INVALID_EFFECT_OPTIONS, message);
 }

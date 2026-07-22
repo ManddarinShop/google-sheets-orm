@@ -5,11 +5,17 @@
  * preserved without JSON coercion silently hiding malformed data.
  */
 
-import { computeRowHash, stableHash, type ObservedRowChange } from "../../core/index.js";
+import { computeRowHash, stableHash, type NormalizedRow } from "../../core/index.js";
+import {
+  isJavaScriptType,
+  JAVASCRIPT_TYPE_NAMES,
+} from "../../core/encoding/index.js";
+import { QUARANTINE_FINGERPRINT_MARKERS } from "../../core/evaluate/constants.js";
+import { STORAGE_ERROR_CODES, StorageError } from "../errors.js";
 
 /** Builds the persisted hash for an observed row snapshot or absent row. */
 export function rowHash(
-  row: ObservedRowChange["beforeRow"],
+  row: NormalizedRow | null,
   rowBindingId: string,
 ): string {
   return row === null
@@ -24,7 +30,12 @@ export function rowHash(
  */
 export function auditJson(value: unknown): string {
   const serialized = JSON.stringify(toAuditValue(value, new Set<object>()));
-  if (serialized === undefined) throw new Error("could not serialize audit evidence");
+  if (serialized === undefined) {
+    throw new StorageError(
+      STORAGE_ERROR_CODES.OBSERVATION_AUDIT_SERIALIZATION_FAILED,
+      "could not serialize audit evidence",
+    );
+  }
   return serialized;
 }
 
@@ -33,16 +44,33 @@ type AuditValue = null | boolean | number | string | readonly AuditValue[] | {
 };
 
 function toAuditValue(value: unknown, seen: Set<object>): AuditValue {
-  if (value === null || typeof value === "string" || typeof value === "boolean") return value;
-  if (typeof value === "number") {
+  if (value === null ||
+      isJavaScriptType(value, JAVASCRIPT_TYPE_NAMES.STRING) ||
+      isJavaScriptType(value, JAVASCRIPT_TYPE_NAMES.BOOLEAN)) return value;
+  if (isJavaScriptType(value, JAVASCRIPT_TYPE_NAMES.NUMBER)) {
     return Number.isFinite(value) ? value : { $invalidNumber: String(value) };
   }
-  if (typeof value === "undefined") return { $invalidType: "undefined" };
-  if (typeof value === "bigint") return { $invalidBigInt: value.toString() };
-  if (typeof value === "symbol") return { $invalidSymbol: String(value) };
-  if (typeof value === "function") return { $invalidFunction: value.name || "anonymous" };
+  if (isJavaScriptType(value, JAVASCRIPT_TYPE_NAMES.UNDEFINED)) {
+    return { $invalidType: QUARANTINE_FINGERPRINT_MARKERS.UNDEFINED };
+  }
+  if (isJavaScriptType(value, JAVASCRIPT_TYPE_NAMES.BIGINT)) {
+    return { $invalidBigInt: value.toString() };
+  }
+  if (isJavaScriptType(value, JAVASCRIPT_TYPE_NAMES.SYMBOL)) {
+    return { $invalidSymbol: String(value) };
+  }
+  if (isJavaScriptType(value, JAVASCRIPT_TYPE_NAMES.FUNCTION)) {
+    return {
+      $invalidFunction: value.name || QUARANTINE_FINGERPRINT_MARKERS.ANONYMOUS_FUNCTION,
+    };
+  }
+  if (!isJavaScriptType(value, JAVASCRIPT_TYPE_NAMES.OBJECT)) {
+    return { $invalidObject: Object.prototype.toString.call(value) };
+  }
 
-  if (seen.has(value)) return { $invalidObject: "cycle" };
+  if (seen.has(value)) {
+    return { $invalidObject: QUARANTINE_FINGERPRINT_MARKERS.CYCLE };
+  }
   seen.add(value);
   try {
     if (Array.isArray(value)) {
@@ -54,7 +82,7 @@ function toAuditValue(value: unknown, seen: Set<object>): AuditValue {
         .sort((left, right) => auditSortKey(left[0]).localeCompare(auditSortKey(right[0])));
       return { $map: entries };
     }
-    if (Object.prototype.toString.call(value) !== "[object Object]") {
+    if (Object.prototype.toString.call(value) !== QUARANTINE_FINGERPRINT_MARKERS.PLAIN_OBJECT_TAG) {
       return { $invalidObject: Object.prototype.toString.call(value) };
     }
 
