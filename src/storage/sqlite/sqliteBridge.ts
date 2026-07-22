@@ -7,6 +7,7 @@
  */
 
 import { createRequire } from "node:module";
+import { STORAGE_ERROR_CODES, StorageError } from "../errors.js";
 
 interface DatabaseSyncOpenOptions {
   readonly readOnly?: boolean;
@@ -65,7 +66,8 @@ export async function getDatabaseSync(): Promise<
 
   const mod: unknown = requireAtRuntime(nodeSqliteSpecifier);
   if (!hasDatabaseSyncConstructor(mod)) {
-    throw new Error(
+    throw new StorageError(
+      STORAGE_ERROR_CODES.SQLITE_RUNTIME_UNAVAILABLE,
       "SQLite-authoritative storage requires a Node.js runtime that provides node:sqlite.",
     );
   }
@@ -87,8 +89,8 @@ export interface DatabaseSyncLike {
 
 export interface StatementLike {
   run(...params: unknown[]): { changes: number; lastInsertRowid: number | bigint };
-  get(...params: unknown[]): unknown;
-  all(...params: unknown[]): unknown[];
+  get<T = unknown>(...params: unknown[]): T | undefined;
+  all<T = unknown>(...params: unknown[]): T[];
 }
 
 function hasDatabaseSyncConstructor(value: unknown): value is {
