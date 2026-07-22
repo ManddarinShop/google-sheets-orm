@@ -7,43 +7,63 @@
  * same compare-and-set semantics as a deployed gateway.
  */
 
-import { stableHash, type NormalizedCell } from "../../core/index.js";
+import {
+  stableHash,
+  type CellObservation,
+  type EffectKind,
+  type EffectTargetKind,
+  type NormalizedCell,
+} from "../../core/index.js";
+import {
+  JAVASCRIPT_TYPE_NAMES,
+  NORMALIZED_CELL_KINDS,
+} from "../../core/encoding/constants.js";
+import { APPLICABILITY_KINDS } from "../../core/state/constants.js";
+import type { Applicability, Presence } from "../../core/state/types.js";
+import type { RegisteredProjection } from "../../storage/sync/syncRegistry.js";
+import {
+  EMPTY_ARRAY_LENGTH_ZERO,
+  EMPTY_STRING_LENGTH_ZERO,
+} from "../../core/constants.js";
+import {
+  type SyncGatewayEffectResultStatus,
+  type SyncGatewayPostconditionDisposition,
+  type SyncGatewayPostconditionStatus,
+  type SyncGatewayProtocolVersion,
+} from "./constants.js";
+import {
+  SYNC_GATEWAY_ERROR_CODES,
+  SyncGatewayContractError,
+} from "./errors.js";
+import {
+  requireSyncGatewayPositiveSafeInteger,
+  requireSyncGatewayText,
+} from "./validation.js";
 
 /** Projections supported by the v1 sync gateway. */
-export type SyncProjection = "user_input" | "system_state" | "sync_conflicts";
+export type SyncProjection = RegisteredProjection;
 
 /** Effect classes whose compare-and-set behavior differs at the gateway. */
-export type SyncEffectKind =
-  | "system_projection"
-  | "candidate_reconcile"
-  | "system_repair"
-  | "resolution_projection"
-  /** Deletes one resolved Sync_Conflicts row after confirming its full visible state. */
-  | "resolution_delete";
+export type SyncEffectKind = EffectKind;
 
 /** Literal/formula metadata retained by a normalized Sheet snapshot. */
-export interface SyncSnapshotCell {
-  readonly cellKind: "blank" | "literal" | "formula" | "merged" | "error";
-  readonly normalizedCell: NormalizedCell;
-  readonly formulaHash: string | null;
-  readonly mergeRange: string | null;
-  readonly errorCode: string | null;
-  readonly stableHash: string | null;
+export interface SyncSnapshotCell extends CellObservation {
+  readonly stableHash: Presence<string>;
 }
 
 /** One physical row read from a registered projection. */
 export interface SyncSnapshotRow {
   readonly rowNumber: number;
-  readonly physicalAnchor: string | null;
-  /** Projection metadata; null when a legacy/user row has never been materialized. */
-  readonly visibleRevision: number | null;
-  readonly visibleHash: string | null;
+  readonly physicalAnchor: Presence<string>;
+  /** Projection metadata is absent when a legacy/user row has never been materialized. */
+  readonly visibleRevision: Presence<number>;
+  readonly visibleHash: Presence<string>;
   readonly cells: Readonly<Record<string, SyncSnapshotCell>>;
 }
 
 /** Metadata-rich, lock-free snapshot returned by a gateway. */
 export interface SyncGatewaySnapshot {
-  readonly protocolVersion: string;
+  readonly protocolVersion: SyncGatewayProtocolVersion;
   readonly sheetName: string;
   readonly registeredRange: string;
   readonly projection: SyncProjection;
@@ -96,7 +116,7 @@ export interface SyncProjectionEffectPayload {
   readonly targetVisibleHash: string;
   readonly createIfMissing: boolean;
   /** A candidate reconcile must fail rather than overwrite an active candidate. */
-  readonly expectedCandidateHash: string | null;
+  readonly expectedCandidateHash: Applicability<string>;
 }
 
 /** Gateway-ready view of one durable outbox row. */
@@ -106,13 +126,13 @@ export interface SyncGatewayEffect {
   readonly effectKind: SyncEffectKind;
   readonly physicalSheetId: string;
   readonly projection: SyncProjection;
-  readonly targetKind: string;
+  readonly targetKind: EffectTargetKind;
   readonly targetId: string;
-  readonly rowBindingId: string | null;
-  readonly conflictId: string | null;
+  readonly rowBindingId: Presence<string>;
+  readonly conflictId: Presence<string>;
   readonly expectedVisibleRevision: number;
   readonly expectedVisibleHash: string;
-  readonly repairGuardHash: string | null;
+  readonly repairGuardHash: Presence<string>;
   readonly payload: SyncProjectionEffectPayload;
 }
 
@@ -120,19 +140,12 @@ export interface SyncGatewayEffect {
 export interface SyncGatewayEffectResult {
   readonly effectId: string;
   readonly payloadHash: string;
-  readonly status:
-    | "applied"
-    | "already_applied"
-    | "superseded"
-    | "guard_mismatch"
-    | "repair_reobserve"
-    | "schema_error"
-    | "retryable_error";
-  readonly visibleRevision: number | null;
-  readonly visibleHash: string | null;
-  readonly snapshotHash: string | null;
-  readonly reason: string | null;
-  readonly postcondition: "verified" | "unavailable";
+  readonly status: SyncGatewayEffectResultStatus;
+  readonly visibleRevision: Presence<number>;
+  readonly visibleHash: Presence<string>;
+  readonly snapshotHash: Presence<string>;
+  readonly reason: Presence<string>;
+  readonly postcondition: SyncGatewayPostconditionStatus;
 }
 
 /** Gateway batch request. All effects must target the same physical sheet. */
@@ -148,17 +161,17 @@ export interface ApplySyncEffectsRequest {
 /** A batch may intentionally return only a prefix when its budget is exhausted. */
 export interface ApplySyncEffectsResult {
   readonly results: readonly SyncGatewayEffectResult[];
-  readonly snapshotHash: string | null;
+  readonly snapshotHash: Presence<string>;
   /** True only when the gateway intentionally stopped before the supplied suffix. */
   readonly hasMore: boolean;
 }
 
 /** Read-back classification used after a response is lost or a lease expires. */
 export interface SyncEffectPostcondition {
-  readonly disposition: "applied" | "unapplied" | "changed" | "unavailable";
-  readonly visibleRevision: number | null;
-  readonly visibleHash: string | null;
-  readonly snapshotHash: string | null;
+  readonly disposition: SyncGatewayPostconditionDisposition;
+  readonly visibleRevision: Presence<number>;
+  readonly visibleHash: Presence<string>;
+  readonly snapshotHash: Presence<string>;
 }
 
 /**
@@ -188,53 +201,101 @@ export function parseSyncProjectionEffectPayload(value: string): SyncProjectionE
   try {
     parsed = JSON.parse(value) as unknown;
   } catch {
-    throw new Error("effect payload is not valid JSON");
+    throw new SyncGatewayContractError(
+      SYNC_GATEWAY_ERROR_CODES.INVALID_EFFECT_PAYLOAD,
+      "effect payload is not valid JSON",
+    );
   }
-  if (!isRecord(parsed)) throw new Error("effect payload must be an object");
+  if (!isRecord(parsed)) {
+    throw new SyncGatewayContractError(
+      SYNC_GATEWAY_ERROR_CODES.INVALID_EFFECT_PAYLOAD,
+      "effect payload must be an object",
+    );
+  }
 
-  const sheetName = requireText(parsed.sheetName, "effect payload sheetName");
-  const registeredRange = requireText(parsed.registeredRange, "effect payload registeredRange");
-  const targetAnchor = requireText(parsed.targetAnchor, "effect payload targetAnchor");
-  const targetVisibleHash = requireText(parsed.targetVisibleHash, "effect payload targetVisibleHash");
-  if (!isPositiveSafeInteger(parsed.schemaVersion)) {
-    throw new Error("effect payload schemaVersion must be a positive safe integer");
+  const sheetName = requireSyncGatewayText(
+    parsed.sheetName,
+    "effect payload sheetName",
+    SYNC_GATEWAY_ERROR_CODES.INVALID_EFFECT_PAYLOAD,
+  );
+  const registeredRange = requireSyncGatewayText(
+    parsed.registeredRange,
+    "effect payload registeredRange",
+    SYNC_GATEWAY_ERROR_CODES.INVALID_EFFECT_PAYLOAD,
+  );
+  const targetAnchor = requireSyncGatewayText(
+    parsed.targetAnchor,
+    "effect payload targetAnchor",
+    SYNC_GATEWAY_ERROR_CODES.INVALID_EFFECT_PAYLOAD,
+  );
+  const targetVisibleHash = requireSyncGatewayText(
+    parsed.targetVisibleHash,
+    "effect payload targetVisibleHash",
+    SYNC_GATEWAY_ERROR_CODES.INVALID_EFFECT_PAYLOAD,
+  );
+  const schemaVersion = requireSyncGatewayPositiveSafeInteger(
+    parsed.schemaVersion,
+    "effect payload schemaVersion",
+    SYNC_GATEWAY_ERROR_CODES.INVALID_EFFECT_PAYLOAD,
+  );
+  if (!isBoolean(parsed.createIfMissing)) {
+    throw new SyncGatewayContractError(
+      SYNC_GATEWAY_ERROR_CODES.INVALID_EFFECT_PAYLOAD,
+      "effect payload createIfMissing must be boolean",
+    );
   }
-  if (typeof parsed.createIfMissing !== "boolean") {
-    throw new Error("effect payload createIfMissing must be boolean");
+  const expectedCandidateHash = parseNullableCandidateHash(parsed.expectedCandidateHash);
+  if (!isRecord(parsed.fields)) {
+    throw new SyncGatewayContractError(
+      SYNC_GATEWAY_ERROR_CODES.INVALID_EFFECT_PAYLOAD,
+      "effect payload fields must be an object",
+    );
   }
-  if (parsed.expectedCandidateHash !== null && typeof parsed.expectedCandidateHash !== "string") {
-    throw new Error("effect payload expectedCandidateHash must be string or null");
-  }
-  if (!isRecord(parsed.fields)) throw new Error("effect payload fields must be an object");
 
   const fields: Record<string, NormalizedCell> = {};
   for (const [fieldName, cell] of Object.entries(parsed.fields)) {
-    if (fieldName.length === 0 || !isNormalizedCell(cell)) {
-      throw new Error("effect payload contains an invalid normalized field");
+    if (
+      fieldName.length === EMPTY_STRING_LENGTH_ZERO ||
+      !isNormalizedCell(cell)
+    ) {
+      throw new SyncGatewayContractError(
+        SYNC_GATEWAY_ERROR_CODES.INVALID_EFFECT_PAYLOAD,
+        "effect payload contains an invalid normalized field",
+      );
     }
     fields[fieldName] = cell;
   }
-  if (Object.keys(fields).length === 0) throw new Error("effect payload must contain a field");
+  if (Object.keys(fields).length === EMPTY_ARRAY_LENGTH_ZERO) {
+    throw new SyncGatewayContractError(
+      SYNC_GATEWAY_ERROR_CODES.INVALID_EFFECT_PAYLOAD,
+      "effect payload must contain a field",
+    );
+  }
   if (computeSyncVisibleHash(fields) !== targetVisibleHash) {
-    throw new Error("effect payload targetVisibleHash does not match its fields");
+    throw new SyncGatewayContractError(
+      SYNC_GATEWAY_ERROR_CODES.INVALID_EFFECT_PAYLOAD,
+      "effect payload targetVisibleHash does not match its fields",
+    );
   }
 
   return {
     sheetName,
     registeredRange,
-    schemaVersion: parsed.schemaVersion,
+    schemaVersion,
     targetAnchor,
     fields,
     targetVisibleHash,
     createIfMissing: parsed.createIfMissing,
-    expectedCandidateHash: parsed.expectedCandidateHash,
+    expectedCandidateHash,
   };
 }
 
 /** Serializes a checked projection payload in a stable key order for outbox use. */
 export function serializeSyncProjectionEffectPayload(payload: SyncProjectionEffectPayload): string {
   // Validate before serialization so worker and gateway fail at the same boundary.
-  const checked = parseSyncProjectionEffectPayload(JSON.stringify(payload));
+  const checked = parseSyncProjectionEffectPayload(
+    JSON.stringify(toWireProjectionEffectPayload(payload)),
+  );
   return JSON.stringify({
     sheetName: checked.sheetName,
     registeredRange: checked.registeredRange,
@@ -243,28 +304,84 @@ export function serializeSyncProjectionEffectPayload(payload: SyncProjectionEffe
     fields: Object.fromEntries(Object.entries(checked.fields).sort(([a], [b]) => a.localeCompare(b))),
     targetVisibleHash: checked.targetVisibleHash,
     createIfMissing: checked.createIfMissing,
-    expectedCandidateHash: checked.expectedCandidateHash,
+    expectedCandidateHash: toNullableCandidateHash(checked.expectedCandidateHash),
   });
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
+  return (
+    typeof value === JAVASCRIPT_TYPE_NAMES.OBJECT &&
+    value !== null &&
+    !Array.isArray(value)
+  );
 }
 
-function requireText(value: unknown, label: string): string {
-  if (typeof value !== "string" || value.length === 0) throw new Error(label + " is required");
-  return value;
+function isBoolean(value: unknown): value is boolean {
+  return typeof value === JAVASCRIPT_TYPE_NAMES.BOOLEAN;
 }
 
-function isPositiveSafeInteger(value: unknown): value is number {
-  return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+function parseNullableCandidateHash(value: unknown): Applicability<string> {
+  if (value === null) {
+    return { kind: APPLICABILITY_KINDS.NOT_APPLICABLE };
+  }
+  return {
+    kind: APPLICABILITY_KINDS.APPLICABLE,
+    value: requireSyncGatewayText(
+      value,
+      "effect payload expectedCandidateHash",
+      SYNC_GATEWAY_ERROR_CODES.INVALID_EFFECT_PAYLOAD,
+    ),
+  };
+}
+
+interface SyncProjectionEffectPayloadWire {
+  readonly sheetName: string;
+  readonly registeredRange: string;
+  readonly schemaVersion: number;
+  readonly targetAnchor: string;
+  readonly fields: Readonly<Record<string, NormalizedCell>>;
+  readonly targetVisibleHash: string;
+  readonly createIfMissing: boolean;
+  /** `null` is retained only at the JSON transport boundary. */
+  readonly expectedCandidateHash: string | null;
+}
+
+function toWireProjectionEffectPayload(
+  payload: SyncProjectionEffectPayload,
+): SyncProjectionEffectPayloadWire {
+  return {
+    sheetName: payload.sheetName,
+    registeredRange: payload.registeredRange,
+    schemaVersion: payload.schemaVersion,
+    targetAnchor: payload.targetAnchor,
+    fields: payload.fields,
+    targetVisibleHash: payload.targetVisibleHash,
+    createIfMissing: payload.createIfMissing,
+    expectedCandidateHash: toNullableCandidateHash(payload.expectedCandidateHash),
+  };
+}
+
+function toNullableCandidateHash(value: Applicability<string>): string | null {
+  return value.kind === APPLICABILITY_KINDS.APPLICABLE ? value.value : null;
 }
 
 function isNormalizedCell(value: unknown): value is NormalizedCell {
   if (value === null) return true;
   if (!isRecord(value)) return false;
-  if (value.kind === "string") return typeof value.value === "string";
-  if (value.kind === "number") return typeof value.value === "number" && Number.isFinite(value.value);
-  if (value.kind === "boolean") return typeof value.value === "boolean";
-  return value.kind === "date" && typeof value.value === "string";
+  if (value.kind === NORMALIZED_CELL_KINDS.STRING) {
+    return typeof value.value === JAVASCRIPT_TYPE_NAMES.STRING;
+  }
+  if (value.kind === NORMALIZED_CELL_KINDS.NUMBER) {
+    return (
+      typeof value.value === JAVASCRIPT_TYPE_NAMES.NUMBER &&
+      Number.isFinite(value.value)
+    );
+  }
+  if (value.kind === NORMALIZED_CELL_KINDS.BOOLEAN) {
+    return typeof value.value === JAVASCRIPT_TYPE_NAMES.BOOLEAN;
+  }
+  return (
+    value.kind === NORMALIZED_CELL_KINDS.DATE &&
+    typeof value.value === JAVASCRIPT_TYPE_NAMES.STRING
+  );
 }
