@@ -25,9 +25,14 @@ export type {
   SyncGatewayAdminEnvelope,
   CreateSyncGatewayAdminEnvelopeOptions,
 } from "./syncAdminProtocol.js";
-export { AppsScriptSyncGatewayClient, AppsScriptSyncGatewayError } from "./syncClient.js";
+export { AppsScriptSyncGatewayClient } from "./syncClient.js";
+export {
+  AppsScriptSyncGatewayError,
+  SYNC_GATEWAY_CLIENT_ERROR_CODES,
+} from "./errors.js";
 export type {
   AppsScriptSyncGatewayClientOptions,
   SyncGatewayProvisionRegistration,
   SyncGatewayProvisionResult,
 } from "./syncClient.js";
+export type { SyncGatewayClientErrorCode } from "./errors.js";
