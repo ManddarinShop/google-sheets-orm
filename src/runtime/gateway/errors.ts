@@ -4,6 +4,8 @@ import { CoreErrorException } from "../../core/errors/index.js";
 export const SYNC_GATEWAY_ERROR_CODES = {
   INVALID_EFFECT_PAYLOAD: "invalid_sync_effect_payload",
   INVALID_PROVISIONING_DEFINITIONS: "invalid_sync_gateway_provisioning",
+  INVALID_CLIENT_OPTIONS: "invalid_sync_gateway_client_options",
+  INVALID_GATEWAY_RESPONSE: "invalid_sync_gateway_response",
 } as const;
 
 export type SyncGatewayErrorCode =

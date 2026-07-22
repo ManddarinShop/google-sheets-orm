@@ -1,4 +1,6 @@
 import { CoreErrorException } from "../../core/errors/index.js";
+import { PRESENCE_KINDS } from "../../core/state/index.js";
+import type { Presence } from "../../core/state/index.js";
 
 /** Stable error categories emitted by the signed gateway protocol. */
 export const SYNC_GATEWAY_PROTOCOL_ERROR_CODES = {
@@ -26,5 +28,37 @@ export class SyncGatewayProtocolError extends CoreErrorException<
 > {
   constructor(code: SyncGatewayProtocolErrorCode, message: string) {
     super("adapter.sync_gateway", code, message);
+  }
+}
+
+/** Stable errors emitted by the Node-side Apps Script transport client. */
+export const SYNC_GATEWAY_CLIENT_ERROR_CODES = {
+  HTTP_ERROR: "sync_gateway_http_error",
+  INVALID_RESPONSE: "invalid_sync_gateway_response",
+  NETWORK_ERROR: "sync_gateway_network_error",
+  REMOTE_ERROR: "sync_gateway_remote_error",
+  TIMEOUT: "sync_gateway_timeout",
+} as const;
+
+export type SyncGatewayClientErrorCode =
+  (typeof SYNC_GATEWAY_CLIENT_ERROR_CODES)[keyof typeof SYNC_GATEWAY_CLIENT_ERROR_CODES];
+
+/** Structured transport error with explicit HTTP-status and remote-code presence. */
+export class AppsScriptSyncGatewayError extends CoreErrorException<
+  "adapter.sync_gateway",
+  SyncGatewayClientErrorCode
+> {
+  readonly status: Presence<number>;
+  readonly remoteCode: Presence<string>;
+
+  constructor(
+    code: SyncGatewayClientErrorCode,
+    message: string,
+    status: Presence<number>,
+    remoteCode: Presence<string> = { kind: PRESENCE_KINDS.ABSENT },
+  ) {
+    super("adapter.sync_gateway", code, message);
+    this.status = status;
+    this.remoteCode = remoteCode;
   }
 }

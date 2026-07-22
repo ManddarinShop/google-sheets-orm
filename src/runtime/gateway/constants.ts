@@ -6,6 +6,21 @@ export const SYNC_GATEWAY_PROTOCOL_VERSIONS = {
 export type SyncGatewayProtocolVersion =
   (typeof SYNC_GATEWAY_PROTOCOL_VERSIONS)[keyof typeof SYNC_GATEWAY_PROTOCOL_VERSIONS];
 
+/** Projection labels accepted by the runtime gateway contract. */
+export const SYNC_GATEWAY_PROJECTIONS = {
+  USER_INPUT: "user_input",
+  SYSTEM_STATE: "system_state",
+  SYNC_CONFLICTS: "sync_conflicts",
+} as const;
+
+export type SyncGatewayProjection =
+  (typeof SYNC_GATEWAY_PROJECTIONS)[keyof typeof SYNC_GATEWAY_PROJECTIONS];
+
+/** Effect kinds that require special handling at the Apps Script boundary. */
+export const SYNC_GATEWAY_EFFECT_KINDS = {
+  RESOLUTION_DELETE: "resolution_delete",
+} as const;
+
 /** Terminal and retryable statuses returned for one gateway effect. */
 export const SYNC_GATEWAY_EFFECT_RESULT_STATUSES = {
   APPLIED: "applied",
