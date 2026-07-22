@@ -13,6 +13,8 @@ import {
   type ObservedRowChange,
   type NormalizedRow,
   type Presence,
+  type LookupResult,
+  LOOKUP_RESULT_KINDS,
 } from "../../core/index.js";
 import { ROW_OUTCOMES } from "../../core/evaluate/constants.js";
 import { PRESENCE_KINDS } from "../../core/state/constants.js";
@@ -22,6 +24,7 @@ import {
   ROW_OPERATIONS,
 } from "../../core/model/constants.js";
 import { STORAGE_ERROR_CODES, StorageError } from "../errors.js";
+import { EMPTY_ARRAY_LENGTH_ZERO } from "../constants.js";
 import type { DatabaseSyncLike } from "../sqlite/sqliteBridge.js";
 import { fromSqlNullable, toSqlNullable } from "../sqlite/sqlState.js";
 import {
@@ -40,6 +43,11 @@ import type {
   ReceiptRow,
   RowBindingRow,
 } from "./observationTypes.js";
+
+interface SqlRowBindingRow {
+  readonly entity_id: string | null;
+  readonly state: RowBindingRow["state"];
+}
 
 interface EventSequenceRow {
   readonly next_sequence: number;
@@ -177,14 +185,17 @@ export function requireKnownBinding(
   rowBindingId: string,
 ): RowBindingRow {
   const binding = db.prepare(READ_ROW_BINDING_SQL)
-    .get<RowBindingRow>(rowBindingId, logicalSheetId);
+    .get<SqlRowBindingRow>(rowBindingId, logicalSheetId);
   if (binding === undefined) {
     throw new StorageError(
       STORAGE_ERROR_CODES.OBSERVATION_STORAGE_INCONSISTENT,
       "event-bearing observations require a known row binding",
     );
   }
-  return binding;
+  return {
+    entity_id: fromSqlNullable(binding.entity_id),
+    state: binding.state,
+  };
 }
 
 /** Finds a duplicate event represented by an unchanged active conflict candidate. */
@@ -197,9 +208,9 @@ export function findMatchingCandidateEventId(
   if (
     input.evaluation.outcome === ROW_OUTCOMES.QUARANTINE ||
     input.evaluation.acceptedFields.length > 0 ||
-    input.evaluation.conflicts.length === 0 ||
+    input.evaluation.conflicts.length === EMPTY_ARRAY_LENGTH_ZERO ||
     binding.state !== ROW_BINDING_STATES.ACTIVE ||
-    binding.entity_id === null
+    binding.entity_id.kind === PRESENCE_KINDS.ABSENT
   ) {
     return null;
   }
@@ -214,14 +225,14 @@ export function findMatchingCandidateEventId(
       conflict.fieldName,
     );
     if (
-      active === null ||
-      (active.status !== CONFLICT_STATUSES.OPEN &&
-        active.status !== CONFLICT_STATUSES.NEEDS_REBASE) ||
-      active.active_candidate_hash !== candidateHash(conflict)
+      active.kind === LOOKUP_RESULT_KINDS.NOT_FOUND ||
+      (active.value.status !== CONFLICT_STATUSES.OPEN &&
+        active.value.status !== CONFLICT_STATUSES.NEEDS_REBASE) ||
+      active.value.active_candidate_hash !== candidateHash(conflict)
     ) {
       return null;
     }
-    eventIds.add(active.event_id);
+    eventIds.add(active.value.event_id);
   }
   return eventIds.size === 1 ? [...eventIds][0] ?? null : null;
 }
@@ -233,10 +244,12 @@ export function readActiveCandidate(
   projection: string,
   rowBindingId: string,
   fieldName: string,
-): ActiveCandidateRow | null {
+): LookupResult<ActiveCandidateRow> {
   const candidate = db.prepare(READ_ACTIVE_CANDIDATE_SQL)
     .get<ActiveCandidateRow>(physicalSheetId, projection, rowBindingId, fieldName);
-  return candidate ?? null;
+  return candidate === undefined
+    ? { kind: LOOKUP_RESULT_KINDS.NOT_FOUND }
+    : { kind: LOOKUP_RESULT_KINDS.FOUND, value: candidate };
 }
 
 /** Finds a prior event with the caller-supplied idempotency key. */

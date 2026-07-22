@@ -13,7 +13,9 @@ import type {
   Applicability,
   Presence,
   QuarantinePlan,
+  RowBindingState,
   RowEvaluationResult,
+  ConflictStatus,
 } from "../../core/index.js";
 import { CANONICAL_COMMIT_RESULT_KINDS } from "./canonicalCommit.js";
 import type { CanonicalCommitInput, CanonicalCommitResult } from "./canonicalCommit.js";
@@ -108,8 +110,8 @@ export interface EventRow {
 }
 
 export interface RowBindingRow {
-  readonly entity_id: string | null;
-  readonly state: "candidate" | "active" | "tombstoned" | "ambiguous";
+  readonly entity_id: Presence<string>;
+  readonly state: RowBindingState;
 }
 
 export interface ActiveCandidateRow {
@@ -117,7 +119,7 @@ export interface ActiveCandidateRow {
   readonly active_candidate_hash: string;
   readonly candidate_epoch: number;
   readonly event_id: string;
-  readonly status: "OPEN" | "NEEDS_REBASE" | "RESOLVED";
+  readonly status: ConflictStatus;
 }
 
 export interface CreatedEvent {
