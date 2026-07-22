@@ -7,11 +7,17 @@
  */
 
 import { STORAGE_ERROR_CODES, StorageError } from "../errors.js";
-import type { FieldOwnership, NormalizedCell } from "../../core/index.js";
+import {
+  APPLICABILITY_KINDS,
+  PRESENCE_KINDS,
+} from "../../core/state/constants.js";
+import { ROW_OPERATIONS } from "../../core/model/constants.js";
+import type { Applicability, FieldOwnership, NormalizedCell, Presence } from "../../core/index.js";
 import type { DatabaseSyncLike } from "../sqlite/sqliteBridge.js";
 import { isFencingValid } from "../sync/writerLease.js";
 import type { FencingContext } from "../sync/writerLease.js";
 import type { NewEffect } from "../sync/effectOutbox.js";
+import { toSqlNullable } from "../sqlite/sqlState.js";
 
 const FENCE_EXISTS_SQL = `
   SELECT 1 FROM writer_lease
@@ -71,32 +77,55 @@ const INSERT_PENDING_EFFECT_SQL = `
   WHERE EXISTS (${FENCE_EXISTS_SQL})
 `;
 
+/** Runtime values returned by the canonical commit writer. */
+export const CANONICAL_COMMIT_RESULT_KINDS = {
+  APPLIED: "applied",
+  STALE: "stale",
+  FENCED_OUT: "fenced_out",
+  INVALID: "invalid",
+} as const;
+
+/** Closed set of canonical commit result kinds. */
+export type CanonicalCommitResultKind =
+  (typeof CANONICAL_COMMIT_RESULT_KINDS)[keyof typeof CANONICAL_COMMIT_RESULT_KINDS];
+
+/** Runtime values describing which canonical target became stale. */
+export const CANONICAL_COMMIT_STALE_TARGETS = {
+  ENTITY: "entity",
+  FIELD: "field",
+} as const;
+
+/** Closed set of canonical stale-target kinds. */
+export type CanonicalCommitStaleTarget =
+  (typeof CANONICAL_COMMIT_STALE_TARGETS)[keyof typeof CANONICAL_COMMIT_STALE_TARGETS];
+
 /** A field value the writer should insert or compare-and-set. */
 export interface CanonicalFieldWrite {
   readonly fieldName: string;
   readonly value: NormalizedCell;
-  /** `null` is required for inserts; updates require the current revision. */
-  readonly expectedFieldRevision: number | null;
+  /** Inserts have no prior revision; updates carry the revision used by CAS. */
+  readonly expectedFieldRevision: Applicability<number>;
   readonly ownership: FieldOwnership;
 }
 
 /** Shared canonical commit fields used by every row operation. */
 interface CanonicalCommitBase {
   readonly entityId: string;
-  readonly acceptedSnapshotHash: string | null;
+  /** Snapshot hash is absent when the caller has no accepted snapshot evidence. */
+  readonly acceptedSnapshotHash: Presence<string>;
   /** Effects are inserted in this same savepoint as the canonical mutation. */
   readonly effects: readonly NewEffect[];
 }
 
 /** An insert prepared from one core evaluation result. */
 export interface CanonicalInsertCommitInput extends CanonicalCommitBase {
-  readonly kind: "insert";
+  readonly kind: typeof ROW_OPERATIONS.INSERT;
   readonly fields: readonly CanonicalFieldWrite[];
 }
 
 /** A field-level update prepared from one core evaluation result. */
 export interface CanonicalUpdateCommitInput extends CanonicalCommitBase {
-  readonly kind: "update";
+  readonly kind: typeof ROW_OPERATIONS.UPDATE;
   readonly fields: readonly CanonicalFieldWrite[];
 }
 
@@ -105,7 +134,7 @@ export type CanonicalFieldCommitInput = CanonicalInsertCommitInput | CanonicalUp
 
 /** A confirmed delete that turns an active canonical entity into a tombstone. */
 export interface CanonicalDeleteCommitInput extends CanonicalCommitBase {
-  readonly kind: "delete";
+  readonly kind: typeof ROW_OPERATIONS.DELETE;
   /** Entity revision observed with the explicit delete evidence. */
   readonly expectedEntityRevision: number;
 }
@@ -116,13 +145,20 @@ export type CanonicalCommitInput = CanonicalFieldCommitInput | CanonicalDeleteCo
 /** Observable result of a fenced canonical commit attempt. */
 export type CanonicalCommitResult =
   | {
-      readonly kind: "applied";
+      readonly kind: typeof CANONICAL_COMMIT_RESULT_KINDS.APPLIED;
       readonly entityRevision: number;
       readonly fieldRevisions: ReadonlyMap<string, number>;
     }
-  | { readonly kind: "stale"; readonly target: "entity" | "field"; readonly fieldName: string | null }
-  | { readonly kind: "fenced_out" }
-  | { readonly kind: "invalid"; readonly reason: string };
+  | {
+      readonly kind: typeof CANONICAL_COMMIT_RESULT_KINDS.STALE;
+      readonly target: CanonicalCommitStaleTarget;
+      readonly fieldName: Applicability<string>;
+    }
+  | { readonly kind: typeof CANONICAL_COMMIT_RESULT_KINDS.FENCED_OUT }
+  | {
+      readonly kind: typeof CANONICAL_COMMIT_RESULT_KINDS.INVALID;
+      readonly reason: string;
+    };
 
 /**
  * Commits an insert, field-level update, or confirmed delete under a writer fence.
@@ -137,17 +173,21 @@ export function commitCanonicalChanges(
   input: CanonicalCommitInput,
 ): CanonicalCommitResult {
   const invalidReason = validateInput(input);
-  if (invalidReason !== null) return { kind: "invalid", reason: invalidReason };
-  if (!isFencingValid(db, fence)) return { kind: "fenced_out" };
+  if (invalidReason.kind === PRESENCE_KINDS.PRESENT) {
+    return { kind: CANONICAL_COMMIT_RESULT_KINDS.INVALID, reason: invalidReason.value };
+  }
+  if (!isFencingValid(db, fence)) {
+    return { kind: CANONICAL_COMMIT_RESULT_KINDS.FENCED_OUT };
+  }
 
   db.exec("SAVEPOINT canonical_commit");
   try {
-    const result = input.kind === "insert"
+    const result = input.kind === ROW_OPERATIONS.INSERT
       ? applyInsert(db, fence, input)
-      : input.kind === "update"
+      : input.kind === ROW_OPERATIONS.UPDATE
         ? applyUpdate(db, fence, input)
         : applyDelete(db, fence, input);
-    if (result.kind !== "applied") {
+    if (result.kind !== CANONICAL_COMMIT_RESULT_KINDS.APPLIED) {
       rollbackSavepoint(db, "canonical_commit");
       return result;
     }
@@ -160,7 +200,9 @@ export function commitCanonicalChanges(
     return result;
   } catch (error: unknown) {
     rollbackSavepoint(db, "canonical_commit");
-    if (error instanceof FenceLostError) return { kind: "fenced_out" };
+    if (error instanceof FenceLostError) {
+      return { kind: CANONICAL_COMMIT_RESULT_KINDS.FENCED_OUT };
+    }
     throw error;
   }
 }
@@ -172,7 +214,7 @@ function applyInsert(
 ): CanonicalCommitResult {
   const entityResult = db.prepare(INSERT_CANONICAL_ENTITY_SQL).run(
     input.entityId,
-    input.acceptedSnapshotHash,
+    toSqlNullable(input.acceptedSnapshotHash),
     ...fenceParameters(fence),
   );
   if (entityResult.changes !== 1) return lostFenceOrStaleEntity(db, fence);
@@ -187,11 +229,21 @@ function applyInsert(
       ...fenceParameters(fence),
     );
     if (result.changes !== 1) throwFenceIfLost(db, fence);
-    if (result.changes !== 1) return { kind: "stale", target: "field", fieldName: field.fieldName };
+    if (result.changes !== 1) {
+      return {
+        kind: CANONICAL_COMMIT_RESULT_KINDS.STALE,
+        target: CANONICAL_COMMIT_STALE_TARGETS.FIELD,
+        fieldName: applicableFieldName(field.fieldName),
+      };
+    }
     fieldRevisions.set(field.fieldName, 1);
   }
 
-  return { kind: "applied", entityRevision: 1, fieldRevisions };
+  return {
+    kind: CANONICAL_COMMIT_RESULT_KINDS.APPLIED,
+    entityRevision: 1,
+    fieldRevisions,
+  };
 }
 
 function applyUpdate(
@@ -201,7 +253,13 @@ function applyUpdate(
 ): CanonicalCommitResult {
   const entity = db.prepare(READ_CANONICAL_ENTITY_SQL)
     .get(input.entityId) as { entity_revision: number } | undefined;
-  if (entity === undefined) return { kind: "stale", target: "entity", fieldName: null };
+  if (entity === undefined) {
+    return {
+      kind: CANONICAL_COMMIT_RESULT_KINDS.STALE,
+      target: CANONICAL_COMMIT_STALE_TARGETS.ENTITY,
+      fieldName: notApplicableFieldName(),
+    };
+  }
 
   const fieldRevisions = new Map<string, number>();
   for (const field of input.fields) {
@@ -209,28 +267,36 @@ function applyUpdate(
       serializeCell(field.value),
       input.entityId,
       field.fieldName,
-      field.expectedFieldRevision,
+      requireApplicableRevision(field.expectedFieldRevision),
       field.ownership,
       ...fenceParameters(fence),
     );
     if (result.changes !== 1) {
       throwFenceIfLost(db, fence);
-      return { kind: "stale", target: "field", fieldName: field.fieldName };
+      return {
+        kind: CANONICAL_COMMIT_RESULT_KINDS.STALE,
+        target: CANONICAL_COMMIT_STALE_TARGETS.FIELD,
+        fieldName: applicableFieldName(field.fieldName),
+      };
     }
-    fieldRevisions.set(field.fieldName, field.expectedFieldRevision! + 1);
+    fieldRevisions.set(field.fieldName, requireApplicableRevision(field.expectedFieldRevision) + 1);
   }
 
   const nextEntityRevision = entity.entity_revision + 1;
   const entityResult = db.prepare(UPDATE_CANONICAL_ENTITY_SQL).run(
     nextEntityRevision,
-    input.acceptedSnapshotHash,
+    toSqlNullable(input.acceptedSnapshotHash),
     input.entityId,
     entity.entity_revision,
     ...fenceParameters(fence),
   );
   if (entityResult.changes !== 1) return lostFenceOrStaleEntity(db, fence);
 
-  return { kind: "applied", entityRevision: nextEntityRevision, fieldRevisions };
+  return {
+    kind: CANONICAL_COMMIT_RESULT_KINDS.APPLIED,
+    entityRevision: nextEntityRevision,
+    fieldRevisions,
+  };
 }
 
 /** Marks an entity tombstoned only when the observed entity revision is still current. */
@@ -242,7 +308,7 @@ function applyDelete(
   const nextEntityRevision = input.expectedEntityRevision + 1;
   const result = db.prepare(DELETE_CANONICAL_ENTITY_SQL).run(
     nextEntityRevision,
-    input.acceptedSnapshotHash,
+    toSqlNullable(input.acceptedSnapshotHash),
     input.entityId,
     input.expectedEntityRevision,
     ...fenceParameters(fence),
@@ -250,7 +316,7 @@ function applyDelete(
   if (result.changes !== 1) return lostFenceOrStaleEntity(db, fence);
 
   return {
-    kind: "applied",
+    kind: CANONICAL_COMMIT_RESULT_KINDS.APPLIED,
     entityRevision: nextEntityRevision,
     fieldRevisions: new Map(),
   };
@@ -268,17 +334,17 @@ function insertPendingEffect(
     effect.logicalSheetId,
     effect.physicalSheetId,
     effect.projection,
-    effect.rowBindingId,
-    effect.conflictId,
+    toSqlNullable(effect.rowBindingId),
+    toSqlNullable(effect.conflictId),
     effect.targetKind,
     effect.targetId,
-    effect.targetEntityRevision,
-    effect.targetFieldRevisionHash,
-    effect.targetCanonicalCommitId,
+    toSqlNullable(effect.targetEntityRevision),
+    toSqlNullable(effect.targetFieldRevisionHash),
+    toSqlNullable(effect.targetCanonicalCommitId),
     effect.expectedVisibleRevision,
     effect.expectedVisibleHash,
-    effect.repairGuardHash,
-    effect.sourceQuarantineId,
+    toSqlNullable(effect.repairGuardHash),
+    toSqlNullable(effect.sourceQuarantineId),
     effect.payloadJson,
     effect.payloadHash,
     effect.effectDedupeKey,
@@ -295,35 +361,36 @@ function insertPendingEffect(
   }
 }
 
-function validateInput(input: CanonicalCommitInput): string | null {
-  if (input.entityId.length === 0) return "entity ID is required";
-  if (input.kind === "delete") {
+function validateInput(input: CanonicalCommitInput): Presence<string> {
+  if (input.entityId.length === 0) return presentError("entity ID is required");
+  if (input.kind === ROW_OPERATIONS.DELETE) {
     return Number.isSafeInteger(input.expectedEntityRevision) && input.expectedEntityRevision >= 1
-      ? null
-      : "delete must have a positive expected entity revision";
+      ? absentError()
+      : presentError("delete must have a positive expected entity revision");
   }
-  if (input.fields.length === 0) return "at least one accepted field is required";
+  if (input.fields.length === 0) return presentError("at least one accepted field is required");
 
   const fieldNames = new Set<string>();
   for (const field of input.fields) {
     if (field.fieldName.length === 0 || fieldNames.has(field.fieldName)) {
-      return "field names must be non-empty and unique";
+      return presentError("field names must be non-empty and unique");
     }
     fieldNames.add(field.fieldName);
 
-    if (input.kind === "insert" && field.expectedFieldRevision !== null) {
-      return "insert fields must have a null expected revision";
+    if (input.kind === ROW_OPERATIONS.INSERT &&
+      field.expectedFieldRevision.kind !== APPLICABILITY_KINDS.NOT_APPLICABLE) {
+      return presentError("insert fields must not have an expected revision");
     }
     if (
-      input.kind === "update" &&
-      (field.expectedFieldRevision === null ||
-        !Number.isSafeInteger(field.expectedFieldRevision) ||
-        field.expectedFieldRevision < 1)
+      input.kind === ROW_OPERATIONS.UPDATE &&
+      (field.expectedFieldRevision.kind !== APPLICABILITY_KINDS.APPLICABLE ||
+        !Number.isSafeInteger(field.expectedFieldRevision.value) ||
+        field.expectedFieldRevision.value < 1)
     ) {
-      return "update fields must have a positive expected revision";
+      return presentError("update fields must have a positive expected revision");
     }
   }
-  return null;
+  return absentError();
 }
 
 function fenceParameters(fence: FencingContext): readonly [string, number, string, number] {
@@ -339,8 +406,38 @@ function lostFenceOrStaleEntity(
   fence: FencingContext,
 ): CanonicalCommitResult {
   return isFencingValid(db, fence)
-    ? { kind: "stale", target: "entity", fieldName: null }
-    : { kind: "fenced_out" };
+    ? {
+        kind: CANONICAL_COMMIT_RESULT_KINDS.STALE,
+        target: CANONICAL_COMMIT_STALE_TARGETS.ENTITY,
+        fieldName: notApplicableFieldName(),
+      }
+    : { kind: CANONICAL_COMMIT_RESULT_KINDS.FENCED_OUT };
+}
+
+function requireApplicableRevision(revision: Applicability<number>): number {
+  if (revision.kind !== APPLICABILITY_KINDS.APPLICABLE) {
+    throw new StorageError(
+      STORAGE_ERROR_CODES.INVALID_OBSERVATION_INPUT,
+      "an update field must carry an applicable expected revision",
+    );
+  }
+  return revision.value;
+}
+
+function applicableFieldName(fieldName: string): Applicability<string> {
+  return { kind: APPLICABILITY_KINDS.APPLICABLE, value: fieldName };
+}
+
+function notApplicableFieldName(): Applicability<string> {
+  return { kind: APPLICABILITY_KINDS.NOT_APPLICABLE };
+}
+
+function presentError(value: string): Presence<string> {
+  return { kind: PRESENCE_KINDS.PRESENT, value };
+}
+
+function absentError(): Presence<string> {
+  return { kind: PRESENCE_KINDS.ABSENT };
 }
 
 function throwFenceIfLost(db: DatabaseSyncLike, fence: FencingContext): void {

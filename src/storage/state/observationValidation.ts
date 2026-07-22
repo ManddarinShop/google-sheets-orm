@@ -7,6 +7,11 @@
 
 import { stableHash } from "../../core/index.js";
 import type { ObservedEditBatch } from "../../core/index.js";
+import {
+  APPLICABILITY_KINDS,
+  PRESENCE_KINDS,
+} from "../../core/state/constants.js";
+import type { Applicability, Presence } from "../../core/state/types.js";
 import { ROW_OUTCOMES } from "../../core/evaluate/constants.js";
 import { ROW_OPERATIONS } from "../../core/model/constants.js";
 import { EMPTY_STRING_LENGTH_ZERO } from "../constants.js";
@@ -66,29 +71,23 @@ export function validatePersistObservedRowInput(input: PersistObservedRowInput):
     );
   }
   validateObservation(input.observation);
-  if (
-    input.event !== null &&
-    (input.event.eventKey.length === EMPTY_STRING_LENGTH_ZERO ||
-      input.event.payloadHash.length === EMPTY_STRING_LENGTH_ZERO)
-  ) {
+  if (input.event.kind === PRESENCE_KINDS.PRESENT &&
+    (input.event.value.eventKey.length === EMPTY_STRING_LENGTH_ZERO ||
+      input.event.value.payloadHash.length === EMPTY_STRING_LENGTH_ZERO)) {
     throw new StorageError(
       STORAGE_ERROR_CODES.INVALID_OBSERVATION_INPUT,
       "event key and payload hash are required when an event is present",
     );
   }
-  if (
-    input.event === null &&
-    input.evaluation.outcome !== ROW_OUTCOMES.QUARANTINE
-  ) {
+  if (input.event.kind === PRESENCE_KINDS.ABSENT &&
+    input.evaluation.outcome !== ROW_OUTCOMES.QUARANTINE) {
     throw new StorageError(
       STORAGE_ERROR_CODES.INVALID_OBSERVATION_INPUT,
       "only quarantined rows may omit an event identity",
     );
   }
-  if (
-    input.evaluation.outcome === ROW_OUTCOMES.QUARANTINE &&
-    input.canonical !== null
-  ) {
+  if (input.evaluation.outcome === ROW_OUTCOMES.QUARANTINE &&
+    input.canonical.kind === PRESENCE_KINDS.PRESENT) {
     throw new StorageError(
       STORAGE_ERROR_CODES.INVALID_OBSERVATION_INPUT,
       "a quarantined row cannot carry a canonical mutation",
@@ -98,15 +97,18 @@ export function validatePersistObservedRowInput(input: PersistObservedRowInput):
   const needsCanonical = input.evaluation.acceptedFields.length > 0 ||
     (row.operation === ROW_OPERATIONS.DELETE &&
       input.evaluation.outcome === ROW_OUTCOMES.ACCEPTED);
-  if (needsCanonical !== (input.canonical !== null)) {
+  const hasCanonical = input.canonical.kind === PRESENCE_KINDS.PRESENT;
+  if (needsCanonical !== hasCanonical) {
     throw new StorageError(
       STORAGE_ERROR_CODES.INVALID_OBSERVATION_INPUT,
       "accepted canonical work must have exactly one canonical mutation",
     );
   }
-  if (input.canonical !== null) validateCanonicalMutation(input.canonical, row.operation, input.evaluation);
+  if (hasCanonical) {
+    validateCanonicalMutation(input.canonical.value, row.operation, input.evaluation);
+  }
   validateEffects(input.effects, input.batch);
-  if (input.canonical !== null) validateEffects(input.canonical.commit.effects, input.batch);
+  if (hasCanonical) validateEffects(input.canonical.value.commit.effects, input.batch);
 }
 
 /** Requires a valid row index and returns its observed row. */
@@ -201,13 +203,15 @@ function validateObservation(observation: ObservationAttemptInput): void {
       );
     }
   }
-  if (observation.editorActorSource === "google_active_user" && observation.editorActorId === null) {
+  if (observation.editorActorSource === "google_active_user" &&
+    observation.editorActorId.kind === PRESENCE_KINDS.ABSENT) {
     throw new StorageError(
       STORAGE_ERROR_CODES.INVALID_OBSERVATION_INPUT,
       "a verified editor source requires an editor actor ID",
     );
   }
-  if (observation.editorActorSource === "unavailable" && observation.editorActorId !== null) {
+  if (observation.editorActorSource === "unavailable" &&
+    observation.editorActorId.kind === PRESENCE_KINDS.PRESENT) {
     throw new StorageError(
       STORAGE_ERROR_CODES.INVALID_OBSERVATION_INPUT,
       "an unavailable editor source cannot claim an editor actor ID",
@@ -254,10 +258,10 @@ function validateCanonicalMutation(
           `canonical field ${field.fieldName} does not match the core result`,
         );
       }
-      const expectedRevision = mutation.commit.kind === ROW_OPERATIONS.INSERT
-        ? null
-        : accepted.nextFieldRevision - 1;
-      if (field.expectedFieldRevision !== expectedRevision) {
+      const expectedRevision: Applicability<number> = mutation.commit.kind === ROW_OPERATIONS.INSERT
+        ? { kind: APPLICABILITY_KINDS.NOT_APPLICABLE }
+        : { kind: APPLICABILITY_KINDS.APPLICABLE, value: accepted.nextFieldRevision - 1 };
+      if (!sameApplicability(field.expectedFieldRevision, expectedRevision)) {
         throw new StorageError(
           STORAGE_ERROR_CODES.INVALID_OBSERVATION_INPUT,
           `canonical field ${field.fieldName} has an unexpected base revision`,
@@ -279,10 +283,10 @@ function validateCanonicalMutation(
     }
     keyNames.add(change.fieldName);
     if (
-      (change.previousNormalizedKey !== null &&
-        change.previousNormalizedKey.length === EMPTY_STRING_LENGTH_ZERO) ||
-      (change.nextNormalizedKey !== null &&
-        change.nextNormalizedKey.length === EMPTY_STRING_LENGTH_ZERO)
+      (change.previousNormalizedKey.kind === PRESENCE_KINDS.PRESENT &&
+        change.previousNormalizedKey.value.length === EMPTY_STRING_LENGTH_ZERO) ||
+      (change.nextNormalizedKey.kind === PRESENCE_KINDS.PRESENT &&
+        change.nextNormalizedKey.value.length === EMPTY_STRING_LENGTH_ZERO)
     ) {
       throw new StorageError(
         STORAGE_ERROR_CODES.INVALID_OBSERVATION_INPUT,
@@ -290,6 +294,12 @@ function validateCanonicalMutation(
       );
     }
   }
+}
+
+function sameApplicability<T>(left: Applicability<T>, right: Applicability<T>): boolean {
+  if (left.kind !== right.kind) return false;
+  if (left.kind === APPLICABILITY_KINDS.NOT_APPLICABLE) return true;
+  return right.kind === APPLICABILITY_KINDS.APPLICABLE && left.value === right.value;
 }
 
 function validateEffects(effects: readonly NewEffect[], batch: ObservedEditBatch): void {

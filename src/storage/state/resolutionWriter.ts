@@ -15,9 +15,15 @@ import {
 } from "../../core/encoding/constants.js";
 import { isJavaScriptType } from "../../core/encoding/typeGuards.js";
 import { CONFLICT_STATUSES } from "../../core/model/constants.js";
+import {
+  LOOKUP_RESULT_KINDS,
+  PRESENCE_KINDS,
+} from "../../core/state/constants.js";
 import type {
   ConflictStatus,
+  LookupResult,
   NormalizedCell,
+  Presence,
   ResolutionCommand,
   SyncConflict,
 } from "../../core/index.js";
@@ -286,34 +292,42 @@ export function persistResolutionCommand(
     return withImmediateTransaction(db, () => {
       assertCurrentFence(db, fence);
       const duplicate = findExistingCommand(db, input.command);
-      if (duplicate !== null) {
+      if (duplicate.kind === LOOKUP_RESULT_KINDS.FOUND) {
+        const duplicateResult = duplicate.value;
         // A durable processing receipt already owns the request. Only a terminal
         // replay may consume a still-checked control with a reset projection.
-        if (duplicate.status !== RESOLUTION_COMMAND_STATUSES.PROCESSING) {
+        if (duplicateResult.status !== RESOLUTION_COMMAND_STATUSES.PROCESSING) {
           appendResolutionEffects(db, fence, input, input.duplicateEffects ?? []);
         }
-        return duplicate;
+        return duplicateResult;
       }
 
-      const conflict = readConflict(db, input.logicalSheetId, input.command.targetConflictId);
-      if (conflict === null) {
+      const conflictResult = readConflict(db, input.logicalSheetId, input.command.targetConflictId);
+      if (conflictResult.kind === LOOKUP_RESULT_KINDS.NOT_FOUND) {
         return {
           kind: PERSIST_RESOLUTION_RESULT_KINDS.REJECTED,
           commandId: input.command.commandId,
           reason: "target conflict does not exist in the logical sheet",
         };
       }
+      const conflict = conflictResult.value;
 
       insertProcessingCommand(db, fence, input);
-      const pointer = readActiveCandidatePointer(db, conflict);
-      const transition = pointer !== null &&
-        pointer.candidate_epoch === input.command.expectedCandidateEpoch &&
-        pointer.active_candidate_hash === input.command.activeCandidateHash
+      const pointerResult = readActiveCandidatePointer(db, conflict);
+      const transition = pointerResult.kind === LOOKUP_RESULT_KINDS.FOUND &&
+        pointerResult.value.candidate_epoch === input.command.expectedCandidateEpoch &&
+        pointerResult.value.active_candidate_hash === input.command.activeCandidateHash
         ? applyResolution(conflict, input.command)
         : { kind: CONFLICT_TRANSITION_KINDS.STALE, conflict };
 
       if (transition.kind === CONFLICT_TRANSITION_KINDS.RESOLVED) {
-        applyResolvedCommand(db, fence, input, conflict, pointer);
+        if (pointerResult.kind === LOOKUP_RESULT_KINDS.NOT_FOUND) {
+          throw new StorageError(
+            STORAGE_ERROR_CODES.RESOLUTION_STORAGE_INCONSISTENT,
+            "resolved command lost its active candidate pointer",
+          );
+        }
+        applyResolvedCommand(db, fence, input, conflict, pointerResult.value);
         return {
           kind: PERSIST_RESOLUTION_RESULT_KINDS.APPLIED,
           commandId: input.command.commandId,
@@ -333,7 +347,7 @@ export function persistResolutionCommand(
       return {
         kind: PERSIST_RESOLUTION_RESULT_KINDS.REJECTED,
         commandId: input.command.commandId,
-        reason: transition.reason,
+        reason: transition.error.code,
       };
     });
   } catch (error: unknown) {
@@ -373,7 +387,8 @@ function validateInput(input: PersistResolutionCommandInput): void {
     const isConflictControlProjection =
       effect.projection === "sync_conflicts" &&
       effect.targetKind === "conflict" &&
-      effect.conflictId === command.targetConflictId;
+      effect.conflictId.kind === PRESENCE_KINDS.PRESENT &&
+      effect.conflictId.value === command.targetConflictId;
     if (effect.logicalSheetId !== input.logicalSheetId && !isConflictControlProjection) {
       throw new StorageError(
         STORAGE_ERROR_CODES.INVALID_RESOLUTION_COMMAND,
@@ -386,13 +401,13 @@ function validateInput(input: PersistResolutionCommandInput): void {
 function findExistingCommand(
   db: DatabaseSyncLike,
   command: ResolutionCommand,
-): Extract<
+): LookupResult<Extract<
   PersistResolutionCommandResult,
   { readonly kind: typeof PERSIST_RESOLUTION_RESULT_KINDS.DUPLICATE }
-> | null {
+>> {
   const rows = db.prepare(FIND_EXISTING_COMMAND_SQL)
     .all<CommandRow>(command.commandId, command.requestKey);
-  if (rows.length === 0) return null;
+  if (rows.length === 0) return { kind: LOOKUP_RESULT_KINDS.NOT_FOUND };
   if (rows.length !== 1) {
     throw new StorageError(
       STORAGE_ERROR_CODES.RESOLUTION_COMMAND_IDENTITY_CONFLICT,
@@ -413,9 +428,12 @@ function findExistingCommand(
     );
   }
   return {
-    kind: PERSIST_RESOLUTION_RESULT_KINDS.DUPLICATE,
-    commandId: existing.command_id,
-    status: existing.status,
+    kind: LOOKUP_RESULT_KINDS.FOUND,
+    value: {
+      kind: PERSIST_RESOLUTION_RESULT_KINDS.DUPLICATE,
+      commandId: existing.command_id,
+      status: existing.status,
+    },
   };
 }
 
@@ -436,46 +454,56 @@ function readConflict(
   db: DatabaseSyncLike,
   logicalSheetId: string,
   conflictId: string,
-): SyncConflict | null {
+): LookupResult<SyncConflict> {
   const row = db.prepare(READ_CONFLICT_SQL)
     .get<ConflictRow>(logicalSheetId, conflictId);
-  if (row === undefined) return null;
+  if (row === undefined) return { kind: LOOKUP_RESULT_KINDS.NOT_FOUND };
   return {
-    conflictId: row.conflict_id,
-    conflictGroupId: row.conflict_group_id,
-    eventId: row.event_id,
-    rowBindingId: row.row_binding_id,
-    entityId: row.entity_id,
-    fieldName: row.field_name,
-    userValue: parseNormalizedCell(row.user_value, "user_value"),
-    userBaseRevision: row.user_base_revision,
-    canonicalValueAtDetection: parseNormalizedCell(
-      row.canonical_value_at_detection,
-      "canonical_value_at_detection",
-    ),
-    canonicalRevisionAtDetection: row.canonical_revision_at_detection,
-    currentCanonicalValue: parseNormalizedCell(row.current_canonical_value, "current_canonical_value"),
-    currentCanonicalRevision: row.current_canonical_revision,
-    candidateEpoch: row.candidate_epoch,
-    status: requireConflictStatus(row.status),
-    resolutionCommandId: row.resolution_command_id,
+    kind: LOOKUP_RESULT_KINDS.FOUND,
+    value: {
+      conflictId: row.conflict_id,
+      conflictGroupId: fromSqlNullable(row.conflict_group_id),
+      eventId: row.event_id,
+      rowBindingId: row.row_binding_id,
+      entityId: row.entity_id,
+      fieldName: row.field_name,
+      userValue: parseNormalizedCell(row.user_value, "user_value"),
+      userBaseRevision: row.user_base_revision,
+      canonicalValueAtDetection: parseNormalizedCell(
+        row.canonical_value_at_detection,
+        "canonical_value_at_detection",
+      ),
+      canonicalRevisionAtDetection: row.canonical_revision_at_detection,
+      currentCanonicalValue: parseNormalizedCell(row.current_canonical_value, "current_canonical_value"),
+      currentCanonicalRevision: row.current_canonical_revision,
+      candidateEpoch: row.candidate_epoch,
+      status: requireConflictStatus(row.status),
+      resolutionCommandId: fromSqlNullable(row.resolution_command_id),
+    },
   };
 }
 
 function readActiveCandidatePointer(
   db: DatabaseSyncLike,
   conflict: SyncConflict,
-): ActiveCandidatePointer | null {
+): LookupResult<ActiveCandidatePointer> {
   const rows = db.prepare(READ_ACTIVE_CANDIDATE_POINTER_SQL)
     .all(conflict.rowBindingId, conflict.fieldName, conflict.conflictId) as ActiveCandidatePointer[];
-  if (rows.length === 0) return null;
+  if (rows.length === 0) return { kind: LOOKUP_RESULT_KINDS.NOT_FOUND };
   if (rows.length !== 1) {
     throw new StorageError(
       STORAGE_ERROR_CODES.RESOLUTION_STORAGE_INCONSISTENT,
       "a conflict cannot be active in more than one physical projection",
     );
   }
-  return rows[0] ?? null;
+  const pointer = rows[0];
+  if (pointer === undefined) {
+    throw new StorageError(
+      STORAGE_ERROR_CODES.RESOLUTION_STORAGE_INCONSISTENT,
+      "active candidate lookup returned an empty result after reporting a row",
+    );
+  }
+  return { kind: LOOKUP_RESULT_KINDS.FOUND, value: pointer };
 }
 
 function insertProcessingCommand(
@@ -506,14 +534,8 @@ function applyResolvedCommand(
   fence: FencingContext,
   input: PersistResolutionCommandInput,
   conflict: SyncConflict,
-  pointer: ActiveCandidatePointer | null,
+  pointer: ActiveCandidatePointer,
 ): void {
-  if (pointer === null) {
-    throw new StorageError(
-      STORAGE_ERROR_CODES.RESOLUTION_STORAGE_INCONSISTENT,
-      "resolved command lost its active candidate pointer",
-    );
-  }
   const command = input.command;
   const conflictResult = db.prepare(MARK_CONFLICT_RESOLVED_SQL).run(
     command.commandId,
@@ -708,6 +730,13 @@ function requireConflictStatus(value: string): ConflictStatus {
     STORAGE_ERROR_CODES.INVALID_STORED_CONFLICT,
     `stored conflict has invalid status ${value}`,
   );
+}
+
+/** Converts a nullable SQL column into the explicit internal presence contract. */
+function fromSqlNullable<T>(value: T | null): Presence<T> {
+  return value === null
+    ? { kind: PRESENCE_KINDS.ABSENT }
+    : { kind: PRESENCE_KINDS.PRESENT, value };
 }
 
 function assertCurrentFence(db: DatabaseSyncLike, fence: FencingContext): void {

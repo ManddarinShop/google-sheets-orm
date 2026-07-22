@@ -20,6 +20,8 @@ import {
 import type { ConflictResolutionError } from "./errors.js";
 import { CONFLICT_STATUSES } from "../model/constants.js";
 import type { ResolutionCommand, SyncConflict } from "../model/types.js";
+import { LOOKUP_RESULT_KINDS, PRESENCE_KINDS } from "../state/constants.js";
+import type { LookupResult } from "../state/types.js";
 
 /** Runtime values for the discriminated conflict transition result. */
 export const CONFLICT_TRANSITION_KINDS = {
@@ -59,16 +61,25 @@ export function shouldRebaseConflict(
   changedFieldName: string,
   newCanonicalRevision: number,
   newCanonicalValue: NormalizedCell,
-): SyncConflict | null {
-  if (conflict.fieldName !== changedFieldName) return null;
-  if (conflict.status === CONFLICT_STATUSES.RESOLVED) return null;
-  if (newCanonicalRevision <= conflict.currentCanonicalRevision) return null;
+): LookupResult<SyncConflict> {
+  if (conflict.fieldName !== changedFieldName) {
+    return { kind: LOOKUP_RESULT_KINDS.NOT_FOUND };
+  }
+  if (conflict.status === CONFLICT_STATUSES.RESOLVED) {
+    return { kind: LOOKUP_RESULT_KINDS.NOT_FOUND };
+  }
+  if (newCanonicalRevision <= conflict.currentCanonicalRevision) {
+    return { kind: LOOKUP_RESULT_KINDS.NOT_FOUND };
+  }
 
   return {
-    ...conflict,
-    currentCanonicalValue: newCanonicalValue,
-    currentCanonicalRevision: newCanonicalRevision,
-    status: CONFLICT_STATUSES.NEEDS_REBASE,
+    kind: LOOKUP_RESULT_KINDS.FOUND,
+    value: {
+      ...conflict,
+      currentCanonicalValue: newCanonicalValue,
+      currentCanonicalRevision: newCanonicalRevision,
+      status: CONFLICT_STATUSES.NEEDS_REBASE,
+    },
   };
 }
 
@@ -110,7 +121,8 @@ export function applyResolution(
   }
 
   if (conflict.status === CONFLICT_STATUSES.RESOLVED) {
-    return conflict.resolutionCommandId === command.commandId
+    return conflict.resolutionCommandId.kind === PRESENCE_KINDS.PRESENT &&
+      conflict.resolutionCommandId.value === command.commandId
       ? { kind: CONFLICT_TRANSITION_KINDS.RESOLVED, conflict }
       : {
           kind: CONFLICT_TRANSITION_KINDS.REJECTED,
@@ -141,7 +153,10 @@ export function applyResolution(
     conflict: {
       ...conflict,
       status: CONFLICT_STATUSES.RESOLVED,
-      resolutionCommandId: command.commandId,
+      resolutionCommandId: {
+        kind: PRESENCE_KINDS.PRESENT,
+        value: command.commandId,
+      },
     },
   };
 }

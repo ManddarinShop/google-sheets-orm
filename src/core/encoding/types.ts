@@ -9,6 +9,7 @@ import {
   NORMALIZED_CELL_KINDS,
 } from "./constants.js";
 import type { CellObservationKind, NormalizedCellKind } from "./constants.js";
+import type { Presence } from "../state/types.js";
 
 export type { CellObservationKind, NormalizedCellKind } from "./constants.js";
 
@@ -39,9 +40,9 @@ export type NormalizedCell =
 export interface CellObservation {
   readonly cellKind: CellObservationKind;
   readonly normalizedCell: NormalizedCell;
-  readonly formulaHash: string | null;
-  readonly mergeRange: string | null;
-  readonly errorCode: string | null;
+  readonly formulaHash: Presence<string>;
+  readonly mergeRange: Presence<string>;
+  readonly errorCode: Presence<string>;
 }
 
 /**

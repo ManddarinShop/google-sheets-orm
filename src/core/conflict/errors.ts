@@ -1,4 +1,5 @@
 import type { CoreError } from "../errors/types.js";
+import type { Presence } from "../state/types.js";
 
 /** Stable rejection codes returned by conflict-resolution CAS decisions. */
 export type ConflictResolutionErrorCode =
@@ -34,7 +35,7 @@ export interface ConflictIdMismatchError extends ConflictResolutionErrorBase {
 export interface AlreadyResolvedError extends ConflictResolutionErrorBase {
   readonly code: "already_resolved";
   readonly conflictId: string;
-  readonly existingResolutionCommandId: string | null;
+  readonly existingResolutionCommandId: Presence<string>;
   readonly commandId: string;
 }
 
@@ -81,7 +82,7 @@ export function createConflictIdMismatchError(
 /** Creates a stable error value when another command already resolved a conflict. */
 export function createAlreadyResolvedError(
   conflictId: string,
-  existingResolutionCommandId: string | null,
+  existingResolutionCommandId: Presence<string>,
   commandId: string,
 ): AlreadyResolvedError {
   return {
