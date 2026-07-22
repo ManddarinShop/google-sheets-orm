@@ -7,6 +7,7 @@
 
 import { stableHash } from "../../core/index.js";
 import type { ObservedEditBatch } from "../../core/index.js";
+import { EMPTY_STRING_LENGTH_ZERO } from "../constants.js";
 import type { NewEffect } from "../sync/effectOutbox.js";
 import type { DatabaseSyncLike } from "../sqlite/sqliteBridge.js";
 import type {
@@ -15,18 +16,49 @@ import type {
   PersistObservedRowInput,
 } from "./observationTypes.js";
 
+const READ_REGISTERED_PROJECTION_SQL = `
+  SELECT logical_sheet_id, projection, enabled
+  FROM physical_sheet_registry
+  WHERE physical_sheet_id = ?
+`;
+
+const READ_LOGICAL_SHEET_ENABLED_SQL = `
+  SELECT enabled
+  FROM sheet_registry
+  WHERE sheet_id = ?
+`;
+
+interface RegisteredProjectionRow {
+  readonly logical_sheet_id: string;
+  readonly projection: string;
+  readonly enabled: number;
+}
+
+interface LogicalSheetEnabledRow {
+  readonly enabled: number;
+}
+
 /** Validates one complete writer submission before durable mutation begins. */
 export function validatePersistObservedRowInput(input: PersistObservedRowInput): void {
   const row = requireBatchRow(input.batch, input.rowIndex);
-  if (input.physicalSheetId.length === 0) throw new Error("physical sheet ID is required");
-  if (input.batch.sheetId.length === 0 || input.batch.batchId.length === 0) {
+  if (input.physicalSheetId.length === EMPTY_STRING_LENGTH_ZERO) {
+    throw new Error("physical sheet ID is required");
+  }
+  if (
+    input.batch.sheetId.length === EMPTY_STRING_LENGTH_ZERO ||
+    input.batch.batchId.length === EMPTY_STRING_LENGTH_ZERO
+  ) {
     throw new Error("logical sheet ID and batch ID are required");
   }
   if (input.evaluation.rowBindingId !== row.rowBindingId) {
     throw new Error("evaluation row binding does not match the observed row");
   }
   validateObservation(input.observation);
-  if (input.event !== null && (input.event.eventKey.length === 0 || input.event.payloadHash.length === 0)) {
+  if (
+    input.event !== null &&
+    (input.event.eventKey.length === EMPTY_STRING_LENGTH_ZERO ||
+      input.event.payloadHash.length === EMPTY_STRING_LENGTH_ZERO)
+  ) {
     throw new Error("event key and payload hash are required when an event is present");
   }
   if (input.event === null && input.evaluation.quarantine === null) {
@@ -62,13 +94,8 @@ export function ensureRegisteredProjection(
   batch: ObservedEditBatch,
   physicalSheetId: string,
 ): void {
-  const row = db.prepare(`
-    SELECT logical_sheet_id, projection, enabled
-    FROM physical_sheet_registry
-    WHERE physical_sheet_id = ?
-  `).get(physicalSheetId) as
-    | { logical_sheet_id: string; projection: string; enabled: number }
-    | undefined;
+  const row = db.prepare(READ_REGISTERED_PROJECTION_SQL)
+    .get<RegisteredProjectionRow>(physicalSheetId);
   if (
     row === undefined ||
     row.logical_sheet_id !== batch.sheetId ||
@@ -78,8 +105,8 @@ export function ensureRegisteredProjection(
     throw new Error("physical sheet is not an enabled projection of the observed logical sheet");
   }
 
-  const logical = db.prepare("SELECT enabled FROM sheet_registry WHERE sheet_id = ?")
-    .get(batch.sheetId) as { enabled: number } | undefined;
+  const logical = db.prepare(READ_LOGICAL_SHEET_ENABLED_SQL)
+    .get<LogicalSheetEnabledRow>(batch.sheetId);
   if (logical === undefined || logical.enabled !== 1) {
     throw new Error("logical sheet is not enabled");
   }
@@ -92,13 +119,8 @@ export function ensureEffectsTargetRegistered(
   effects: readonly NewEffect[],
 ): void {
   for (const effect of effects) {
-    const target = db.prepare(`
-      SELECT logical_sheet_id, projection, enabled
-      FROM physical_sheet_registry
-      WHERE physical_sheet_id = ?
-    `).get(effect.physicalSheetId) as
-      | { logical_sheet_id: string; projection: string; enabled: number }
-      | undefined;
+    const target = db.prepare(READ_REGISTERED_PROJECTION_SQL)
+      .get<RegisteredProjectionRow>(effect.physicalSheetId);
     if (
       target === undefined ||
       target.logical_sheet_id !== logicalSheetId ||
@@ -112,11 +134,11 @@ export function ensureEffectsTargetRegistered(
 
 function validateObservation(observation: ObservationAttemptInput): void {
   if (
-    observation.observationId.length === 0 ||
-    observation.observationKey.length === 0 ||
-    observation.payloadJson.length === 0 ||
-    observation.payloadHash.length === 0 ||
-    observation.ingressActorId.length === 0
+    observation.observationId.length === EMPTY_STRING_LENGTH_ZERO ||
+    observation.observationKey.length === EMPTY_STRING_LENGTH_ZERO ||
+    observation.payloadJson.length === EMPTY_STRING_LENGTH_ZERO ||
+    observation.payloadHash.length === EMPTY_STRING_LENGTH_ZERO ||
+    observation.ingressActorId.length === EMPTY_STRING_LENGTH_ZERO
   ) {
     throw new Error("observation identity, payload, and ingress actor are required");
   }
@@ -138,7 +160,9 @@ function validateCanonicalMutation(
   operation: string,
   evaluation: PersistObservedRowInput["evaluation"],
 ): void {
-  if (mutation.commitId.length === 0) throw new Error("canonical commit ID is required");
+  if (mutation.commitId.length === EMPTY_STRING_LENGTH_ZERO) {
+    throw new Error("canonical commit ID is required");
+  }
   const expectedKind = operation === "insert" ? "insert" : operation === "delete" ? "delete" : "update";
   if (mutation.commit.kind !== expectedKind) {
     throw new Error(`observed ${operation} requires a ${expectedKind} canonical mutation`);
@@ -163,13 +187,18 @@ function validateCanonicalMutation(
 
   const keyNames = new Set<string>();
   for (const change of mutation.businessKeyChanges) {
-    if (change.fieldName.length === 0 || keyNames.has(change.fieldName)) {
+    if (
+      change.fieldName.length === EMPTY_STRING_LENGTH_ZERO ||
+      keyNames.has(change.fieldName)
+    ) {
       throw new Error("business key changes must have unique non-empty field names");
     }
     keyNames.add(change.fieldName);
     if (
-      (change.previousNormalizedKey !== null && change.previousNormalizedKey.length === 0) ||
-      (change.nextNormalizedKey !== null && change.nextNormalizedKey.length === 0)
+      (change.previousNormalizedKey !== null &&
+        change.previousNormalizedKey.length === EMPTY_STRING_LENGTH_ZERO) ||
+      (change.nextNormalizedKey !== null &&
+        change.nextNormalizedKey.length === EMPTY_STRING_LENGTH_ZERO)
     ) {
       throw new Error("business key hashes cannot be empty strings");
     }
@@ -180,8 +209,8 @@ function validateEffects(effects: readonly NewEffect[], batch: ObservedEditBatch
   for (const effect of effects) {
     if (
       effect.logicalSheetId !== batch.sheetId ||
-      effect.physicalSheetId.length === 0 ||
-      effect.projection.length === 0
+      effect.physicalSheetId.length === EMPTY_STRING_LENGTH_ZERO ||
+      effect.projection.length === EMPTY_STRING_LENGTH_ZERO
     ) {
       throw new Error("effect must target a registered physical projection of the logical sheet");
     }
