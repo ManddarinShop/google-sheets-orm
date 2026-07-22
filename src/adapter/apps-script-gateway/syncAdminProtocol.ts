@@ -7,25 +7,38 @@
  */
 
 import { createHmac, randomUUID } from "node:crypto";
-import { canonicalSyncJson, syncSha256Hex, type SyncJsonValue } from "./syncProtocol.js";
+import {
+  SYNC_GATEWAY_DEFAULTS,
+  SYNC_GATEWAY_ENCODINGS,
+  SYNC_GATEWAY_HASH_ALGORITHMS,
+  SYNC_GATEWAY_PROTOCOL_VERSIONS,
+  type SyncGatewayAdminOperation,
+} from "./constants.js";
+import {
+  SYNC_GATEWAY_PROTOCOL_ERROR_CODES,
+} from "./errors.js";
+import {
+  requireSyncGatewayAdminOperation,
+  requireSyncGatewayExpiry,
+  requireSyncGatewayIssuedAt,
+  requireSyncGatewayRequestId,
+  requireSyncGatewayText,
+} from "./validation.js";
+import { canonicalSyncJson, syncSha256Hex } from "./syncProtocol.js";
+import type {
+  SyncGatewayAdminSigningFields,
+  SyncJsonValue,
+} from "./types.js";
 
 /** Protocol reserved for trusted setup and schema-provisioning requests. */
-export const SYNC_GATEWAY_ADMIN_PROTOCOL_VERSION = "typed-sheets-sync-admin-v1" as const;
+export const SYNC_GATEWAY_ADMIN_PROTOCOL_VERSION = SYNC_GATEWAY_PROTOCOL_VERSIONS.ADMIN;
+export type { SyncGatewayAdminOperation } from "./constants.js";
 
 /** Owner-controlled operations; data-plane workers cannot infer routes from them. */
-export type SyncGatewayAdminOperation = "provisionRegistry";
-
 /** Short-lived envelope accepted by the Apps Script sync control plane. */
-export interface SyncGatewayAdminEnvelope<Payload extends SyncJsonValue = SyncJsonValue> {
+export interface SyncGatewayAdminEnvelope<Payload extends SyncJsonValue = SyncJsonValue>
+  extends SyncGatewayAdminSigningFields {
   readonly protocolVersion: typeof SYNC_GATEWAY_ADMIN_PROTOCOL_VERSION;
-  readonly requestId: string;
-  readonly operation: SyncGatewayAdminOperation;
-  readonly keyId: string;
-  readonly issuedAt: number;
-  readonly expiresAt: number;
-  readonly sheetId: string;
-  readonly actorId: string;
-  readonly bodyHash: string;
   readonly signature: string;
   readonly payload: Payload;
 }
@@ -44,11 +57,7 @@ export interface CreateSyncGatewayAdminEnvelopeOptions<Payload extends SyncJsonV
 }
 
 /** Exact HMAC input for a control-plane request. */
-export function syncGatewayAdminSigningInput(input: Pick<
-  SyncGatewayAdminEnvelope,
-  "protocolVersion" | "requestId" | "operation" | "keyId" | "issuedAt" | "expiresAt" |
-  "sheetId" | "actorId" | "bodyHash"
->): string {
+export function syncGatewayAdminSigningInput(input: SyncGatewayAdminSigningFields): string {
   return [
     input.protocolVersion,
     input.requestId,
@@ -64,52 +73,54 @@ export function syncGatewayAdminSigningInput(input: Pick<
 
 /** Computes the URL-safe HMAC that authenticates a provisioning request. */
 export function signSyncGatewayAdminEnvelope(
-  input: Pick<
-    SyncGatewayAdminEnvelope,
-    "protocolVersion" | "requestId" | "operation" | "keyId" | "issuedAt" | "expiresAt" |
-    "sheetId" | "actorId" | "bodyHash"
-  >,
+  input: SyncGatewayAdminSigningFields,
   secret: string,
 ): string {
-  if (secret.length === 0) throw new Error("sync gateway admin secret must not be empty");
-  return createHmac("sha256", secret)
-    .update(syncGatewayAdminSigningInput(input), "utf8")
-    .digest("base64url");
+  const validSecret = requireSyncGatewayText(
+    secret,
+    "sync gateway admin secret",
+    SYNC_GATEWAY_PROTOCOL_ERROR_CODES.INVALID_SECRET,
+  );
+  return createHmac(SYNC_GATEWAY_HASH_ALGORITHMS.SHA256, validSecret)
+    .update(syncGatewayAdminSigningInput(input), SYNC_GATEWAY_ENCODINGS.UTF8)
+    .digest(SYNC_GATEWAY_ENCODINGS.BASE64URL);
 }
 
 /** Creates one authenticated, short-lived request to provision declared projections. */
 export function createSyncGatewayAdminEnvelope<Payload extends SyncJsonValue>(
   options: CreateSyncGatewayAdminEnvelopeOptions<Payload>,
 ): SyncGatewayAdminEnvelope<Payload> {
-  const issuedAt = options.issuedAt ?? Date.now();
-  const expiresInMs = options.expiresInMs ?? 60_000;
-  if (!Number.isSafeInteger(issuedAt) || issuedAt <= 0) {
-    throw new Error("sync gateway admin issuedAt must be a positive safe integer");
-  }
-  if (!Number.isSafeInteger(expiresInMs) || expiresInMs < 1_000 || expiresInMs > 10 * 60_000) {
-    throw new Error("sync gateway admin expiry must be between 1 second and 10 minutes");
-  }
-  if (options.sheetId.length === 0) throw new Error("sync gateway admin sheetId is required");
-
-  const actorId = options.actorId ?? "typed-sheets-sync-bootstrap";
-  const keyId = options.keyId ?? "typed-sheets-shared-secret-v1";
-  if (actorId.length === 0 || keyId.length === 0) {
-    throw new Error("sync gateway admin actor and key ID are required");
-  }
-  const requestId = options.requestId ?? randomUUID();
-  if (!/^[A-Za-z0-9._:-]{8,128}$/.test(requestId)) {
-    throw new Error("sync gateway admin requestId must be 8-128 URL-safe characters");
-  }
+  const issuedAt = requireSyncGatewayIssuedAt(options.issuedAt ?? Date.now());
+  const expiresInMs = requireSyncGatewayExpiry(
+    options.expiresInMs ?? SYNC_GATEWAY_DEFAULTS.EXPIRY_MS,
+  );
+  const sheetId = requireSyncGatewayText(
+    options.sheetId,
+    "sync gateway admin sheetId",
+    SYNC_GATEWAY_PROTOCOL_ERROR_CODES.INVALID_SHEET_ID,
+  );
+  const actorId = requireSyncGatewayText(
+    options.actorId ?? SYNC_GATEWAY_DEFAULTS.ADMIN_ACTOR_ID,
+    "sync gateway admin actorId",
+    SYNC_GATEWAY_PROTOCOL_ERROR_CODES.INVALID_ACTOR_ID,
+  );
+  const keyId = requireSyncGatewayText(
+    options.keyId ?? SYNC_GATEWAY_DEFAULTS.KEY_ID,
+    "sync gateway admin keyId",
+    SYNC_GATEWAY_PROTOCOL_ERROR_CODES.INVALID_KEY_ID,
+  );
+  const requestId = requireSyncGatewayRequestId(options.requestId ?? randomUUID());
+  const operation = requireSyncGatewayAdminOperation(options.operation);
 
   const bodyHash = syncSha256Hex(canonicalSyncJson(options.payload));
   const unsigned = {
     protocolVersion: SYNC_GATEWAY_ADMIN_PROTOCOL_VERSION,
     requestId,
-    operation: options.operation,
+    operation,
     keyId,
     issuedAt,
     expiresAt: issuedAt + expiresInMs,
-    sheetId: options.sheetId,
+    sheetId,
     actorId,
     bodyHash,
   } as const;

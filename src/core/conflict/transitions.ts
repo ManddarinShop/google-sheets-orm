@@ -11,13 +11,43 @@
 
 import { stableHash } from "../encoding/stableEncode.js";
 import type { NormalizedCell } from "../encoding/types.js";
-import type { ConflictStatus, ResolutionCommand, SyncConflict } from "../model/types.js";
+import {
+  createAlreadyResolvedError,
+  createConflictIdMismatchError,
+  createInvalidResolutionRoleError,
+  createUnsupportedResolutionActionError,
+} from "./errors.js";
+import type { ConflictResolutionError } from "./errors.js";
+import { CONFLICT_STATUSES } from "../model/constants.js";
+import type { ResolutionCommand, SyncConflict } from "../model/types.js";
+import { LOOKUP_RESULT_KINDS, PRESENCE_KINDS } from "../state/constants.js";
+import type { LookupResult } from "../state/types.js";
+
+/** Runtime values for the discriminated conflict transition result. */
+export const CONFLICT_TRANSITION_KINDS = {
+  RESOLVED: "resolved",
+  STALE: "stale",
+  REJECTED: "rejected",
+} as const;
+
+/** Closed set of outcomes produced by a conflict transition. */
+export type ConflictTransitionKind =
+  (typeof CONFLICT_TRANSITION_KINDS)[keyof typeof CONFLICT_TRANSITION_KINDS];
 
 /** Result of attempting to transition a conflict via a resolution command. */
 export type ConflictTransitionResult =
-  | { readonly kind: "resolved"; readonly conflict: SyncConflict }
-  | { readonly kind: "stale"; readonly conflict: SyncConflict }
-  | { readonly kind: "rejected"; readonly reason: string };
+  | {
+      readonly kind: typeof CONFLICT_TRANSITION_KINDS.RESOLVED;
+      readonly conflict: SyncConflict;
+    }
+  | {
+      readonly kind: typeof CONFLICT_TRANSITION_KINDS.STALE;
+      readonly conflict: SyncConflict;
+    }
+  | {
+      readonly kind: typeof CONFLICT_TRANSITION_KINDS.REJECTED;
+      readonly error: ConflictResolutionError;
+    };
 
 /**
  * Determines whether a canonical commit should trigger NEEDS_REBASE.
@@ -31,16 +61,25 @@ export function shouldRebaseConflict(
   changedFieldName: string,
   newCanonicalRevision: number,
   newCanonicalValue: NormalizedCell,
-): SyncConflict | null {
-  if (conflict.fieldName !== changedFieldName) return null;
-  if (conflict.status === "RESOLVED") return null;
-  if (newCanonicalRevision <= conflict.currentCanonicalRevision) return null;
+): LookupResult<SyncConflict> {
+  if (conflict.fieldName !== changedFieldName) {
+    return { kind: LOOKUP_RESULT_KINDS.NOT_FOUND };
+  }
+  if (conflict.status === CONFLICT_STATUSES.RESOLVED) {
+    return { kind: LOOKUP_RESULT_KINDS.NOT_FOUND };
+  }
+  if (newCanonicalRevision <= conflict.currentCanonicalRevision) {
+    return { kind: LOOKUP_RESULT_KINDS.NOT_FOUND };
+  }
 
   return {
-    ...conflict,
-    currentCanonicalValue: newCanonicalValue,
-    currentCanonicalRevision: newCanonicalRevision,
-    status: "NEEDS_REBASE",
+    kind: LOOKUP_RESULT_KINDS.FOUND,
+    value: {
+      ...conflict,
+      currentCanonicalValue: newCanonicalValue,
+      currentCanonicalRevision: newCanonicalRevision,
+      status: CONFLICT_STATUSES.NEEDS_REBASE,
+    },
   };
 }
 
@@ -58,21 +97,41 @@ export function applyResolution(
   command: ResolutionCommand,
 ): ConflictTransitionResult {
   if (command.action !== "acknowledge_system") {
-    return { kind: "rejected", reason: `unsupported action: ${command.action}` };
+    return {
+      kind: CONFLICT_TRANSITION_KINDS.REJECTED,
+      error: createUnsupportedResolutionActionError(command.action),
+    };
   }
 
   if (command.role !== "sheet_editor") {
-    return { kind: "rejected", reason: "acknowledge_system requires sheet_editor role" };
+    return {
+      kind: CONFLICT_TRANSITION_KINDS.REJECTED,
+      error: createInvalidResolutionRoleError(command.role),
+    };
   }
 
   if (command.targetConflictId !== conflict.conflictId) {
-    return { kind: "rejected", reason: "conflict_id mismatch" };
+    return {
+      kind: CONFLICT_TRANSITION_KINDS.REJECTED,
+      error: createConflictIdMismatchError(
+        command.targetConflictId,
+        conflict.conflictId,
+      ),
+    };
   }
 
-  if (conflict.status === "RESOLVED") {
-    return conflict.resolutionCommandId === command.commandId
-      ? { kind: "resolved", conflict }
-      : { kind: "rejected", reason: "conflict is already resolved" };
+  if (conflict.status === CONFLICT_STATUSES.RESOLVED) {
+    return conflict.resolutionCommandId.kind === PRESENCE_KINDS.PRESENT &&
+      conflict.resolutionCommandId.value === command.commandId
+      ? { kind: CONFLICT_TRANSITION_KINDS.RESOLVED, conflict }
+      : {
+          kind: CONFLICT_TRANSITION_KINDS.REJECTED,
+          error: createAlreadyResolvedError(
+            conflict.conflictId,
+            conflict.resolutionCommandId,
+            command.commandId,
+          ),
+        };
   }
 
   const revisionMatches = command.expectedRevision === conflict.currentCanonicalRevision;
@@ -81,20 +140,23 @@ export function applyResolution(
 
   if (!revisionMatches || !hashMatches || !epochMatches) {
     return {
-      kind: "stale",
+      kind: CONFLICT_TRANSITION_KINDS.STALE,
       conflict:
-        conflict.status === "OPEN"
-          ? { ...conflict, status: "NEEDS_REBASE" as ConflictStatus }
+        conflict.status === CONFLICT_STATUSES.OPEN
+          ? { ...conflict, status: CONFLICT_STATUSES.NEEDS_REBASE }
           : conflict,
     };
   }
 
   return {
-    kind: "resolved",
+    kind: CONFLICT_TRANSITION_KINDS.RESOLVED,
     conflict: {
       ...conflict,
-      status: "RESOLVED" as ConflictStatus,
-      resolutionCommandId: command.commandId,
+      status: CONFLICT_STATUSES.RESOLVED,
+      resolutionCommandId: {
+        kind: PRESENCE_KINDS.PRESENT,
+        value: command.commandId,
+      },
     },
   };
 }
