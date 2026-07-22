@@ -7,13 +7,64 @@
  * the same phase again without enabling dual writers.
  */
 
-import { stableHash } from "../../core/index.js";
+import {
+  EMPTY_STRING_LENGTH_ZERO,
+  NON_NEGATIVE_SAFE_INTEGER_MINIMUM,
+  stableHash,
+  type LookupResult,
+  type Presence,
+} from "../../core/index.js";
+import {
+  LOOKUP_RESULT_KINDS,
+  PRESENCE_KINDS,
+} from "../../core/state/constants.js";
 import {
   isFencingValid,
   withImmediateTransaction,
   type DatabaseSyncLike,
   type FencingContext,
 } from "../../storage/index.js";
+import { EXPECTED_SINGLE_ROW_CHANGE_COUNT } from "../../storage/constants.js";
+import { STORAGE_ERROR_CODES, StorageError } from "../../storage/errors.js";
+import { fromSqlNullable, toSqlNullable } from "../../storage/sqlite/sqlState.js";
+
+const CUTOVER_PHASES = {
+  FREEZE_LEGACY: "freeze_legacy",
+  DRAIN_LEGACY: "drain_legacy",
+  SEED_PROJECTION: "seed_projection",
+  SHADOW_DIFF: "shadow_diff",
+  MARK_CUTOVER: "mark_cutover",
+  DISABLE_LEGACY: "disable_legacy",
+  ACTIVATE_NEW_WRITER: "activate_new_writer",
+  COMPLETE: "complete",
+} as const satisfies Record<string, CutoverPhase>;
+
+const CUTOVER_STATUSES = {
+  RUNNING: "running",
+  BLOCKED: "blocked",
+  COMPLETE: "complete",
+  FENCED_OUT: "fenced_out",
+} as const satisfies Record<string, CutoverState["status"]>;
+
+const READ_CUTOVER_STATE_SQL = `
+  SELECT cutover_id, phase, source_snapshot_hash, marker, status
+  FROM cutover_state
+  WHERE cutover_id = ?
+`;
+
+const INSERT_CUTOVER_STATE_SQL = `
+  INSERT INTO cutover_state (
+    cutover_id, phase, source_snapshot_hash, marker, status, created_at
+  ) VALUES (?, ?, ?, ?, ?, ?)
+`;
+
+const UPDATE_CUTOVER_STATE_SQL = `
+  UPDATE cutover_state
+  SET phase = ?, marker = ?, status = ?
+  WHERE cutover_id = ? AND source_snapshot_hash = ?
+`;
+
+const ABSENT_MARKER: Presence<string> = { kind: PRESENCE_KINDS.ABSENT };
 
 /** Legacy queue controls that must be idempotent during cutover recovery. */
 export interface LegacyQueueCutoverControl {
@@ -53,7 +104,7 @@ export interface CutoverState {
   readonly cutoverId: string;
   readonly phase: CutoverPhase;
   readonly sourceSnapshotHash: string;
-  readonly marker: string | null;
+  readonly marker: Presence<string>;
   readonly status: "running" | "blocked" | "complete" | "fenced_out";
 }
 
@@ -78,63 +129,94 @@ export type CutoverPhase =
 export async function runCutover(options: RunCutoverOptions): Promise<CutoverState> {
   validateOptions(options);
   let state = loadOrCreateCutover(options);
-  if (state.status === "fenced_out" || state.phase === "complete") return state;
+  if (state.status === CUTOVER_STATUSES.FENCED_OUT || state.phase === CUTOVER_PHASES.COMPLETE) return state;
 
   while (true) {
     if (!isFencingValid(options.database, options.fence)) {
       return markFencedOut(options, state);
     }
-    if (state.phase === "freeze_legacy") {
+    if (state.phase === CUTOVER_PHASES.FREEZE_LEGACY) {
       const frozen = await options.legacy.freezeWrites();
       if (frozen.sourceSnapshotHash !== options.sourceSnapshotHash) {
         return block(options, state, "legacy freeze snapshot does not match requested cutover source");
       }
-      state = advance(options, state, "drain_legacy", "running", state.marker);
+      state = advance(options, state, CUTOVER_PHASES.DRAIN_LEGACY, CUTOVER_STATUSES.RUNNING, state.marker);
       continue;
     }
-    if (state.phase === "drain_legacy") {
+    if (state.phase === CUTOVER_PHASES.DRAIN_LEGACY) {
       let pending = await options.legacy.pendingTaskCount();
-      if (pending > 0) {
+      if (pending > NON_NEGATIVE_SAFE_INTEGER_MINIMUM) {
         await options.legacy.drainPendingTasks();
         pending = await options.legacy.pendingTaskCount();
       }
-      if (pending > 0) return block(options, state, "legacy queue still has " + pending + " pending task(s)");
-      state = advance(options, state, "seed_projection", "running", state.marker);
+      if (pending > NON_NEGATIVE_SAFE_INTEGER_MINIMUM) {
+        return block(options, state, "legacy queue still has " + pending + " pending task(s)");
+      }
+      state = advance(options, state, CUTOVER_PHASES.SEED_PROJECTION, CUTOVER_STATUSES.RUNNING, state.marker);
       continue;
     }
-    if (state.phase === "seed_projection") {
+    if (state.phase === CUTOVER_PHASES.SEED_PROJECTION) {
       const seeded = await options.next.seed();
       if (seeded.fencedOut === true) return markFencedOut(options, state);
-      if (seeded.seedHash.length === 0) return block(options, state, "projection seed did not return a checkpoint hash");
-      state = advance(options, state, "shadow_diff", "running", seedMarker(state.marker, seeded.seedHash));
+      if (seeded.seedHash.length === EMPTY_STRING_LENGTH_ZERO) {
+        return block(options, state, "projection seed did not return a checkpoint hash");
+      }
+      state = advance(
+        options,
+        state,
+        CUTOVER_PHASES.SHADOW_DIFF,
+        CUTOVER_STATUSES.RUNNING,
+        seedMarker(state.marker, seeded.seedHash),
+      );
       continue;
     }
-    if (state.phase === "shadow_diff") {
+    if (state.phase === CUTOVER_PHASES.SHADOW_DIFF) {
       const shadow = await options.next.shadowDiff();
       if (!shadow.matches) return block(options, state, "SQLite shadow diff does not match the frozen Sheet snapshot");
-      if (shadow.snapshotHash.length === 0 || shadow.detailHash.length === 0) {
+      if (
+        shadow.snapshotHash.length === EMPTY_STRING_LENGTH_ZERO ||
+        shadow.detailHash.length === EMPTY_STRING_LENGTH_ZERO
+      ) {
         return block(options, state, "shadow diff did not return durable comparison hashes");
       }
-      state = advance(options, state, "mark_cutover", "running", shadowMarker(state.marker, shadow));
+      state = advance(
+        options,
+        state,
+        CUTOVER_PHASES.MARK_CUTOVER,
+        CUTOVER_STATUSES.RUNNING,
+        shadowMarker(state.marker, shadow),
+      );
       continue;
     }
-    if (state.phase === "mark_cutover") {
+    if (state.phase === CUTOVER_PHASES.MARK_CUTOVER) {
       const marker = stableHash({
         cutoverId: state.cutoverId,
         sourceSnapshotHash: state.sourceSnapshotHash,
-        checkpoints: state.marker,
+        checkpoints: toSqlNullable(state.marker),
       });
-      state = advance(options, state, "disable_legacy", "running", marker);
+      state = advance(
+        options,
+        state,
+        CUTOVER_PHASES.DISABLE_LEGACY,
+        CUTOVER_STATUSES.RUNNING,
+        { kind: PRESENCE_KINDS.PRESENT, value: marker },
+      );
       continue;
     }
-    if (state.phase === "disable_legacy") {
+    if (state.phase === CUTOVER_PHASES.DISABLE_LEGACY) {
       await options.legacy.disableWriter();
-      state = advance(options, state, "activate_new_writer", "running", state.marker);
+      state = advance(
+        options,
+        state,
+        CUTOVER_PHASES.ACTIVATE_NEW_WRITER,
+        CUTOVER_STATUSES.RUNNING,
+        state.marker,
+      );
       continue;
     }
-    if (state.phase === "activate_new_writer") {
+    if (state.phase === CUTOVER_PHASES.ACTIVATE_NEW_WRITER) {
       await options.next.activateWriter();
-      state = advance(options, state, "complete", "complete", state.marker);
+      state = advance(options, state, CUTOVER_PHASES.COMPLETE, CUTOVER_STATUSES.COMPLETE, state.marker);
       return state;
     }
     return state;
@@ -142,13 +224,14 @@ export async function runCutover(options: RunCutoverOptions): Promise<CutoverSta
 }
 
 /** Reads an existing cutover checkpoint without starting or mutating an attempt. */
-export function readCutoverState(db: DatabaseSyncLike, cutoverId: string): CutoverState | null {
-  if (cutoverId.length === 0) throw new Error("cutover ID is required");
-  const row = db.prepare(`
-    SELECT cutover_id, phase, source_snapshot_hash, marker, status
-    FROM cutover_state WHERE cutover_id = ?
-  `).get(cutoverId) as CutoverRow | undefined;
-  return row === undefined ? null : decodeCutoverRow(row);
+export function readCutoverState(db: DatabaseSyncLike, cutoverId: string): LookupResult<CutoverState> {
+  if (cutoverId.length === EMPTY_STRING_LENGTH_ZERO) {
+    throw new StorageError(STORAGE_ERROR_CODES.INVALID_CUTOVER_OPTIONS, "cutover ID is required");
+  }
+  const row = db.prepare(READ_CUTOVER_STATE_SQL).get<CutoverRow>(cutoverId);
+  return row === undefined
+    ? { kind: LOOKUP_RESULT_KINDS.NOT_FOUND }
+    : { kind: LOOKUP_RESULT_KINDS.FOUND, value: decodeCutoverRow(row) };
 }
 
 interface CutoverRow {
@@ -161,52 +244,61 @@ interface CutoverRow {
 
 function loadOrCreateCutover(options: RunCutoverOptions): CutoverState {
   const existing = readCutoverState(options.database, options.cutoverId);
-  if (existing !== null) {
-    if (existing.sourceSnapshotHash !== options.sourceSnapshotHash) {
-      throw new Error("cutover ID was replayed with a different source snapshot hash");
+  if (existing.kind === LOOKUP_RESULT_KINDS.FOUND) {
+    if (existing.value.sourceSnapshotHash !== options.sourceSnapshotHash) {
+      throw new StorageError(
+        STORAGE_ERROR_CODES.CUTOVER_IDENTITY_CONFLICT,
+        "cutover ID was replayed with a different source snapshot hash",
+      );
     }
-    return existing.status === "blocked"
-      ? advance(options, existing, existing.phase, "running", existing.marker)
-      : existing;
+    return existing.value.status === CUTOVER_STATUSES.BLOCKED
+      ? advance(options, existing.value, existing.value.phase, CUTOVER_STATUSES.RUNNING, existing.value.marker)
+      : existing.value;
   }
   if (!isFencingValid(options.database, options.fence)) {
     return {
       cutoverId: options.cutoverId,
-      phase: "freeze_legacy",
+      phase: CUTOVER_PHASES.FREEZE_LEGACY,
       sourceSnapshotHash: options.sourceSnapshotHash,
-      marker: null,
-      status: "fenced_out",
+      marker: ABSENT_MARKER,
+      status: CUTOVER_STATUSES.FENCED_OUT,
     };
   }
   return withImmediateTransaction(options.database, () => {
     if (!isFencingValid(options.database, options.fence)) {
       return {
         cutoverId: options.cutoverId,
-        phase: "freeze_legacy",
+        phase: CUTOVER_PHASES.FREEZE_LEGACY,
         sourceSnapshotHash: options.sourceSnapshotHash,
-        marker: null,
-        status: "fenced_out" as const,
+        marker: ABSENT_MARKER,
+        status: CUTOVER_STATUSES.FENCED_OUT,
       };
     }
     const raced = readCutoverState(options.database, options.cutoverId);
-    if (raced !== null) {
-      if (raced.sourceSnapshotHash !== options.sourceSnapshotHash) {
-        throw new Error("cutover ID was replayed with a different source snapshot hash");
+    if (raced.kind === LOOKUP_RESULT_KINDS.FOUND) {
+      if (raced.value.sourceSnapshotHash !== options.sourceSnapshotHash) {
+        throw new StorageError(
+          STORAGE_ERROR_CODES.CUTOVER_IDENTITY_CONFLICT,
+          "cutover ID was replayed with a different source snapshot hash",
+        );
       }
-      return raced;
+      return raced.value;
     }
     const marker = stableHash({ cutoverId: options.cutoverId, sourceSnapshotHash: options.sourceSnapshotHash });
-    options.database.prepare(`
-      INSERT INTO cutover_state (
-        cutover_id, phase, source_snapshot_hash, marker, status, created_at
-      ) VALUES (?, 'freeze_legacy', ?, ?, 'running', ?)
-    `).run(options.cutoverId, options.sourceSnapshotHash, marker, options.now);
+    options.database.prepare(INSERT_CUTOVER_STATE_SQL).run(
+      options.cutoverId,
+      CUTOVER_PHASES.FREEZE_LEGACY,
+      options.sourceSnapshotHash,
+      marker,
+      CUTOVER_STATUSES.RUNNING,
+      options.now,
+    );
     return {
       cutoverId: options.cutoverId,
-      phase: "freeze_legacy" as const,
+      phase: CUTOVER_PHASES.FREEZE_LEGACY,
       sourceSnapshotHash: options.sourceSnapshotHash,
-      marker,
-      status: "running" as const,
+      marker: { kind: PRESENCE_KINDS.PRESENT, value: marker },
+      status: CUTOVER_STATUSES.RUNNING,
     };
   });
 }
@@ -216,17 +308,24 @@ function advance(
   current: CutoverState,
   phase: CutoverPhase,
   status: "running" | "blocked" | "complete",
-  marker: string | null,
+  marker: Presence<string>,
 ): CutoverState {
   if (!isFencingValid(options.database, options.fence)) return markFencedOut(options, current);
   return withImmediateTransaction(options.database, () => {
     if (!isFencingValid(options.database, options.fence)) return markFencedOut(options, current);
-    const result = options.database.prepare(`
-      UPDATE cutover_state
-      SET phase = ?, marker = ?, status = ?
-      WHERE cutover_id = ? AND source_snapshot_hash = ?
-    `).run(phase, marker, status, current.cutoverId, current.sourceSnapshotHash);
-    if (result.changes !== 1) throw new Error("cutover checkpoint disappeared or source snapshot changed");
+    const result = options.database.prepare(UPDATE_CUTOVER_STATE_SQL).run(
+      phase,
+      toSqlNullable(marker),
+      status,
+      current.cutoverId,
+      current.sourceSnapshotHash,
+    );
+    if (result.changes !== EXPECTED_SINGLE_ROW_CHANGE_COUNT) {
+      throw new StorageError(
+        STORAGE_ERROR_CODES.CUTOVER_CHECKPOINT_FAILED,
+        "cutover checkpoint disappeared or source snapshot changed",
+      );
+    }
     return {
       cutoverId: current.cutoverId,
       phase,
@@ -241,56 +340,90 @@ function block(options: RunCutoverOptions, state: CutoverState, reason: string):
   // The state table intentionally retains no free-form error payload. The
   // caller receives the reason through its own log/alert; marker remains the
   // immutable evidence needed by a restart and restore rehearsal.
-  if (reason.length === 0) throw new Error("cutover block reason is required");
-  return advance(options, state, state.phase, "blocked", state.marker);
+  if (reason.length === EMPTY_STRING_LENGTH_ZERO) {
+    throw new StorageError(STORAGE_ERROR_CODES.CUTOVER_STATE_INVALID, "cutover block reason is required");
+  }
+  return advance(options, state, state.phase, CUTOVER_STATUSES.BLOCKED, state.marker);
 }
 
 function markFencedOut(options: RunCutoverOptions, state: CutoverState): CutoverState {
   if (!isFencingValid(options.database, options.fence)) {
-    return { ...state, status: "fenced_out" };
+    return { ...state, status: CUTOVER_STATUSES.FENCED_OUT };
   }
-  return advance(options, state, state.phase, "blocked", state.marker);
+  return advance(options, state, state.phase, CUTOVER_STATUSES.BLOCKED, state.marker);
 }
 
-function seedMarker(marker: string | null, seedHash: string): string {
-  return stableHash({ priorMarker: marker, seedHash });
+function seedMarker(marker: Presence<string>, seedHash: string): Presence<string> {
+  return {
+    kind: PRESENCE_KINDS.PRESENT,
+    value: stableHash({ priorMarker: toSqlNullable(marker), seedHash }),
+  };
 }
 
 function shadowMarker(
-  marker: string | null,
+  marker: Presence<string>,
   shadow: { readonly snapshotHash: string; readonly detailHash: string },
-): string {
-  return stableHash({ priorMarker: marker, snapshotHash: shadow.snapshotHash, detailHash: shadow.detailHash });
+): Presence<string> {
+  return {
+    kind: PRESENCE_KINDS.PRESENT,
+    value: stableHash({
+      priorMarker: toSqlNullable(marker),
+      snapshotHash: shadow.snapshotHash,
+      detailHash: shadow.detailHash,
+    }),
+  };
 }
 
 function decodeCutoverRow(row: CutoverRow): CutoverState {
-  if (row.source_snapshot_hash === null || !isCutoverPhase(row.phase) || !isCutoverStatus(row.status)) {
-    throw new Error("stored cutover state is invalid");
+  const sourceSnapshotHash = fromSqlNullable(row.source_snapshot_hash);
+  if (
+    sourceSnapshotHash.kind !== PRESENCE_KINDS.PRESENT ||
+    !isCutoverPhase(row.phase) ||
+    !isCutoverStatus(row.status)
+  ) {
+    throw new StorageError(STORAGE_ERROR_CODES.CUTOVER_STATE_INVALID, "stored cutover state is invalid");
   }
   return {
     cutoverId: row.cutover_id,
     phase: row.phase,
-    sourceSnapshotHash: row.source_snapshot_hash,
-    marker: row.marker,
+    sourceSnapshotHash: sourceSnapshotHash.value,
+    marker: fromSqlNullable(row.marker),
     status: row.status,
   };
 }
 
 function isCutoverPhase(value: string): value is CutoverPhase {
-  return value === "freeze_legacy" || value === "drain_legacy" || value === "seed_projection" ||
-    value === "shadow_diff" || value === "mark_cutover" || value === "disable_legacy" ||
-    value === "activate_new_writer" || value === "complete";
+  return value === CUTOVER_PHASES.FREEZE_LEGACY ||
+    value === CUTOVER_PHASES.DRAIN_LEGACY ||
+    value === CUTOVER_PHASES.SEED_PROJECTION ||
+    value === CUTOVER_PHASES.SHADOW_DIFF ||
+    value === CUTOVER_PHASES.MARK_CUTOVER ||
+    value === CUTOVER_PHASES.DISABLE_LEGACY ||
+    value === CUTOVER_PHASES.ACTIVATE_NEW_WRITER ||
+    value === CUTOVER_PHASES.COMPLETE;
 }
 
 function isCutoverStatus(value: string): value is CutoverState["status"] {
-  return value === "running" || value === "blocked" || value === "complete" || value === "fenced_out";
+  return value === CUTOVER_STATUSES.RUNNING ||
+    value === CUTOVER_STATUSES.BLOCKED ||
+    value === CUTOVER_STATUSES.COMPLETE ||
+    value === CUTOVER_STATUSES.FENCED_OUT;
 }
 
 function validateOptions(options: RunCutoverOptions): void {
-  if (options.cutoverId.length === 0 || options.sourceSnapshotHash.length === 0) {
-    throw new Error("cutover ID and source snapshot hash are required");
+  if (
+    options.cutoverId.length === EMPTY_STRING_LENGTH_ZERO ||
+    options.sourceSnapshotHash.length === EMPTY_STRING_LENGTH_ZERO
+  ) {
+    throw new StorageError(
+      STORAGE_ERROR_CODES.INVALID_CUTOVER_OPTIONS,
+      "cutover ID and source snapshot hash are required",
+    );
   }
-  if (!Number.isSafeInteger(options.now) || options.now < 0) {
-    throw new Error("cutover time must be a non-negative safe integer");
+  if (!Number.isSafeInteger(options.now) || options.now < NON_NEGATIVE_SAFE_INTEGER_MINIMUM) {
+    throw new StorageError(
+      STORAGE_ERROR_CODES.INVALID_CUTOVER_OPTIONS,
+      "cutover time must be a non-negative safe integer",
+    );
   }
 }

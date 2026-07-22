@@ -6,7 +6,39 @@
  * or DocumentLock bottleneck becomes an unbounded retry loop.
  */
 
+import {
+  NON_NEGATIVE_SAFE_INTEGER_MINIMUM,
+  type EffectStatus,
+  type Presence,
+} from "../../core/index.js";
+import { PRESENCE_KINDS } from "../../core/state/constants.js";
+import { STORAGE_ERROR_CODES, StorageError } from "../../storage/errors.js";
 import type { DatabaseSyncLike } from "../../storage/index.js";
+import { fromSqlNullable } from "../../storage/sqlite/sqlState.js";
+
+const OUTBOX_EFFECT_STATUSES = {
+  PENDING: "pending",
+  FAILED: "failed",
+  BLOCKED_CANDIDATE: "blocked_candidate",
+} as const satisfies Record<string, EffectStatus>;
+
+const SYNC_OPERATIONAL_ALERT_CODES = {
+  PENDING_BACKPRESSURE: "outbox_pending_backpressure",
+  PENDING_AGE: "outbox_pending_age",
+  PENDING_AGE_UNKNOWN: "outbox_pending_age_unknown",
+  FAILED: "outbox_failed",
+  CANDIDATE_BLOCKED: "candidate_blocked",
+} as const satisfies Record<string, SyncOperationalAlert["code"]>;
+
+const READ_SYNC_OPERATIONAL_TOTALS_SQL = `
+  SELECT
+    SUM(CASE WHEN status = '${OUTBOX_EFFECT_STATUSES.PENDING}' THEN 1 ELSE 0 END) AS pending_effects,
+    SUM(CASE WHEN status = '${OUTBOX_EFFECT_STATUSES.FAILED}' THEN 1 ELSE 0 END) AS failed_effects,
+    SUM(CASE WHEN status = '${OUTBOX_EFFECT_STATUSES.BLOCKED_CANDIDATE}' THEN 1 ELSE 0 END) AS blocked_candidate_effects,
+    MIN(CASE WHEN status = '${OUTBOX_EFFECT_STATUSES.PENDING}' AND created_at > ${NON_NEGATIVE_SAFE_INTEGER_MINIMUM} THEN created_at ELSE NULL END) AS oldest_known_pending_at,
+    SUM(CASE WHEN status = '${OUTBOX_EFFECT_STATUSES.PENDING}' AND created_at = ${NON_NEGATIVE_SAFE_INTEGER_MINIMUM} THEN 1 ELSE 0 END) AS pending_with_unknown_age
+  FROM sheet_effect_outbox
+`;
 
 /** Deployment-specific ceilings for one health sample. */
 export interface SyncOperationalLimits {
@@ -33,7 +65,7 @@ export interface SyncOperationalHealth {
   readonly pendingEffects: number;
   readonly failedEffects: number;
   readonly blockedCandidateEffects: number;
-  readonly oldestPendingAgeMs: number | null;
+  readonly oldestPendingAgeMs: Presence<number>;
   readonly alerts: readonly SyncOperationalAlert[];
   readonly backpressure: boolean;
 }
@@ -50,47 +82,68 @@ export function collectSyncOperationalHealth(
   now: number,
 ): SyncOperationalHealth {
   validateLimits(limits, now);
-  const totals = db.prepare(`
-    SELECT
-      SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending_effects,
-      SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed_effects,
-      SUM(CASE WHEN status = 'blocked_candidate' THEN 1 ELSE 0 END) AS blocked_candidate_effects,
-      MIN(CASE WHEN status = 'pending' AND created_at > 0 THEN created_at ELSE NULL END) AS oldest_known_pending_at,
-      SUM(CASE WHEN status = 'pending' AND created_at = 0 THEN 1 ELSE 0 END) AS pending_with_unknown_age
-    FROM sheet_effect_outbox
-  `).get() as {
+  const totals = db.prepare(READ_SYNC_OPERATIONAL_TOTALS_SQL).get<{
     pending_effects: number | null;
     failed_effects: number | null;
     blocked_candidate_effects: number | null;
     oldest_known_pending_at: number | null;
     pending_with_unknown_age: number | null;
-  };
-  const pendingEffects = totals.pending_effects ?? 0;
-  const failedEffects = totals.failed_effects ?? 0;
-  const blockedCandidateEffects = totals.blocked_candidate_effects ?? 0;
-  const oldestPendingAgeMs = totals.oldest_known_pending_at === null
-    ? null
-    : Math.max(0, now - totals.oldest_known_pending_at);
+  }>();
+  if (totals === undefined) {
+    throw new StorageError(
+      STORAGE_ERROR_CODES.SYNC_OPERATIONAL_HEALTH_UNAVAILABLE,
+      "could not read sync operational health totals",
+    );
+  }
+  const pendingEffects = aggregateCount(totals.pending_effects);
+  const failedEffects = aggregateCount(totals.failed_effects);
+  const blockedCandidateEffects = aggregateCount(totals.blocked_candidate_effects);
+  const oldestKnownPendingAt = fromSqlNullable(totals.oldest_known_pending_at);
+  const oldestPendingAgeMs: Presence<number> = oldestKnownPendingAt.kind === PRESENCE_KINDS.ABSENT
+    ? { kind: PRESENCE_KINDS.ABSENT }
+    : {
+      kind: PRESENCE_KINDS.PRESENT,
+      value: Math.max(NON_NEGATIVE_SAFE_INTEGER_MINIMUM, now - oldestKnownPendingAt.value),
+    };
+  const pendingWithUnknownAge = aggregateCount(totals.pending_with_unknown_age);
   const alerts: SyncOperationalAlert[] = [];
   if (pendingEffects > limits.maxPendingEffects) {
-    alerts.push({ code: "outbox_pending_backpressure", count: pendingEffects, threshold: limits.maxPendingEffects });
-  }
-  if (oldestPendingAgeMs !== null && oldestPendingAgeMs > limits.maxPendingAgeMs) {
-    alerts.push({ code: "outbox_pending_age", count: oldestPendingAgeMs, threshold: limits.maxPendingAgeMs });
-  }
-  if ((totals.pending_with_unknown_age ?? 0) > 0) {
     alerts.push({
-      code: "outbox_pending_age_unknown",
-      count: totals.pending_with_unknown_age ?? 0,
-      threshold: 0,
+      code: SYNC_OPERATIONAL_ALERT_CODES.PENDING_BACKPRESSURE,
+      count: pendingEffects,
+      threshold: limits.maxPendingEffects,
+    });
+  }
+  if (
+    oldestPendingAgeMs.kind === PRESENCE_KINDS.PRESENT &&
+    oldestPendingAgeMs.value > limits.maxPendingAgeMs
+  ) {
+    alerts.push({
+      code: SYNC_OPERATIONAL_ALERT_CODES.PENDING_AGE,
+      count: oldestPendingAgeMs.value,
+      threshold: limits.maxPendingAgeMs,
+    });
+  }
+  if (pendingWithUnknownAge > NON_NEGATIVE_SAFE_INTEGER_MINIMUM) {
+    alerts.push({
+      code: SYNC_OPERATIONAL_ALERT_CODES.PENDING_AGE_UNKNOWN,
+      count: pendingWithUnknownAge,
+      threshold: NON_NEGATIVE_SAFE_INTEGER_MINIMUM,
     });
   }
   if (failedEffects > limits.maxFailedEffects) {
-    alerts.push({ code: "outbox_failed", count: failedEffects, threshold: limits.maxFailedEffects });
+    alerts.push({
+      code: SYNC_OPERATIONAL_ALERT_CODES.FAILED,
+      count: failedEffects,
+      threshold: limits.maxFailedEffects,
+    });
   }
   if (blockedCandidateEffects > limits.maxBlockedCandidates) {
     alerts.push({
-      code: "candidate_blocked", count: blockedCandidateEffects, threshold: limits.maxBlockedCandidates });
+      code: SYNC_OPERATIONAL_ALERT_CODES.CANDIDATE_BLOCKED,
+      count: blockedCandidateEffects,
+      threshold: limits.maxBlockedCandidates,
+    });
   }
   return {
     pendingEffects,
@@ -99,17 +152,33 @@ export function collectSyncOperationalHealth(
     oldestPendingAgeMs,
     alerts,
     backpressure: alerts.some((alert) =>
-      alert.code === "outbox_pending_backpressure" || alert.code === "outbox_pending_age" ||
-      alert.code === "outbox_pending_age_unknown",
+      alert.code === SYNC_OPERATIONAL_ALERT_CODES.PENDING_BACKPRESSURE ||
+      alert.code === SYNC_OPERATIONAL_ALERT_CODES.PENDING_AGE ||
+      alert.code === SYNC_OPERATIONAL_ALERT_CODES.PENDING_AGE_UNKNOWN,
     ),
   };
 }
 
 function validateLimits(limits: SyncOperationalLimits, now: number): void {
-  if (!Number.isSafeInteger(now) || now < 0) throw new Error("health sample time must be non-negative");
+  if (!Number.isSafeInteger(now) || now < NON_NEGATIVE_SAFE_INTEGER_MINIMUM) {
+    throw new StorageError(
+      STORAGE_ERROR_CODES.INVALID_SYNC_OPERATIONAL_LIMITS,
+      "health sample time must be non-negative",
+    );
+  }
   for (const [name, value] of Object.entries(limits)) {
-    if (!Number.isSafeInteger(value) || value < 0) {
-      throw new Error(name + " must be a non-negative safe integer");
+    if (!Number.isSafeInteger(value) || value < NON_NEGATIVE_SAFE_INTEGER_MINIMUM) {
+      throw new StorageError(
+        STORAGE_ERROR_CODES.INVALID_SYNC_OPERATIONAL_LIMITS,
+        name + " must be a non-negative safe integer",
+      );
     }
   }
+}
+
+function aggregateCount(value: number | null): number {
+  const state = fromSqlNullable(value);
+  return state.kind === PRESENCE_KINDS.PRESENT
+    ? state.value
+    : NON_NEGATIVE_SAFE_INTEGER_MINIMUM;
 }
