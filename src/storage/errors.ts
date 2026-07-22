@@ -10,6 +10,7 @@ export const STORAGE_ERROR_CODES = {
   OBSERVATION_AUDIT_SERIALIZATION_FAILED: "observation_audit_serialization_failed",
   INVALID_READ_ONLY_OBSERVATION: "invalid_read_only_observation",
   INVALID_EFFECT_OPTIONS: "invalid_effect_options",
+  INVALID_PENDING_EFFECT: "invalid_pending_effect",
   INVALID_PROJECTION_SEED: "invalid_projection_seed",
   PROJECTION_SEED_CONFLICT: "projection_seed_conflict",
   EFFECT_WRITE_FAILED: "effect_write_failed",
