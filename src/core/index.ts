@@ -1,5 +1,12 @@
 // Core domain layer — pure evaluator and model types.
 
+export {
+  EMPTY_ARRAY_LENGTH_ZERO,
+  EMPTY_STRING_LENGTH_ZERO,
+  NON_NEGATIVE_SAFE_INTEGER_MINIMUM,
+  POSITIVE_SAFE_INTEGER_MINIMUM,
+} from "./constants.js";
+
 // Encoding
 export { stableEncode, stableHash } from "./encoding/index.js";
 export type {
@@ -67,3 +74,15 @@ export {
   applyResolution,
 } from "./conflict/index.js";
 export type { ConflictTransitionResult } from "./conflict/index.js";
+
+// Shared state contracts
+export {
+  APPLICABILITY_KINDS,
+  LOOKUP_RESULT_KINDS,
+  PRESENCE_KINDS,
+} from "./state/index.js";
+export type {
+  Applicability,
+  LookupResult,
+  Presence,
+} from "./state/index.js";
