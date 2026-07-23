@@ -1,7 +1,7 @@
-# Local planning notes
+# Local-only agent and working notes
 AGENTS.md
-typed-sheets-plan*.md
-typed-sheets-mvp-scope*.md
+.agents/
+*.local.md
 .local/
 review/
 design/
